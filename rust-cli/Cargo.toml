@@ -6,3 +6,8 @@ edition = "2021"
 [dependencies]
 rusqlite = { version = "0.31", features = ["bundled"] }
 clap = { version = "4", features = ["derive"] }
+regex = "1"
+once_cell = "1"
+# preserve_order: serde_json defaults to BTreeMap (sorted keys), which reorders
+# every MCP payload relative to Python's dict ordering.
+serde_json = { version = "1", features = ["preserve_order"] }

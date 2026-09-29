@@ -14,3 +14,9 @@ venv/
 *.db
 
 .DS_Store
+
+# Rust shell (rust-cli/): build artifacts are derived; Cargo.lock is pinned
+# per-crate and regenerated on every build, so it does not belong in the repo
+# for a binary target.
+rust-cli/target/
+rust-cli/Cargo.lock

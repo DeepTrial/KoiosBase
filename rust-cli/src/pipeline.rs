@@ -1,0 +1,276 @@
+//! Full query pipeline (§6), mirroring koiosbase/query/pipeline.py.
+//!
+//! Ported so `eval` measures the SAME code path as the Python harness:
+//! `retrieve -> grade -> optional channel ④ escalation -> generate`.
+//! Without this, a refusal case scored on a bare `hybrid_search` result is not
+//! comparable to one scored on the real pipeline answer (§6.5).
+
+use once_cell::sync::Lazy;
+use regex::Regex;
+use rusqlite::{params, Connection};
+
+use crate::retrieval::{full_corpus, hybrid_search, is_cjk};
+
+pub const REFUSAL: &str = "资料中未涉及";
+
+// Python: SENTENCE_SPLIT = re.compile(r"(?<=[。！？；!?;])\s*|\n+")
+//   — lookbehind is unsupported by the `regex` crate, so the same behaviour is
+//     hand-rolled (see split_sentences): break AFTER a terminator, or on a run
+//     of newlines. Identical semantics, different mechanism.
+static CITATION_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"\[\[([^\]]+)\]\]|\(([^()]*#[^\s()]+)\)").unwrap());
+
+fn is_sentence_end(c: char) -> bool {
+    matches!(c, '。' | '！' | '？' | '；' | '!' | '?' | ';')
+}
+
+fn split_sentences(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut pending_end = false; // saw a terminator; whitespace may follow
+    for c in text.chars() {
+        if c == '\n' {
+            pending_end = true;
+            continue;
+        }
+        if pending_end {
+            if c.is_whitespace() {
+                continue;
+            }
+            pending_end = false;
+            if !cur.trim().is_empty() {
+                out.push(cur.trim().to_string());
+            }
+            cur.clear();
+        }
+        cur.push(c);
+        if is_sentence_end(c) {
+            pending_end = true;
+        }
+    }
+    if !cur.trim().is_empty() {
+        out.push(cur.trim().to_string());
+    }
+    out
+}
+
+/// (sentences_with_citation, total_factual_sentences) — the §10.2 metric.
+pub fn citation_coverage(answer: &str) -> (usize, usize) {
+    let sentences = split_sentences(answer);
+    let cited = sentences.iter().filter(|s| CITATION_RE.is_match(s)).count();
+    (cited, sentences.len())
+}
+
+pub struct Ev {
+    pub id: String,
+    pub raw: String,
+    pub breadcrumb: String,
+    pub doc_path: String,
+}
+
+pub fn get_block(conn: &Connection, id: &str) -> Option<Ev> {
+    conn.query_row(
+        "SELECT id,raw,breadcrumb,doc_path FROM blocks WHERE id=?",
+        params![id],
+        |r| {
+            Ok(Ev {
+                id: r.get(0)?,
+                raw: r.get::<_, String>(1).unwrap_or_default(),
+                breadcrumb: r.get::<_, String>(2).unwrap_or_default(),
+                doc_path: r.get::<_, String>(3).unwrap_or_default(),
+            })
+        },
+    )
+    .ok()
+}
+
+/// Channel dispatch (retrieve_channel, channels.py) + `_to_blocks`.
+///
+/// Two filters are applied here and nowhere else, both before context assembly:
+///   * ACL (§9.2)    — a block the principal cannot see must never shape an answer
+///   * state (§8.2)  — superseded/retracted blocks are excluded from recall
+/// Skipping either one is how Python v0.1 leaked restricted docs to anonymous
+/// callers, so both stay on the hot path even though they cost a query.
+pub fn retrieve_channel(conn: &Connection, question: &str, limit: usize) -> Vec<Ev> {
+    let rows = hybrid_search(conn, question, limit, true).unwrap_or_default();
+    let mut ids: Vec<String> = rows.into_iter().map(|(i, _)| i).collect();
+    if ids.is_empty() {
+        // harness fallback: `retrieve()` when the named channel yields nothing
+        ids = hybrid_search(conn, question, limit, true)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(i, _)| i)
+            .collect();
+    }
+    let mut out: Vec<Ev> = ids.iter().filter_map(|i| get_block(conn, i)).collect();
+    out = crate::acl::filter_blocks(conn, out, None);
+    crate::state::filter_visible(conn, out)
+}
+
+/// Grader verdict over ALL evidence joined, first 2000 chars, lowercased.
+pub fn grade(question: &str, blocks: &[Ev]) -> &'static str {
+    if blocks.is_empty() {
+        return "evidence_absent";
+    }
+    let joined: String = blocks
+        .iter()
+        .map(|b| b.raw.clone())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let joined: String = joined.chars().take(2000).collect::<String>().to_lowercase();
+    let mut hits = 0usize;
+    let mut seen: Vec<char> = Vec::new();
+    for c in question.chars() {
+        if seen.contains(&c) {
+            continue;
+        }
+        seen.push(c);
+        if c.is_alphanumeric() {
+            if joined.contains(&c.to_lowercase().to_string()) {
+                hits += 1;
+            }
+        } else if is_cjk(c) && joined.contains(c) {
+            hits += 1;
+        }
+    }
+    if hits == 0 {
+        "missing"
+    } else {
+        "enough"
+    }
+}
+
+fn cjk_runs(question: &str) -> Vec<String> {
+    let mut runs: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for c in question.chars() {
+        if is_cjk(c) {
+            cur.push(c);
+        } else if !cur.is_empty() {
+            runs.push(cur.clone());
+            cur.clear();
+        }
+    }
+    if !cur.is_empty() {
+        runs.push(cur);
+    }
+    runs
+}
+
+/// True only if a REAL query term appears — never a stray single character.
+/// Mirrors pipeline._has_terms: it is what keeps the escalation path from
+/// handing the whole corpus to any question (which would break refusal §6.5).
+fn has_terms(question: &str, blocks: &[Ev]) -> bool {
+    if blocks.is_empty() {
+        return false;
+    }
+    let joined: String = blocks
+        .iter()
+        .map(|b| b.raw.clone())
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+    for run in cjk_runs(question) {
+        if run.chars().count() >= 2 && joined.contains(&run) {
+            return true;
+        }
+    }
+    for tok in question
+        .split(|c: char| !(c.is_ascii_alphanumeric()))
+        .filter(|s| !s.is_empty())
+    {
+        if joined.contains(&tok.to_lowercase()) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Context assembly with budget discipline (§6.4).
+pub fn assemble(blocks: &[Ev], budget_chars: usize) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let mut total = 0usize;
+    for b in blocks {
+        let piece = format!("[{}] ({})\n{}\n", b.id, b.breadcrumb, b.raw);
+        if total + piece.chars().count() > budget_chars {
+            let remain = budget_chars.saturating_sub(total);
+            if remain > 120 {
+                let truncated: String = piece.chars().take(remain).collect();
+                parts.push(format!("{truncated} …"));
+            }
+            break;
+        }
+        total += piece.chars().count();
+        parts.push(piece);
+    }
+    parts.join("\n---\n")
+}
+
+/// Deterministic generator (llm=None branch of pipeline.generate).
+fn generate(question: &str, _context: &str, blocks: &[Ev]) -> String {
+    if blocks.is_empty() {
+        return format!("{REFUSAL}：当前知识库中没有任何相关证据。");
+    }
+    let mut lines: Vec<String> = Vec::new();
+    for b in blocks.iter().take(3) {
+        let snippet: String = b.raw.replace('\n', " ").chars().take(180).collect();
+        lines.push(format!("- {snippet} ({})", b.id));
+    }
+    format!("检索到的证据如下：\n{}", lines.join("\n"))
+}
+
+pub struct QueryResult {
+    pub answer: String,
+    pub evidence: Vec<Ev>,
+}
+
+/// Full pipeline with Grader-driven escalation (Self-Route, §6.2).
+pub fn full_query(conn: &Connection, question: &str, top: usize) -> QueryResult {
+    let mut blocks = retrieve_channel(conn, question, top);
+    let verdict = grade(question, &blocks);
+    if verdict == "evidence_absent" {
+        let cand_ids = full_corpus(conn, 200_000).unwrap_or_default();
+        let cand: Vec<Ev> = cand_ids
+            .iter()
+            .take(top * 5)
+            .filter_map(|i| get_block(conn, i))
+            .collect();
+        if !cand.is_empty() && has_terms(question, &cand) {
+            blocks = cand;
+        }
+    }
+    let context = assemble(&blocks, 6000);
+    let answer = generate(question, &context, &blocks);
+    QueryResult { answer, evidence: blocks }
+}
+
+pub fn is_refusal(answer: &str) -> bool {
+    answer.contains(REFUSAL)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Cross-checked against koiosbase/generation/contracts.citation_coverage
+    /// on the same five strings — Python returned (1,2) (2,5) (0,1) (0,1) (1,2).
+    #[test]
+    fn citation_coverage_matches_python() {
+        let cases: Vec<(&str, (usize, usize))> = vec![
+            (
+                "营收为32亿元 (report.md#财务分析/营收/1)。现金流为正。",
+                (1, 2),
+            ),
+            (
+                "检索到的证据如下：\n- ACME 公司 2024 年营收 32 亿元。 (report.md#财务分析/营收/1)\n- 经营性现金流为正。 (report.md#财务分析/现金流/1)",
+                (2, 5),
+            ),
+            ("资料中未涉及：当前知识库中没有任何相关证据。", (0, 1)),
+            ("无标点也无引用的句子", (0, 1)),
+            ("引用 [[report.md#a/b/1]] 在句中。另一句没引用。", (1, 2)),
+        ];
+        for (text, want) in cases {
+            assert_eq!(citation_coverage(text), want, "mismatch on {:?}", text);
+        }
+    }
+}
