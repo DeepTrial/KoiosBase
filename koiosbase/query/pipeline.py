@@ -1,22 +1,29 @@
 """Query pipeline — v0.1 (design doc §6).
 
-Ships channel ② hybrid recall (vector + BM25 fused via RRF) with the ③ PPR
-graph bonus, plus the generate-stage contracts. Channels ⓪ (wiki-first) and
-① (tree navigation) arrive with the compile layer in v0.3; ④ (full-corpus)
-is the Grader escalation path (§6.2 Self-Route).
+All FOUR v0.1 channels are wired here:
+  ② hybrid recall (BM25 + optional vector, RRF-fused)
+  ③ PPR graph expansion
+  ① tree navigation (LLM-free by default; optional cross-family judge)
+  ④ full-corpus mode — also the Grader's escalation path (Self-Route, §6.2)
 
-P3 — retrieval is a decision loop, not a top-k dump. Even in v0.1 the Grader
-runs: it decides whether evidence is enough instead of blindly answering.
+P3 — retrieval is a decision loop, not a top-k dump: the Grader inspects the
+evidence and may escalate (retrieval → full corpus) rather than answering blind.
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 from ..core.block import Block
 from ..generation.contracts import REFUSAL, check_contracts
 from ..index.schema import get_block
-from ..retrieval.router import hybrid_search
+from ..retrieval.channels import (
+    full_corpus,
+    retrieve_channel,
+    tree_search,
+)
+from ..retrieval.router import CJK_RE, hybrid_search
 
 
 @dataclass
@@ -27,15 +34,37 @@ class QueryResult:
     trace: dict = field(default_factory=dict)
 
 
-def retrieve(conn, question: str, top: int = 8, use_graph: bool = True):
-    rows = hybrid_search(conn, question, limit=top, use_graph=use_graph)
-    blocks = []
-    for bid, score in rows:
+def _to_blocks(conn, ids: list[str]) -> list[dict]:
+    out = []
+    for bid in ids:
         raw = get_block(conn, bid)
         if raw:
-            raw["_score"] = score
-            blocks.append(raw)
-    return blocks
+            out.append(raw)
+    return out
+
+
+def retrieve(
+    conn,
+    question: str,
+    top: int = 8,
+    use_graph: bool = True,
+    channel: str | None = None,
+) -> list[dict]:
+    """Retrieve evidence for a question.
+
+    `channel` selects one route: hybrid | tree | full | graph. The default path
+    is ② hybrid with the ③ graph bonus, which is what most queries need.
+    """
+    if channel == "full":
+        ids = full_corpus(conn)[: top * 20]
+    elif channel == "tree":
+        ids = tree_search(conn, question)[:top]
+    elif channel:
+        ids = retrieve_channel(conn, question, channel, limit=top)
+    else:
+        rows = hybrid_search(conn, question, limit=top, use_graph=use_graph)
+        ids = [d for d, _s in rows]
+    return _to_blocks(conn, ids)
 
 
 def assemble(blocks: list[dict], budget_chars: int = 6000) -> str:
@@ -55,6 +84,29 @@ def assemble(blocks: list[dict], budget_chars: int = 6000) -> str:
     return "\n---\n".join(parts)
 
 
+def grade(question: str, blocks: list[dict]) -> str:
+    """Grader verdict (§6.2): enough | missing | conflict | evidence_absent.
+
+    Deterministic in v0.1 — the cross-family LLM Grader (P7) arrives with the
+    compile layer, but the escalation CONTRACT is already enforced here. Note
+    `evidence_absent` is reserved for genuinely zero evidence; a non-empty but
+    weakly-matching set is `missing`, which lets the caller retry another channel
+    without silently pretending the corpus has nothing.
+    """
+    if not blocks:
+        return "evidence_absent"
+    joined = " ".join(b["raw"] for b in blocks)[:2000].lower()
+    hits = 0
+    for ch in set(question):
+        if ch.isalnum():
+            hits += 1 if ch.lower() in joined else 0
+        elif "\u4e00" <= ch <= "\u9fff":
+            hits += 1 if ch in joined else 0
+    if hits == 0:
+        return "missing"
+    return "enough"
+
+
 def generate(question: str, context: str, blocks: list[dict], llm=None) -> str:
     """Generate with the three contracts enforced (§6.5).
 
@@ -65,8 +117,6 @@ def generate(question: str, context: str, blocks: list[dict], llm=None) -> str:
     if not blocks:
         return f"{REFUSAL}：当前知识库中没有任何相关证据。"
     if llm is None:
-        # Deterministic extractive fallback — used by CI so the pipeline is
-        # testable without any model dependency.
         lines = []
         for b in blocks[:3]:
             snippet = b["raw"].replace("\n", " ")[:180]
@@ -75,10 +125,58 @@ def generate(question: str, context: str, blocks: list[dict], llm=None) -> str:
     return llm(question, context)
 
 
+def _has_terms(question: str, blocks: list[dict]) -> bool:
+    """True only if a REAL query term appears — never a stray single character.
+
+    The guard intentionally ignores isolated CJK characters (年, 的, 公司…):
+    they occur in virtually any Chinese corpus, so honouring them would make the
+    escalation path hand the whole corpus to any question. Multi-char CJK terms
+    and latin/number words count; lone characters do not.
+    """
+    if not blocks:
+        return False
+    joined = " ".join(b["raw"] for b in blocks).lower()
+    runs = CJK_RE.findall(question)
+    for run in runs:
+        if len(run) >= 2 and run in joined:
+            return True
+    for tok in re.findall(r"[A-Za-z0-9]+", question):
+        if tok.lower() in joined:
+            return True
+    return False
+
+
 def query(
-    conn, question: str, top: int = 8, llm=None, use_graph: bool = True
+    conn,
+    question: str,
+    top: int = 8,
+    llm=None,
+    use_graph: bool = True,
+    allow_full: bool = True,
+    channel: str | None = None,
 ) -> QueryResult:
-    blocks = retrieve(conn, question, top=top, use_graph=use_graph)
+    """Full pipeline with Grader-driven escalation (Self-Route, §6.2).
+
+    Retrieval first; if the Grader says the evidence is absent AND the corpus is
+    small enough, escalate to channel ④ rather than fabricating.
+    """
+    blocks = retrieve(conn, question, top=top, use_graph=use_graph, channel=channel)
+    verdict = grade(question, blocks)
+    trace: dict = {
+        "question": question,
+        "hits": len(blocks),
+        "channel": channel or "hybrid+ppr",
+        "verdict": verdict,
+    }
+    if verdict == "evidence_absent" and allow_full:
+        # loophole that defeats the refusal contract (§6.5). We only escalate when
+        # the full corpus actually contains evidence for THIS question; otherwise
+        # we keep the empty result set so the refusal contract still fires.
+        cand = _to_blocks(conn, full_corpus(conn))[: top * 5]
+        if cand and _has_terms(question, cand):
+            blocks = cand
+            trace["escalated"] = "full"
+            trace["verdict"] = grade(question, blocks)
     context = assemble(blocks)
     answer = generate(question, context, blocks, llm=llm)
     violations = check_contracts(
@@ -95,8 +193,5 @@ def query(
         ],
     )
     return QueryResult(
-        answer=answer,
-        evidence=blocks,
-        violations=violations,
-        trace={"question": question, "hits": len(blocks), "channel": "hybrid+ppr"},
+        answer=answer, evidence=blocks, violations=violations, trace=trace
     )

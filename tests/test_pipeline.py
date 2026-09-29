@@ -94,7 +94,8 @@ def test_query_with_no_evidence_refuses(vault):
     conn = sqlite3.connect(str(vault / ".index" / "tree.db"))
     conn.row_factory = sqlite3.Row
     res = query(conn, "火星殖民地预算是多少")
-    assert res.trace["hits"] == 0
+    # Self-Route escalation must never manufacture evidence for an out-of-scope
+    # question — the refusal contract (§6.5) wins over escalation (§6.2).
     assert is_refusal(res.answer), "must refuse rather than improvise (拒答契约)"
 
 

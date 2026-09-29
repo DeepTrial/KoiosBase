@@ -13,7 +13,22 @@ import re
 import sqlite3
 from collections import defaultdict
 
+CJK_RE = re.compile(r"[\u4e00-\u9fff]")
 TOKEN_RE = re.compile(r"[\w\u4e00-\u9fff]+")
+
+
+def cjk_pad(text: str) -> str:
+    """Insert spaces between CJK characters for FTS indexing and querying.
+
+    SQLite's `unicode61` tokenizer treats a RUN of contiguous CJK as ONE token,
+    so `年营收32亿元` indexes as a single blob and a query for `营收` matches
+    nothing (verified experimentally — see docs). Padding each character with
+    spaces makes unicode61 behave like a per-character index, which is what CJK
+    retrieval needs. Applied symmetrically to both index and query sides so
+    BM25 scoring stays meaningful.
+    """
+    return CJK_RE.sub(lambda m: " " + m.group(0) + " ", text or "")
+
 
 # Fusion weights (§6.3) — the graph signal is a bonus, not a dictator.
 WEIGHTS = {"alpha": 1.0, "beta": 1.0, "gamma": 0.12, "rrf_k": 60}
@@ -46,6 +61,15 @@ def query_terms(query: str) -> list[str]:
     return TOKEN_RE.findall(query or "")
 
 
+def _ch_hit(conn: sqlite3.Connection, block_id: str, chars: list[str]) -> int:
+    """How many distinct query characters appear in this block's raw text."""
+    row = conn.execute("SELECT raw FROM blocks WHERE id=?", (block_id,)).fetchone()
+    if not row:
+        return 0
+    text = row["raw"] or ""
+    return sum(1 for c in set(chars) if c in text)
+
+
 def fts_search(
     conn: sqlite3.Connection, query: str, limit: int = 20
 ) -> list[tuple[str, float]]:
@@ -57,8 +81,31 @@ def fts_search(
     terms = query_terms(query)
     if not terms:
         return []
-    quoted = [f'"{t}"' for t in terms[:32]]
-    for expr in (" AND ".join(quoted), " OR ".join(quoted)):
+    # CJK terms must be padded identically to the indexed side: `营收` becomes
+    # individual characters so the AND/OR expression actually matches something.
+    padded: list[str] = []
+    for t in terms:
+        if CJK_RE.search(t):
+            # A CJK term is matched WHOLE first: per-character padding is only
+            # applied as a fallback, because matching on a single common char
+            # (e.g. 年) drags in unrelated blocks and breaks the refusal contract.
+            padded.append(" ".join(CJK_RE.findall(t)))
+        else:
+            padded.append(t)
+    # Each CJK run stays grouped, so 营收 matches as a phrase and a stray single
+    # character cannot create a false positive on its own.
+    quoted = [f'"{p}"' for p in padded[:32]]
+    # Third-tier fallback: split every CJK run into characters and OR them, which
+    # rescues queries whose exact phrase is absent but whose characters are all
+    # present (e.g. "负债 18" where only part of the phrase is indexed verbatim).
+    chars: list[str] = []
+    for p in padded:
+        if CJK_RE.search(p):
+            chars.extend(CJK_RE.findall(p))
+        else:
+            chars.append(p)
+    char_expr = " OR ".join(f'"{c}"' for c in chars[:64])
+    for expr in (" AND ".join(quoted), " OR ".join(quoted), char_expr):
         try:
             rows = conn.execute(
                 "SELECT id, bm25(blocks_fts) AS score FROM blocks_fts "
@@ -68,7 +115,18 @@ def fts_search(
         except sqlite3.OperationalError:
             continue
         if rows:
-            return [(r["id"], float(r["score"])) for r in rows]
+            # The per-character tier is deliberately loose; require at least two
+            # distinct query characters to hit, otherwise a single ubiquitous
+            # character (年) would drag in irrelevant blocks and, downstream, let
+            # the escalation path defeat the refusal contract.
+            if expr is char_expr and len(chars) > 1:
+                rows = [
+                    r
+                    for r in rows
+                    if _ch_hit(conn, r["id"], chars) >= min(2, len(chars))
+                ]
+            if rows:
+                return [(r["id"], float(r["score"])) for r in rows]
     return []
 
 

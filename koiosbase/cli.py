@@ -51,11 +51,29 @@ def build_parser() -> argparse.ArgumentParser:
     # NOTE: -p is explicit so the greedy nargs="+" query cannot swallow the path
     ps.add_argument("-p", "--path", default=".", help="vault directory")
     ps.add_argument("-k", "--top", type=int, default=8)
+    ps.add_argument(
+        "-c",
+        "--channel",
+        default=None,
+        choices=["hybrid", "tree", "full", "graph"],
+        help="force a retrieval channel (§6.1)",
+    )
     ps.set_defaults(func=lambda a: cmd_search(a))
 
     pl = sub.add_parser("lint", help="run the knowledge-health gardener")
     pl.add_argument("path", nargs="?", default=".")
     pl.set_defaults(func=cmd_lint_wrapper)
+
+    pe = sub.add_parser("eval", help="run the >=200-question eval baseline (§10.2)")
+    pe.add_argument("-p", "--path", default=".", help="vault directory")
+    pe.add_argument("-k", "--top", type=int, default=5)
+    pe.add_argument(
+        "--strict",
+        action="store_true",
+        help="fail on needs-llm cases too (off by default: those are "
+        "known v0.1 gaps awaiting the cross-family reranker)",
+    )
+    pe.set_defaults(func=cmd_eval)
 
     pc = sub.add_parser("checkclaim", help="cross-judge one claim against evidence")
     pc.add_argument("claim")
@@ -65,24 +83,46 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def cmd_eval(args) -> int:
+    """Run the seed golden set and report the §10.2 metrics."""
+    from .eval.harness import run_eval
+    from .index.schema import connect
+
+    conn = connect(Path(args.path) / ".index")
+    rep = run_eval(conn, top=args.top)
+    print(
+        f"total={rep.total} recall@1={rep.recall_at_1:.3f} "
+        f"refusal_acc={rep.refusal_accuracy:.3f} "
+        f"citation_cov={rep.citation_coverage:.3f} "
+        f"needs_llm={rep.skipped_needs_llm}"
+    )
+    blocking = (
+        rep.failures
+        if args.strict
+        else [f for f in rep.failures if not f.startswith("[needs-llm]")]
+    )
+    for f in blocking:
+        print(f"  FAIL {f}")
+    for f in rep.failures:
+        if f.startswith("[needs-llm]"):
+            print(f"  SKIP {f}")
+    conn.close()
+    return 1 if blocking else 0
+
+
 def cmd_search(args) -> int:
     vault = Path(args.path)
     conn = connect(vault / ".index")
     q = " ".join(args.query)
-    from .retrieval.router import hybrid_search
+    from .query.pipeline import retrieve
 
-    rows = hybrid_search(conn, q, limit=args.top)
-    if not rows:
+    blocks = retrieve(conn, q, top=args.top, channel=args.channel)
+    if not blocks:
         print("(no hits)")
         return 0
-    for bid, score in rows:
-        row = conn.execute(
-            "SELECT breadcrumb,raw FROM blocks WHERE id=?", (bid,)
-        ).fetchone()
-        if not row:
-            continue
-        snippet = row["raw"].replace("\n", " ")[:110]
-        print(f"[{score:.4f}] {bid}\n    {row['breadcrumb']}\n    {snippet}")
+    for i, b in enumerate(blocks):
+        snippet = b["raw"].replace("\n", " ")[:110]
+        print(f"[{i}] {b['id']}\n    {b['breadcrumb']}\n    {snippet}")
     return 0
 
 

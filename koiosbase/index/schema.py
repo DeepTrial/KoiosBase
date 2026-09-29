@@ -12,6 +12,8 @@ import json
 import sqlite3
 from pathlib import Path
 
+from ..retrieval.router import cjk_pad
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS documents (
   path TEXT PRIMARY KEY,
@@ -38,6 +40,7 @@ CREATE TABLE IF NOT EXISTS blocks (
   hash TEXT,
   page_range TEXT,
   meta TEXT,
+  ordinal INTEGER NOT NULL DEFAULT 0,
   layer TEXT NOT NULL DEFAULT 'raw'
 );
 CREATE VIRTUAL TABLE IF NOT EXISTS blocks_fts USING fts5(
@@ -92,8 +95,8 @@ def upsert_sections_and_blocks(
         )
     for b in blocks:
         conn.execute(
-            "INSERT OR REPLACE INTO blocks(id,doc_path,section_id,type,breadcrumb,raw,hash,page_range,meta,layer)"
-            " VALUES(?,?,?,?,?,?,?,?,?,?)",
+            "INSERT OR REPLACE INTO blocks(id,doc_path,section_id,type,breadcrumb,raw,hash,page_range,meta,ordinal,layer)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?)",
             (
                 b.id,
                 b.doc_path,
@@ -104,14 +107,23 @@ def upsert_sections_and_blocks(
                 b.hash,
                 json.dumps(b.page_range) if b.page_range else None,
                 json.dumps(b.meta, ensure_ascii=False),
+                b.ordinal,
                 layer,
             ),
         )
         # keep FTS mirror in sync (standalone table, so this is a real insert)
         conn.execute("DELETE FROM blocks_fts WHERE id=?", (b.id,))
+        # Store BOTH forms: the original text (so phrase terms like 营收 match)
+        # and the per-character padded form (so single-char terms also match).
+        # Storing only one breaks either phrases or characters — this duplication
+        # keeps the BM25 index usable for both without a custom tokenizer.
         conn.execute(
             "INSERT INTO blocks_fts(id,breadcrumb,raw) VALUES(?,?,?)",
-            (b.id, b.breadcrumb, b.raw),
+            (
+                b.id,
+                f"{b.breadcrumb} {cjk_pad(b.breadcrumb)}",
+                f"{b.raw} {cjk_pad(b.raw)}",
+            ),
         )
 
 

@@ -68,13 +68,26 @@ koios checkclaim "营收 32 亿元" "营收 32 亿元"
 - Markdown 解析 → 文档树 → 原子 Block（表格/代码/列表永不拆散）
 - 面包屑注入，零 LLM 成本解决指代悬空
 - 派生索引：SQLite 存 section/block、FTS5 做 BM25、wikilink 图
-- 混合检索：RRF 融合 + Personalized PageRank 图加成
+- **四通道检索**（§6.1）：①树搜索导航 ②混合 BM25/向量 RRF 融合 ③PPR 图扩展
+  ④全量模式（含 Self-Route 升级）
 - 生成契约：引用覆盖率、拒答、无证据检测
 - L1 园丁：断链 + 无源断言检查
-- 10 个 pytest 用例 + GitHub Actions CI（ruff + 3.10/3.11/3.12 测试）
+- **评测骨架**（§10.2）：输出 recall@1、拒答正确率、引用覆盖率
+- 23 个 pytest 用例 + GitHub Actions CI（ruff + 3.10/3.11/3.12 测试）
 
-尚未实现（后续版本）：编译层（entities/concepts）、通道 ⓪ wiki 优先与 ① 树搜索导航、
-PDF 适配器、VLM 抽检环；跨家族 L2 判定目前是确定性占位实现（仅实现接口）。
+```bash
+koios search "营收" -p myvault -c tree     # 指定通道 ①
+koios eval -p myvault                      # 评测基线（needs-llm 题计入不计过）
+koios eval -p myvault --strict             # 连已知语义缺口也算失败
+```
+
+诚实标注的已知限制：`koios eval` 输出 `needs_llm` 计数。这类问题关键词证据会
+误判（例如语料提到「公司」≠ 能回答「分红政策」），区分「提到」与「回答」要等 v0.3
+的跨家族 reranker/Grader；当前把它们计为缺口，不静默放过。
+
+尚未实现（后续版本）：编译层（entities/concepts，含通道 ⓪ wiki 优先与 LLM 撰写的
+导航式摘要）、PDF 适配器、VLM 抽检环；跨家族 L2 判定目前是确定性占位实现（仅实现接口）。
+v0.1 的通道 ① 树导航已由首段派生摘要驱动（无需 LLM），Grader 为确定性判据。
 
 ## 目录结构
 

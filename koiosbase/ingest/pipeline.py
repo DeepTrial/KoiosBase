@@ -47,6 +47,14 @@ def build_index(vault: Path) -> int:
         for md in iter_md(base):
             doc = parse_markdown(md, base)
             blocks = all_blocks(doc)
+            # v0.1 has no compile layer to author §4.1 navigational summaries,
+            # so derive a minimal one from the section's own content. It is a
+            # *derived* projection (rebuilt every ingest), never hand-edited —
+            # the compile layer will replace this with real LLM summaries in v0.3.
+            for s in doc.sections:
+                own = [b.raw for b in blocks if b.section_id == s.id]
+                if own and not s.summary:
+                    s.summary = own[0].replace("\n", " ")[:160]
             upsert_document(conn, doc)
             upsert_sections_and_blocks(conn, doc, blocks, layer=layer)
             # graph edges derived purely from Markdown (§5.2)
