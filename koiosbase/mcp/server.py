@@ -158,7 +158,7 @@ def handle_request(req: dict) -> dict:
             {
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "koiosbase", "version": "0.8.0"},
+                "serverInfo": {"name": "koiosbase", "version": "0.8.1"},
             }
         )
     if method == "tools/list":
