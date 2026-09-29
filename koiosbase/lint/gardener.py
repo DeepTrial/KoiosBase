@@ -156,7 +156,8 @@ def cmd_lint(args=None) -> int:
     path = "."
     if args is not None:
         path = getattr(args, "path", None) or (
-            args[0] if isinstance(args, (list, tuple)) and args else ".")
+            args[0] if isinstance(args, (list, tuple)) and args else "."
+        )
     vault = Path(path).resolve()
     conn = connect(vault / ".index")
     findings = run_l1(conn)
