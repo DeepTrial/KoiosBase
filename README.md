@@ -65,10 +65,18 @@ koios lint myvault          # L1 programmatic health checks
 koios checkclaim "营收 32 亿元" "营收 32 亿元"
 ```
 
-## Current scope (v0.1)
+## Current scope (v0.2)
 
 Shipped, per the roadmap in `docs/KoiosBase设计文档v1.3.md`:
 
+- **PDF adapter with double-tier fallback** (§5.1): CPU tier via PyMuPDF by
+  default, VLM precision tier when the page looks scanned (escalation is a
+  callable, so v0.2 ships with no model dependency)
+- **Page-level provenance**: every PDF Block records `page_range`, so citations
+  can be page-exact (`§6.5`)
+- **`sources/` guide pages** (§4.3): one derived page per raw document with a
+  reading summary and the questions it answers; regenerated on every ingest and
+  excluded from indexing so rebuilds stay idempotent (P1)
 - Markdown parser → document tree → atomic Blocks (tables/code/lists never split)
 - Breadcrumb injection for dangling-reference resolution (zero LLM cost)
 - Derived index: sections/blocks in SQLite, BM25 via FTS5, wikilink graph
@@ -77,7 +85,7 @@ Shipped, per the roadmap in `docs/KoiosBase设计文档v1.3.md`:
 - Generation contracts: citation coverage, refusal, no-evidence detection
 - L1 gardener: broken links + unsourced assertions
 - **Eval harness** (§10.2) reporting recall@1, refusal accuracy, citation coverage
-- 23 pytest cases + GitHub Actions CI (ruff + tests on 3.10/3.11/3.12)
+- 31 pytest cases + GitHub Actions CI (ruff, tests on 3.10/3.11/3.12, PDF job)
 
 ```bash
 koios search "营收" -p myvault -c tree     # force channel ①

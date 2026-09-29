@@ -42,3 +42,17 @@ jobs:
         run: ruff check koiosbase tests
       - name: Format check
         run: ruff format --check koiosbase tests
+
+  pdf:
+    # The PDF adapter needs PyMuPDF; keep it in a dedicated job so a binary-wheel
+    # hiccup cannot silently mask the core test suite.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e ".[test]"
+      - name: PDF + sources tests
+        run: python -m pytest tests/test_pdf_sources.py -q

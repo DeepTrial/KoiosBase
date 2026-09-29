@@ -17,16 +17,31 @@ from ..index.schema import (
     upsert_sections_and_blocks,
 )
 from ..parsers.markdown import all_blocks, parse_markdown
+from ..parsers.pdf import parse_pdf
 
 WIKILINK_RE = re.compile(r"\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|[^\]]*)?\]\]")
 
 
-def iter_md(root: Path):
-    for p in sorted(root.rglob("*.md")):
-        if ".git" in p.parts or ".index" in p.parts:
+UNIVERSAL_ADAPTERS = {
+    ".md": parse_markdown,
+    ".markdown": parse_markdown,
+    ".pdf": parse_pdf,
+}
+
+
+def parse_any(path: Path, root: Path):
+    """Dispatch to the right adapter by extension (§5.1: new format = new adapter)."""
+    adapter = UNIVERSAL_ADAPTERS.get(path.suffix.lower())
+    if adapter is None:
+        return None
+    return adapter(path, root)
+
+
+def iter_docs(root: Path):
+    for p in sorted(root.rglob("*")):
+        if not p.is_file() or ".git" in p.parts or ".index" in p.parts:
             continue
-        rel = p.relative_to(root)
-        if str(rel).startswith(".git"):
+        if p.suffix.lower() not in UNIVERSAL_ADAPTERS:
             continue
         yield p
 
@@ -36,21 +51,38 @@ def vault_paths(path: str | Path) -> tuple[Path, Path, Path]:
     return vault, vault / "raw", vault / ".index"
 
 
+def _is_derived_page(path: Path, base: Path) -> bool:
+    """True for pages the tool regenerates (currently only wiki/sources/).
+
+    Kept as a single predicate so new derived dirs (entities/, concepts/ when the
+    compile layer lands) can be excluded the same way without touching the loop.
+    """
+    try:
+        rel = path.relative_to(base)
+    except ValueError:
+        return False
+    return rel.parts[:1] == ("sources",)
+
+
 def build_index(vault: Path) -> int:
     conn = connect(vault / ".index")
     count = 0
+    raw_docs: list = []
     targets = [("raw", vault / "raw"), ("wiki", vault / "wiki")]
     seen_links: set[tuple[str, str, str]] = set()
     for layer, base in targets:
         if not base.exists():
             continue
-        for md in iter_md(base):
-            doc = parse_markdown(md, base)
+        for md in iter_docs(base):
+            # sources/ pages are DERIVED output (§4.3), not source truth (P1).
+            # Indexing them would feed generated pages back into the index and
+            # break idempotency — rebuilding would grow the block count forever.
+            if layer == "wiki" and _is_derived_page(md, base):
+                continue
+            doc = parse_any(md, base)
+            if doc is None:
+                continue
             blocks = all_blocks(doc)
-            # v0.1 has no compile layer to author §4.1 navigational summaries,
-            # so derive a minimal one from the section's own content. It is a
-            # *derived* projection (rebuilt every ingest), never hand-edited —
-            # the compile layer will replace this with real LLM summaries in v0.3.
             for s in doc.sections:
                 own = [b.raw for b in blocks if b.section_id == s.id]
                 if own and not s.summary:
@@ -65,6 +97,17 @@ def build_index(vault: Path) -> int:
                         seen_links.add(key)
                         add_link(conn, b.id, link.strip(), "wikilink", 1.0)
             count += len(blocks)
+            if layer == "raw" and base.name == "raw":
+                raw_docs.append((doc, blocks))
+    # v0.2: sources/ guide pages are DERIVED output of ingest (§4.3). Written
+    # only for raw-layer docs; they are Markdown truth for navigation but always
+    # regenerable, so handing them to the index happens next time round.
+    if raw_docs:
+        from datetime import date
+
+        from ..compile.sources import write_source_pages
+
+        write_source_pages(vault, raw_docs, date.today().isoformat())
     conn.commit()
     conn.close()
     return count
@@ -82,7 +125,13 @@ def cmd_ingest(argv=None) -> int:
 
 
 def cmd_init(args=None) -> int:
-    vault = Path(getattr(args, "path", ".")).resolve()
+    # Accept either an argparse Namespace or a plain argv list (callers use both).
+    path = "."
+    if args is not None:
+        path = getattr(args, "path", None) or (
+            args[0] if isinstance(args, (list, tuple)) and args else "."
+        )
+    vault = Path(path).resolve()
     for d in (
         "raw",
         "wiki/sources",

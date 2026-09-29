@@ -61,10 +61,15 @@ koios lint myvault          # L1 程序化健康检查
 koios checkclaim "营收 32 亿元" "营收 32 亿元"
 ```
 
-## 当前进度（v0.1）
+## 当前进度（v0.2）
 
-已实现（对应 `docs/KoiosBase设计文档v1.3.md` 路线图 v0.1）：
+已实现（对应 `docs/KoiosBase设计文档v1.3.md` 路线图 v0.2）：
 
+- **PDF 双档适配**（§5.1）：默认 PyMuPDF CPU 档，判定为扫描件时升级 VLM 精度档
+  （升级点为可注入 callable，v0.2 不依赖具体模型）
+- **页码级溯源**：PDF Block 记录 `page_range`，引用可精确到页（§6.5）
+- **`sources/` 导读页**（§4.3）：每篇 raw 生成一页派生导读（摘要+可回答问题），
+  每次摄入重建且不进索引，保证重建幂等（P1）
 - Markdown 解析 → 文档树 → 原子 Block（表格/代码/列表永不拆散）
 - 面包屑注入，零 LLM 成本解决指代悬空
 - 派生索引：SQLite 存 section/block、FTS5 做 BM25、wikilink 图
@@ -73,7 +78,7 @@ koios checkclaim "营收 32 亿元" "营收 32 亿元"
 - 生成契约：引用覆盖率、拒答、无证据检测
 - L1 园丁：断链 + 无源断言检查
 - **评测骨架**（§10.2）：输出 recall@1、拒答正确率、引用覆盖率
-- 23 个 pytest 用例 + GitHub Actions CI（ruff + 3.10/3.11/3.12 测试）
+- 31 个 pytest 用例 + GitHub Actions CI（ruff、3.10/3.11/3.12 测试、PDF 专项）
 
 ```bash
 koios search "营收" -p myvault -c tree     # 指定通道 ①
