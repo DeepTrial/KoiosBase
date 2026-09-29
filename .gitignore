@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+
+# KoiosBase vaults: derived indices are ALWAYS rebuildable from raw/ + wiki/
+# and must never be committed (P1 — Markdown is the single source of truth).
+.index/
+*.db
+
+.DS_Store
