@@ -61,7 +61,39 @@ def connect(index_dir: str | Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(p / "tree.db"))
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
+    _migrate(conn)
     return conn
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Add columns introduced after the first release.
+
+    `CREATE TABLE IF NOT EXISTS` is a no-op on an existing table, so a vault
+    built by an older version keeps the old column set and every later query
+    against the new column fails with 'no such column'. These ALTERs make old
+    vaults usable without a rebuild (rebuild remains available, not required).
+    """
+    for table, col, ddl in (
+        (
+            "blocks",
+            "layer",
+            "ALTER TABLE blocks ADD COLUMN layer TEXT NOT NULL DEFAULT 'raw'",
+        ),
+        (
+            "blocks",
+            "ordinal",
+            "ALTER TABLE blocks ADD COLUMN ordinal INTEGER NOT NULL DEFAULT 0",
+        ),
+        (
+            "sections",
+            "layer",
+            "ALTER TABLE sections ADD COLUMN layer TEXT NOT NULL DEFAULT 'raw'",
+        ),
+    ):
+        cols = [r[1] for r in conn.execute(f"PRAGMA table_info({table})")]
+        if cols and col not in cols:
+            conn.execute(ddl)
+    conn.commit()
 
 
 def upsert_document(conn: sqlite3.Connection, doc) -> None:

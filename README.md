@@ -65,24 +65,23 @@ koios lint myvault          # L1 programmatic health checks
 koios checkclaim "营收 32 亿元" "营收 32 亿元"
 ```
 
-## Current scope (v0.3)
+## Current scope (v0.4)
 
 Shipped, per the roadmap in `docs/KoiosBase设计文档v1.3.md`:
 
-- **Compile layer** (§5.3): entities/ pages synthesized at ingest, with the
-  affected set computed from the index — never a full library scan
-- **Quality gate** (§5.4): pages start `confidence: draft`; promotion requires
-  cross-family verification or human confirmation, **never citation counts**
-- **Answer write-back** (§6.6): an approved answer becomes a draft page carrying
-  its evidence links
-- **PPR confidence weighting** (§6.6): a source page's out-edge weight is
-  multiplied by its confidence (draft = 0), cutting the
-  "citations → authority → more citations" self-reinforcing loop
-- **PDF adapter with double-tier fallback** (§5.1), page-level provenance,
-  sources/ guide pages (§4.3)
-- Four retrieval channels (§6.1), generation contracts (§6.5), L1 gardener,
-  eval harness (§10.2)
-- 40 pytest cases + CI (ruff, 3.10/3.11/3.12, PDF job)
+- **Knowledge state machine** (§8.2): active / superseded / disputed /
+  retracted / draft, plus a page-level `stale` flag
+- **Cascading correction** (§8.3): retracting a block marks every citing page
+  stale via a reverse-index lookup — precise surgery, no re-chunk-and-re-embed
+- **Lazy synthesis update** (§8.3): source changes flag synthesis pages stale;
+  recompilation is deferred until a query actually needs them
+- **Query-time disposition** (§8.3): stale defaults to down-rank + async repair;
+  only high-risk or sole-source escalates to refuse / in-scope recompile
+- **Gardener checks** (§9.3): broken links, unsourced assertions, expired TTL,
+  stale pages, open conflicts, orphan pages
+- Compile layer, quality gate, answer write-back, PPR confidence weighting (v0.3)
+- PDF adapter, page provenance, sources/ pages (v0.2), four channels, eval (v0.1)
+- 49 pytest cases + CI (ruff, 3.10/3.11/3.12, PDF job)
 
 ```bash
 koios search "营收" -p myvault -c tree     # force channel ①

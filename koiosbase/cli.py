@@ -95,12 +95,40 @@ def build_parser() -> argparse.ArgumentParser:
     pa.add_argument("-a", "--answer", required=True)
     pa.set_defaults(func=cmd_answer)
 
+    pr = sub.add_parser(
+        "retract", help="retract a block and cascade to citing pages (§8.3)"
+    )
+    pr.add_argument("-p", "--path", default=".", help="vault directory")
+    pr.add_argument("-b", "--block", required=True, help="block id to retract")
+    pr.add_argument("-r", "--reason", default="", help="why (recorded in the cascade)")
+    pr.set_defaults(func=cmd_retract)
+
     pc2 = sub.add_parser("checkclaim", help="cross-judge one claim against evidence")
     pc2.add_argument("claim")
     pc2.add_argument("evidence")
     pc2.set_defaults(func=check_claim_cmd)
 
     return p
+
+
+def cmd_retract(args) -> int:
+    """Retract a block and mark every citing page stale (§8.3).
+
+    This is the precise surgery the three-layer model buys: the blast radius is a
+    reverse-index lookup, not a re-chunk-and-re-embed of the whole library.
+    """
+    from .index.schema import connect
+    from .state.model import cascade_retraction
+
+    vault = Path(args.path).resolve()
+    conn = connect(vault / ".index")
+    res = cascade_retraction(conn, args.block, args.reason, vault=vault)
+    print(
+        f"retracted {res['block']}; affected pages: "
+        f"{len(res['affected_pages'])} {res['affected_pages']}"
+    )
+    conn.close()
+    return 0
 
 
 def cmd_compile(args) -> int:
