@@ -75,12 +75,77 @@ def build_parser() -> argparse.ArgumentParser:
     )
     pe.set_defaults(func=cmd_eval)
 
-    pc = sub.add_parser("checkclaim", help="cross-judge one claim against evidence")
-    pc.add_argument("claim")
-    pc.add_argument("evidence")
-    pc.set_defaults(func=check_claim_cmd)
+    pc = sub.add_parser("compile", help="compile entities/ from raw (§5.3)")
+    pc.add_argument("-p", "--path", default=".", help="vault directory")
+    pc.set_defaults(func=cmd_compile)
+
+    pp = sub.add_parser("promote", help="promote a compiled page's confidence (§5.4)")
+    pp.add_argument("page", help="path to the wiki page")
+    pp.add_argument(
+        "--verified", action="store_true", help="cross-family verification passed"
+    )
+    pp.add_argument("--human", action="store_true", help="human confirmed")
+    pp.set_defaults(func=cmd_promote)
+
+    pa = sub.add_parser(
+        "answer", help="write an approved answer back to wiki/answers/ (§6.6)"
+    )
+    pa.add_argument("-p", "--path", default=".", help="vault directory")
+    pa.add_argument("-q", "--question", required=True)
+    pa.add_argument("-a", "--answer", required=True)
+    pa.set_defaults(func=cmd_answer)
+
+    pc2 = sub.add_parser("checkclaim", help="cross-judge one claim against evidence")
+    pc2.add_argument("claim")
+    pc2.add_argument("evidence")
+    pc2.set_defaults(func=check_claim_cmd)
 
     return p
+
+
+def cmd_compile(args) -> int:
+    """Compile entity/synthesis pages from the indexed raw layer (§5.3)."""
+    from .compile.pipeline import compile_vault
+
+    summary = compile_vault(Path(args.path).resolve())
+    print("compiled: " + " ".join(f"{k}={v}" for k, v in summary.items()))
+    return 0
+
+
+def cmd_promote(args) -> int:
+    """Promote one step; only via verification or human confirmation (§5.4)."""
+    from .compile.gate import promote, read_confidence
+
+    page = Path(args.page)
+    before = read_confidence(page)
+    after = promote(page, verified=args.verified, human_confirmed=args.human)
+    if after == before:
+        print(f"not promoted (still {before}): needs --verified or --human")
+        return 1
+    print(f"promoted: {before} -> {after}")
+    return 0
+
+
+def cmd_answer(args) -> int:
+    """Answer write-back: the approved answer becomes a draft page (§6.6)."""
+    from datetime import datetime, timezone
+
+    from .compile.gate import write_answer_page
+    from .index.schema import connect
+    from .query.pipeline import retrieve
+
+    vault = Path(args.path).resolve()
+    conn = connect(vault / ".index")
+    evidence = retrieve(conn, args.question, top=5)
+    path = write_answer_page(
+        vault,
+        args.question,
+        args.answer,
+        evidence,
+        datetime.now(timezone.utc).date().isoformat(),
+    )
+    print(f"wrote {path} (confidence: draft, {len(evidence)} evidence links)")
+    return 0
 
 
 def cmd_eval(args) -> int:

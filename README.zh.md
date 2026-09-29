@@ -61,24 +61,25 @@ koios lint myvault          # L1 程序化健康检查
 koios checkclaim "营收 32 亿元" "营收 32 亿元"
 ```
 
-## 当前进度（v0.2）
+## 当前进度（v0.3）
 
-已实现（对应 `docs/KoiosBase设计文档v1.3.md` 路线图 v0.2）：
+已实现（对应 `docs/KoiosBase设计文档v1.3.md` 路线图 v0.3）：
 
-- **PDF 双档适配**（§5.1）：默认 PyMuPDF CPU 档，判定为扫描件时升级 VLM 精度档
-  （升级点为可注入 callable，v0.2 不依赖具体模型）
-- **页码级溯源**：PDF Block 记录 `page_range`，引用可精确到页（§6.5）
-- **`sources/` 导读页**（§4.3）：每篇 raw 生成一页派生导读（摘要+可回答问题），
-  每次摄入重建且不进索引，保证重建幂等（P1）
-- Markdown 解析 → 文档树 → 原子 Block（表格/代码/列表永不拆散）
-- 面包屑注入，零 LLM 成本解决指代悬空
-- 派生索引：SQLite 存 section/block、FTS5 做 BM25、wikilink 图
-- **四通道检索**（§6.1）：①树搜索导航 ②混合 BM25/向量 RRF 融合 ③PPR 图扩展
-  ④全量模式（含 Self-Route 升级）
-- 生成契约：引用覆盖率、拒答、无证据检测
-- L1 园丁：断链 + 无源断言检查
-- **评测骨架**（§10.2）：输出 recall@1、拒答正确率、引用覆盖率
-- 31 个 pytest 用例 + GitHub Actions CI（ruff、3.10/3.11/3.12 测试、PDF 专项）
+- **编译层**（§5.3）：摄入时综合出 entities/ 页，受影响面由索引计算——绝不扫全库
+- **质量门**（§5.4）：新页 `confidence: draft`；晋升须异族验证或人工确认，
+  **绝不用引用计数**
+- **答案回流**（§6.6）：认可的回答落成 draft 页并携带证据链接
+- **PPR 置信加权**（§6.6）：源页出边权重 × 置信系数（draft=0），切断
+  「引用量 → 权威 → 更多引用」的自我强化回路
+- PDF 双档适配（§5.1）、页码级溯源、sources/ 导读页（§4.3）
+- 四通道检索（§6.1）、生成契约（§6.5）、L1 园丁、评测骨架（§10.2）
+- 40 个 pytest 用例 + CI（ruff、3.10/3.11/3.12、PDF 专项）
+
+```bash
+koios compile -p myvault                      # 编译 entities/（§5.3）
+koios promote wiki/entities/acme.md --verified # 晋升（须验证/人工，§5.4）
+koios answer -p myvault -q "..." -a "..."      # 答案回流（§6.6）
+```
 
 ```bash
 koios search "营收" -p myvault -c tree     # 指定通道 ①

@@ -145,11 +145,26 @@ def rrf_fuse(
     return sorted(fused.items(), key=lambda x: -x[1])
 
 
-def load_graph(conn: sqlite3.Connection) -> dict[str, list[tuple[str, float]]]:
-    """Adjacency lists from the links table (all edges derive from Markdown, §5.2)."""
+def load_graph(
+    conn: sqlite3.Connection, page_confidence: dict[str, str] | None = None
+) -> dict[str, list[tuple[str, float]]]:
+    """Adjacency lists from the links table (all edges derive from Markdown, §5.2).
+
+    When `page_confidence` is supplied, out-edge weights are multiplied by the
+    source page's confidence factor (§6.6: draft = 0). This is what prevents an
+    unverified page from conferring authority just by being cited a lot — the
+    "citations -> authority -> more citations" self-reinforcing loop.
+    """
+    from ..compile.gate import edge_weight
+
     adj: dict[str, list[tuple[str, float]]] = defaultdict(list)
-    for r in conn.execute("SELECT src,dst,weight FROM links"):
-        adj[r["src"]].append((r["dst"], r["weight"]))
+    for r in conn.execute("SELECT src,dst,kind,weight FROM links"):
+        w = float(r["weight"])
+        if page_confidence:
+            w *= edge_weight(page_confidence.get(r["src"], "draft"))
+            if w <= 0:
+                continue
+        adj[r["src"]].append((r["dst"], w))
     return adj
 
 

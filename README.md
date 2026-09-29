@@ -65,27 +65,24 @@ koios lint myvault          # L1 programmatic health checks
 koios checkclaim "营收 32 亿元" "营收 32 亿元"
 ```
 
-## Current scope (v0.2)
+## Current scope (v0.3)
 
 Shipped, per the roadmap in `docs/KoiosBase设计文档v1.3.md`:
 
-- **PDF adapter with double-tier fallback** (§5.1): CPU tier via PyMuPDF by
-  default, VLM precision tier when the page looks scanned (escalation is a
-  callable, so v0.2 ships with no model dependency)
-- **Page-level provenance**: every PDF Block records `page_range`, so citations
-  can be page-exact (`§6.5`)
-- **`sources/` guide pages** (§4.3): one derived page per raw document with a
-  reading summary and the questions it answers; regenerated on every ingest and
-  excluded from indexing so rebuilds stay idempotent (P1)
-- Markdown parser → document tree → atomic Blocks (tables/code/lists never split)
-- Breadcrumb injection for dangling-reference resolution (zero LLM cost)
-- Derived index: sections/blocks in SQLite, BM25 via FTS5, wikilink graph
-- **Four retrieval channels** (§6.1): ① tree navigation, ② hybrid BM25+vector
-  with RRF fusion, ③ PPR graph expansion, ④ full-corpus with Self-Route escalation
-- Generation contracts: citation coverage, refusal, no-evidence detection
-- L1 gardener: broken links + unsourced assertions
-- **Eval harness** (§10.2) reporting recall@1, refusal accuracy, citation coverage
-- 31 pytest cases + GitHub Actions CI (ruff, tests on 3.10/3.11/3.12, PDF job)
+- **Compile layer** (§5.3): entities/ pages synthesized at ingest, with the
+  affected set computed from the index — never a full library scan
+- **Quality gate** (§5.4): pages start `confidence: draft`; promotion requires
+  cross-family verification or human confirmation, **never citation counts**
+- **Answer write-back** (§6.6): an approved answer becomes a draft page carrying
+  its evidence links
+- **PPR confidence weighting** (§6.6): a source page's out-edge weight is
+  multiplied by its confidence (draft = 0), cutting the
+  "citations → authority → more citations" self-reinforcing loop
+- **PDF adapter with double-tier fallback** (§5.1), page-level provenance,
+  sources/ guide pages (§4.3)
+- Four retrieval channels (§6.1), generation contracts (§6.5), L1 gardener,
+  eval harness (§10.2)
+- 40 pytest cases + CI (ruff, 3.10/3.11/3.12, PDF job)
 
 ```bash
 koios search "营收" -p myvault -c tree     # force channel ①

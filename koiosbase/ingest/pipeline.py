@@ -52,16 +52,18 @@ def vault_paths(path: str | Path) -> tuple[Path, Path, Path]:
 
 
 def _is_derived_page(path: Path, base: Path) -> bool:
-    """True for pages the tool regenerates (currently only wiki/sources/).
+    """True for pages the tool regenerates (v0.2 sources/, v0.3 entities/).
 
-    Kept as a single predicate so new derived dirs (entities/, concepts/ when the
-    compile layer lands) can be excluded the same way without touching the loop.
+    Kept as a single predicate so new derived dirs (concepts/, synthesis/ when
+    they land) can be excluded the same way without touching the ingest loop.
+    Indexing derived pages would feed the compiler's own output back in, so the
+    block count would grow on every rebuild instead of staying idempotent.
     """
     try:
         rel = path.relative_to(base)
     except ValueError:
         return False
-    return rel.parts[:1] == ("sources",)
+    return rel.parts[:1] in {("sources",), ("entities",)}
 
 
 def build_index(vault: Path) -> int:
