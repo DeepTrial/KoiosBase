@@ -17,8 +17,7 @@ classifiers = [
     "Topic :: Text Processing :: Markup :: Markdown",
 ]
 
-[project.dependencies]
-pymupdf = ">=1.24"
+dependencies = ["pymupdf>=1.24"]
 
 [project.optional-dependencies]
 test = ["pytest>=8", "pymupdf>=1.24"]
