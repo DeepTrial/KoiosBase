@@ -49,6 +49,7 @@ def retrieve(
     top: int = 8,
     use_graph: bool = True,
     channel: str | None = None,
+    principal_groups: set[str] | None = None,
 ) -> list[dict]:
     """Retrieve evidence for a question.
 
@@ -64,7 +65,16 @@ def retrieve(
     else:
         rows = hybrid_search(conn, question, limit=top, use_graph=use_graph)
         ids = [d for d, _s in rows]
-    return _to_blocks(conn, ids)
+    blocks = _to_blocks(conn, ids)
+    # §9.2: ACL is enforced HERE, before context assembly — filtering after
+    # generation would leak in paraphrase, because a block that reached the model
+    # has already shaped the answer. `principal_groups=None` means ANONYMOUS and
+    # must still be filtered: treating None as "skip the check" is what leaked
+    # restricted documents to unauthenticated callers.
+    from ..security.acl import filter_rows
+
+    blocks = filter_rows(conn, blocks, principal_groups)
+    return blocks
 
 
 def assemble(blocks: list[dict], budget_chars: int = 6000) -> str:
@@ -154,13 +164,21 @@ def query(
     use_graph: bool = True,
     allow_full: bool = True,
     channel: str | None = None,
+    principal_groups: set[str] | None = None,
 ) -> QueryResult:
     """Full pipeline with Grader-driven escalation (Self-Route, §6.2).
 
     Retrieval first; if the Grader says the evidence is absent AND the corpus is
     small enough, escalate to channel ④ rather than fabricating.
     """
-    blocks = retrieve(conn, question, top=top, use_graph=use_graph, channel=channel)
+    blocks = retrieve(
+        conn,
+        question,
+        top=top,
+        use_graph=use_graph,
+        channel=channel,
+        principal_groups=principal_groups,
+    )
     verdict = grade(question, blocks)
     trace: dict = {
         "question": question,

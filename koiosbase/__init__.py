@@ -6,4 +6,4 @@ Three-layer model (see docs/KoiosBase设计文档v1.3.md):
   .index/ derived, fully rebuildable (SQLite + FTS5 + vectors + graph)
 """
 
-__version__ = "0.1.0"
+__version__ = "0.8.0"

@@ -7,6 +7,7 @@ disposable and rebuilt from raw/ + wiki/ on demand (P1).
 from __future__ import annotations
 
 import argparse
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -103,12 +104,46 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("-r", "--reason", default="", help="why (recorded in the cascade)")
     pr.set_defaults(func=cmd_retract)
 
+    ps = sub.add_parser("mcp", help="run the MCP server over stdio (§11)")
+    ps.add_argument("-p", "--path", default=".", help="default vault for tools")
+    ps.set_defaults(func=cmd_mcp)
+
+    pst = sub.add_parser("studio", help="Studio-style export: brief | mindmap (§13)")
+    pst.add_argument("kind", choices=["brief", "mindmap"])
+    pst.add_argument("-p", "--path", default=".", help="vault directory")
+    pst.add_argument("-t", "--topic", required=True)
+    pst.set_defaults(func=cmd_studio)
+
     pc2 = sub.add_parser("checkclaim", help="cross-judge one claim against evidence")
     pc2.add_argument("claim")
     pc2.add_argument("evidence")
     pc2.set_defaults(func=check_claim_cmd)
 
     return p
+
+
+def cmd_mcp(args) -> int:
+    """Serve MCP over stdio (§11). See koiosbase.mcp.server for the protocol."""
+    from .mcp.server import serve
+
+    return serve()
+
+
+def cmd_studio(args) -> int:
+    """Generate a Studio-style export (§13) from knowledge already in the vault."""
+    from .index.schema import connect
+    from .studio.exports import studio_brief, studio_mindmap
+
+    vault = Path(args.path).resolve()
+    conn = connect(vault / ".index")
+    conn.row_factory = sqlite3.Row
+    if args.kind == "brief":
+        path = studio_brief(conn, vault, args.topic)
+    else:
+        path = studio_mindmap(conn, vault, args.topic)
+    print(f"wrote {path}")
+    conn.close()
+    return 0
 
 
 def cmd_retract(args) -> int:

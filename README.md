@@ -65,23 +65,22 @@ koios lint myvault          # L1 programmatic health checks
 koios checkclaim "营收 32 亿元" "营收 32 亿元"
 ```
 
-## Current scope (v0.4)
+## Current scope (v0.8)
 
 Shipped, per the roadmap in `docs/KoiosBase设计文档v1.3.md`:
 
-- **Knowledge state machine** (§8.2): active / superseded / disputed /
-  retracted / draft, plus a page-level `stale` flag
-- **Cascading correction** (§8.3): retracting a block marks every citing page
-  stale via a reverse-index lookup — precise surgery, no re-chunk-and-re-embed
-- **Lazy synthesis update** (§8.3): source changes flag synthesis pages stale;
-  recompilation is deferred until a query actually needs them
-- **Query-time disposition** (§8.3): stale defaults to down-rank + async repair;
-  only high-risk or sole-source escalates to refuse / in-scope recompile
-- **Gardener checks** (§9.3): broken links, unsourced assertions, expired TTL,
-  stale pages, open conflicts, orphan pages
-- Compile layer, quality gate, answer write-back, PPR confidence weighting (v0.3)
+- **ACL / multi-tenancy** (§9.2): declared in frontmatter; enforced **at
+  retrieval**, so restricted text never reaches the model (masking after
+  generation leaks in paraphrase)
+- **MCP server** (§11): `koios mcp` speaks JSON-RPC over stdio and exposes
+  `koios_search`, `koios_ask`, `koios_write_answer`. Implemented against the
+  protocol directly — no SDK dependency, works offline
+- **Studio exports** (§13): `koios studio brief|mindmap` — projections that add
+  no new claims and carry citations (P6)
+- Knowledge state machine, cascade correction, lazy synthesis, gardener (v0.4)
+- Compile layer, quality gate, answer write-back, PPR weighting (v0.3)
 - PDF adapter, page provenance, sources/ pages (v0.2), four channels, eval (v0.1)
-- 49 pytest cases + CI (ruff, 3.10/3.11/3.12, PDF job)
+- 60 pytest cases + CI (ruff, 3.10/3.11/3.12, PDF job)
 
 ```bash
 koios search "营收" -p myvault -c tree     # force channel ①

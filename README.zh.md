@@ -61,21 +61,25 @@ koios lint myvault          # L1 程序化健康检查
 koios checkclaim "营收 32 亿元" "营收 32 亿元"
 ```
 
-## 当前进度（v0.4）
+## 当前进度（v0.8）
 
-已实现（对应 `docs/KoiosBase设计文档v1.3.md` 路线图 v0.4）：
+已实现（对应 `docs/KoiosBase设计文档v1.3.md` 路线图）：
 
-- **知识状态机**（§8.2）：active / superseded / disputed / retracted / draft，
-  以及页级 `stale` 标记
-- **级联传播**（§8.3）：撤回一个 Block → 反向索引找出所有引用页 → 标 stale，
-  精确手术而非重切重嵌
-- **synthesis 懒更新**（§8.3）：源变更只标 stale，真正重编推迟到查询触达时
-- **查询时状态处置**（§8.3）：stale 默认降权+异步修复；仅高风险/唯一证据源
-  才升级为拒用或限域当场重编
-- **园丁检查**（§9.3）：断链、无源断言、TTL 到期、stale 页、未决矛盾、孤儿页
+- **ACL / 多租户**（§9.2）：写在 frontmatter，**在检索阶段过滤**，受限内容绝不
+  进入模型上下文（生成后遮掩会以改写形式泄漏）
+- **MCP 服务器**（§11）：`koios mcp` 走 stdio JSON-RPC，暴露 `koios_search`、
+  `koios_ask`、`koios_write_answer`；直接按协议实现，不依赖 SDK，可离线运行
+- **Studio 输出**（§13）：`koios studio brief|mindmap`，不新增断言且带引用（P6）
+- 知识状态机、级联传播、懒更新、园丁检查（v0.4）
 - 编译层、质量门、答案回流、PPR 置信加权（v0.3）
 - PDF 适配、页码溯源、sources/ 导读页（v0.2）、四通道检索、评测骨架（v0.1）
-- 49 个 pytest 用例 + CI（ruff、3.10/3.11/3.12、PDF 专项）
+- 60 个 pytest 用例 + CI（ruff、3.10/3.11/3.12、PDF 专项）
+
+```bash
+koios mcp                                   # MCP 服务端（stdio，§11）
+koios studio brief  -p myvault -t 财务       # 简报（§13）
+koios studio mindmap -p myvault -t 年报      # 思维导图（§13）
+```
 
 ```bash
 koios retract -p myvault -b "r.md#财务/1" -r "数字错误"   # 级联传播（§8.3）
