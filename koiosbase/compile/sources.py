@@ -68,7 +68,7 @@ def build_questions(doc, blocks: list[Block], limit: int = 5) -> list[str]:
     seen = set()
     for sec in doc.sections:
         t = (sec.title or "").strip()
-        if not t or t.startswith("__") or t.startswith("p."):
+        if not t or t.startswith(("__", "p.")):
             continue
         key = t.lower()
         if key in seen:

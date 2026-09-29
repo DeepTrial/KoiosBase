@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import sys
 from collections.abc import Callable
 from pathlib import Path
 
@@ -40,6 +41,11 @@ def file_sha256(path: str | Path, limit: int = 1 << 24) -> str:
     return h.hexdigest()
 
 
+def log_skip(exc: BaseException) -> None:
+    """Record why a tier was skipped — silent degradation is undebuggable."""
+    print(f"[pdf] tier skipped: {type(exc).__name__}: {exc}", file=sys.stderr)
+
+
 def extract_pages_cpu(path: str | Path) -> list[str]:
     """Default CPU tier: text per page via PyMuPDF. Returns [] on failure."""
     try:
@@ -51,7 +57,8 @@ def extract_pages_cpu(path: str | Path) -> list[str]:
             return []
     try:
         doc = pymupdf.open(str(path))
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 - corrupt file must degrade to []
+        log_skip(exc)
         return []
     pages = []
     try:

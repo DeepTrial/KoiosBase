@@ -103,11 +103,13 @@ def build_index(vault: Path) -> int:
     # only for raw-layer docs; they are Markdown truth for navigation but always
     # regenerable, so handing them to the index happens next time round.
     if raw_docs:
-        from datetime import date
+        from datetime import datetime, timezone
 
         from ..compile.sources import write_source_pages
 
-        write_source_pages(vault, raw_docs, date.today().isoformat())
+        write_source_pages(
+            vault, raw_docs, datetime.now(timezone.utc).date().isoformat()
+        )
     conn.commit()
     conn.close()
     return count

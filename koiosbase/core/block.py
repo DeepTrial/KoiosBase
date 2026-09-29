@@ -30,7 +30,7 @@ class Block:
     doc_path: str
     ordinal: int = 0
     section_id: str | None = None
-    page_range: Optional[list] = None  # PDF only — page-level provenance
+    page_range: list | None = None  # PDF only — page-level provenance
     hash: str = ""
     meta: dict = field(default_factory=dict)
 
