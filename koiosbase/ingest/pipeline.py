@@ -68,6 +68,11 @@ def _is_derived_page(path: Path, base: Path) -> bool:
 
 def build_index(vault: Path) -> int:
     conn = connect(vault / ".index")
+    # Edges are DERIVED from Markdown (§5.2), so a rebuild must start from an
+    # empty edge set. Previously the table was only ever appended to, so every
+    # re-index duplicated every edge (5 distinct edges became 15 rows after
+    # three rebuilds), which both bloated the db and inflated PPR out-weights.
+    conn.execute("DELETE FROM links")
     count = 0
     raw_docs: list = []
     targets = [("raw", vault / "raw"), ("wiki", vault / "wiki")]

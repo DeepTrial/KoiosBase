@@ -1,0 +1,94 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            target: x86_64-unknown-linux-musl
+            asset: koios-linux-x86_64
+            bin: koios
+            # musl needs the static libc toolchain; rusqlite is `bundled`, so
+            # SQLite is compiled from source by cc-rs and needs no system lib.
+            pre: sudo apt-get update && sudo apt-get install -y musl-tools
+          - name: windows-x86_64
+            target: x86_64-pc-windows-gnu
+            asset: koios-windows-x86_64.exe
+            bin: koios.exe
+            # MSVC cannot be used from a Linux runner (its linker/lib.exe is
+            # Windows-only), so the GNU target + mingw-w64 is the way to
+            # produce a Windows binary here.
+            pre: sudo apt-get update && sudo apt-get install -y mingw-w64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross toolchain
+        run: ${{ matrix.pre }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        working-directory: rust-cli
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Smoke test (linux only — needs a POSIX shell to run)
+        if: matrix.name == 'linux-x86_64'
+        working-directory: rust-cli
+        run: |
+          set -e
+          BIN=target/${{ matrix.target }}/release/${{ matrix.bin }}
+          "$BIN" --version
+          rm -rf /tmp/smoke && "$BIN" init /tmp/smoke
+          printf -- '---\ntitle: 冒烟\n---\n\n# 章节\n\nACME 公司 2024 年营收为 32 亿元。\n' > /tmp/smoke/raw/s.md
+          "$BIN" index /tmp/smoke
+          "$BIN" search 营收 -p /tmp/smoke
+          "$BIN" lint /tmp/smoke
+
+      - name: Rename artifact
+        run: |
+          mkdir -p dist
+          cp rust-cli/target/${{ matrix.target }}/release/${{ matrix.bin }} dist/${{ matrix.asset }}
+          chmod +x dist/${{ matrix.asset }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+
+  release:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
