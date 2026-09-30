@@ -12,7 +12,12 @@ from koiosbase.ingest.pipeline import build_index
 from koiosbase.mcp.server import TOOLS, handle_request
 from koiosbase.query.pipeline import retrieve
 from koiosbase.security.acl import allowed, filter_rows, grants_for
-from koiosbase.studio.exports import render_brief, render_mindmap, studio_brief
+from koiosbase.studio.exports import (
+    render_brief,
+    render_mindmap,
+    studio_brief,
+    studio_mindmap,
+)
 
 PUBLIC_MD = "---\ntitle: 公开\n---\n# 概览\n营收 32 亿元。\n"
 SECRET_MD = "---\ntitle: 机密\nacl: [finance-team]\n---\n# 薪酬\n高管薪酬 500 万。\n"
@@ -107,6 +112,46 @@ def test_studio_brief_carries_citations(vault):
     text = path.read_text(encoding="utf-8")
     assert path.exists()
     assert "[[raw/" in text, "an export must cite its sources (P6)"
+
+
+def test_studio_brief_respects_acl(vault):
+    """§9.2 fuse: an export is PERSISTED, so a leak here outlives the request.
+
+    This is the regression lock on P0-2. `studio_brief` runs the same filter
+    chain as `retrieve()`; if anyone drops `filter_rows` from exports.py, these
+    three assertions go red instead of silently mailing restricted prose to
+    disk.
+    """
+    conn = connect(vault / ".index")
+    conn.row_factory = sqlite3.Row
+
+    anon = studio_brief(conn, vault, "薪酬", top=8, principal_groups=None)
+    assert "500 万" not in anon.read_text(encoding="utf-8"), "anonymous leaked secret"
+
+    hr = studio_brief(conn, vault, "薪酬", top=8, principal_groups={"hr"})
+    assert "500 万" not in hr.read_text(encoding="utf-8"), "wrong group leaked secret"
+
+    fin = studio_brief(conn, vault, "薪酬", top=8, principal_groups={"finance-team"})
+    assert "500 万" in fin.read_text(encoding="utf-8"), "entitled caller saw nothing"
+
+
+def test_studio_mindmap_respects_acl(vault):
+    """A section TITLE is content: 「薪酬」 alone discloses that pay data exists.
+
+    `visible_doc_paths` is what filters the tree; without a test here, removing
+    it would let restricted document names back into exports unnoticed.
+    """
+    conn = connect(vault / ".index")
+    conn.row_factory = sqlite3.Row
+
+    anon = studio_mindmap(conn, vault, "全库", principal_groups=None)
+    assert "薪酬" not in anon.read_text(encoding="utf-8"), "anonymous leaked title"
+
+    hr = studio_mindmap(conn, vault, "全库", principal_groups={"hr"})
+    assert "薪酬" not in hr.read_text(encoding="utf-8"), "wrong group leaked title"
+
+    fin = studio_mindmap(conn, vault, "全库", principal_groups={"finance-team"})
+    assert "薪酬" in fin.read_text(encoding="utf-8"), "entitled caller saw nothing"
 
 
 def test_render_brief_without_evidence_says_so():

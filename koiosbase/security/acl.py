@@ -20,7 +20,19 @@ PUBLIC = None
 
 
 def grants_for(conn: sqlite3.Connection, doc_path: str) -> list[str] | None:
-    """Read a document's acl from its frontmatter (None = public)."""
+    """Read a document's acl from its frontmatter (None = public).
+
+    NOTE on derived pages: a compiled `sources/<name>.md` is generated from a
+    raw doc but its own frontmatter carries NO acl, so a naive lookup would
+    pronounce it public and hand restricted prose to anonymous callers. Grants
+    are therefore resolved through `_origin_doc`, which maps a derived page back
+    to the raw document it was compiled from.
+    """
+    return _grants_for_path(conn, _origin_doc(conn, doc_path))
+
+
+def _grants_for_path(conn: sqlite3.Connection, doc_path: str) -> list[str] | None:
+    """The literal frontmatter read, with no derived-page indirection."""
     row = conn.execute(
         "SELECT frontmatter FROM documents WHERE path=?", (doc_path,)
     ).fetchone()
@@ -36,6 +48,31 @@ def grants_for(conn: sqlite3.Connection, doc_path: str) -> list[str] | None:
     if isinstance(acl, str):
         acl = [acl]
     return [str(a) for a in acl]
+
+
+def _origin_doc(conn: sqlite3.Connection, doc_path: str) -> str:
+    """Resolve a derived page to the raw document it was compiled from (§4.3).
+
+    A compiled `sources/<name>.md` declares `source: raw/<rel>` but not the raw
+    document's `acl`, so authorisation must be inherited rather than re-read.
+    Everything else resolves to itself.
+    """
+    if not doc_path.startswith("sources/"):
+        return doc_path
+    row = conn.execute(
+        "SELECT frontmatter FROM documents WHERE path=?", (doc_path,)
+    ).fetchone()
+    if not row:
+        return doc_path
+    try:
+        fm = json.loads(row[0] or "{}")
+    except json.JSONDecodeError:
+        return doc_path
+    origin = fm.get("source")
+    if not isinstance(origin, str):
+        return doc_path
+    rel = origin.removeprefix("raw/")
+    return rel or doc_path
 
 
 def allowed(acl: list[str] | None, principal_groups: set[str] | None) -> bool:

@@ -150,6 +150,30 @@ def test_lint_ttl_expiry(vault):
     assert check_expired_ttl(conn), "expired TTL not detected (§9.1)"
 
 
+def test_stale_evidence_is_disclosed_to_the_reader(vault):
+    """§8.3 disclosure half: a stale page's answer must SAY it is stale.
+
+    `apply_disposition` only re-orders, which is invisible to a reader — they
+    would get an answer resting on sources that have moved on and never know.
+    The （待更新）marker is the cheap half of the contract; async recompile is
+    still a backlog item because §5.3 forbids blocking on it.
+    """
+    from koiosbase.query.pipeline import query
+    from koiosbase.state.model import mark_stale
+
+    conn = sqlite3.connect(str(vault / ".index" / "tree.db"))
+    conn.row_factory = sqlite3.Row
+    ensure_tables(conn)
+
+    fresh = query(conn, "营收", top=5)
+    assert "待更新" not in fresh.answer, "clean corpus must not be flagged"
+
+    mark_stale(conn, "r.md", "源文档已更新")
+    stale = query(conn, "营收", top=5)
+    assert "待更新" in stale.answer, "stale source cited without disclosure"
+    assert stale.trace.get("stale_pages") == ["r.md"], "trace must name the page"
+
+
 def test_run_l1_survives_legacy_schema(tmp_path):
     """Old vaults lack the layer column; lint must degrade, not crash."""
     conn = sqlite3.connect(str(tmp_path / "legacy.db"))

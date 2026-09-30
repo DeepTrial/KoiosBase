@@ -172,15 +172,28 @@ def _cited(snippet: str, block_id: str) -> str:
     return f"- {snippet} [[raw/{block_id}]]"
 
 
-def generate(question: str, context: str, blocks: list[dict], llm=None) -> str:
+def generate(
+    question: str,
+    context: str,
+    blocks: list[dict],
+    llm=None,
+    stale_paths: set[str] | None = None,
+) -> str:
     """Generate with the three contracts enforced (§6.5).
 
     Refusal contract: with zero evidence we return the refusal marker instead of
     letting a model improvise. Citation contract: each cited sentence repeats the
     evidence id so the chain reaches the raw block.
+
+    `stale_paths` implements the *disclosure* half of §8.3: `apply_disposition`
+    only re-orders, so a reader would still get a stale page's answer with no
+    hint that its sources moved on. Citing a block whose page is stale appends
+    （待更新）to that line. Async recompile stays a backlog item — §5.3 forbids
+    blocking availability on it.
     """
     if not blocks:
         return f"{REFUSAL}：当前知识库中没有任何相关证据。"
+    stale_paths = stale_paths or set()
     if llm is None:
         # The built-in generator must pass `check_contracts` like any other
         # producer — a header line with no citation made every default answer a
@@ -188,7 +201,10 @@ def generate(question: str, context: str, blocks: list[dict], llm=None) -> str:
         lines = []
         for b in blocks[:3]:
             snippet = b["raw"].replace("\n", " ")[:180]
-            lines.append(_cited(snippet, b["id"]))
+            line = _cited(snippet, b["id"])
+            if (b.get("doc_path") or "") in stale_paths:
+                line += " （待更新）"
+            lines.append(line)
         return "\n".join(lines)
     return llm(question, context)
 
@@ -254,7 +270,20 @@ def query(
             trace["escalated"] = "full"
             trace["verdict"] = grade(question, blocks)
     context = assemble(blocks)
-    answer = generate(question, context, blocks, llm=llm)
+    # Which cited pages are behind their sources (§8.3). `apply_disposition`
+    # already sank them in the ordering; `generate` turns that into something
+    # the reader can actually see.
+    from ..state.model import page_dispositions
+
+    disp = page_dispositions(conn, [b.get("doc_path") or "" for b in blocks])
+    stale_paths = {
+        p
+        for p, d in disp.items()
+        if d in {"downrank_and_async_recompile", "refuse_or_recompile"}
+    }
+    if stale_paths:
+        trace["stale_pages"] = sorted(stale_paths)
+    answer = generate(question, context, blocks, llm=llm, stale_paths=stale_paths)
     violations = check_contracts(
         answer,
         [
