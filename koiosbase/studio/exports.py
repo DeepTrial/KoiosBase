@@ -115,18 +115,42 @@ def render_mindmap(
     )
 
 
+def _load_blocks(
+    conn: sqlite3.Connection, bids: list[str]
+) -> list[dict]:
+    """Fetch full rows for ids, dropping any that vanished since scoring."""
+    out = []
+    for bid in bids:
+        row = conn.execute("SELECT * FROM blocks WHERE id=?", (bid,)).fetchone()
+        if row:
+            out.append(dict(row))
+    return out
+
+
 def studio_brief(
-    conn: sqlite3.Connection, vault: str | Path, topic: str, top: int = 8
+    conn: sqlite3.Connection,
+    vault: str | Path,
+    topic: str,
+    top: int = 8,
+    principal_groups: set[str] | None = None,
 ) -> Path:
+    """Export a brief — filtered by ACL, like every other read path (§9.2).
+
+    Exports are the worst place to leak: unlike a chat answer, a brief is written
+    to disk and outlives the request, so a restricted sentence in an export is a
+    persisted breach rather than a transient one. Same three filters as
+    `retrieve()` — ACL, then retracted, then stale disposition.
+    """
     from ..retrieval.router import hybrid_search
+    from ..security.acl import filter_rows
+    from ..state.model import apply_disposition, filter_visible
 
     vault = Path(vault)
     rows = hybrid_search(conn, topic, limit=top)
-    blocks = []
-    for bid, _s in rows:
-        row = conn.execute("SELECT * FROM blocks WHERE id=?", (bid,)).fetchone()
-        if row:
-            blocks.append(dict(row))
+    blocks = _load_blocks(conn, [bid for bid, _s in rows])
+    blocks = filter_rows(conn, blocks, principal_groups)
+    blocks = filter_visible(blocks, conn)
+    blocks = apply_disposition(conn, blocks)
     out = vault / "wiki" / "synthesis"
     out.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).date().isoformat()
@@ -136,12 +160,27 @@ def studio_brief(
     return target
 
 
-def studio_mindmap(conn: sqlite3.Connection, vault: str | Path, root: str) -> Path:
-    """Build a mindmap from the section tree — structure, not new claims."""
+def studio_mindmap(
+    conn: sqlite3.Connection,
+    vault: str | Path,
+    root: str,
+    principal_groups: set[str] | None = None,
+) -> Path:
+    """Build a mindmap from the section tree — structure, not new claims.
+
+    A section TITLE is content too: a page named 「收购对价细节」 leaks that the
+    acquisition exists even before you read a sentence. So titles are filtered
+    with the same ACL as text (§9.2) — `visible_paths` was written for exactly
+    this but nothing called it.
+    """
+    from ..security.acl import visible_doc_paths
+
     vault = Path(vault)
+    visible = visible_doc_paths(conn, principal_groups)
     rows = conn.execute(
         "SELECT doc_path,title,parent_id FROM sections ORDER BY doc_path, ordinal"
     ).fetchall()
+    rows = [r for r in rows if visible(r["doc_path"])]
     by_parent: dict[str, list[str]] = {}
     for r in rows:
         key = r["parent_id"] or r["doc_path"]

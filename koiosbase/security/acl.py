@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Callable
 
 # An empty/absent acl means unrestricted.
 PUBLIC = None
@@ -79,9 +80,33 @@ def _any_restricted(conn: sqlite3.Connection) -> bool:
 def visible_paths(
     conn: sqlite3.Connection, principal_groups: set[str] | None
 ) -> list[str]:
-    """Which documents this principal can see (used by Studio exports)."""
+    """Which documents this principal can see (used by Studio exports).
+
+    A section title is content too, so tree/mindmap views filter by document
+    rather than by block text.
+    """
     out = []
+    cache: dict[str, list[str] | None] = {}
     for r in conn.execute("SELECT path FROM documents").fetchall():
-        if allowed(grants_for(conn, r[0]), principal_groups):
-            out.append(r[0])
+        path = r[0]
+        if path not in cache:
+            cache[path] = grants_for(conn, path)
+        if allowed(cache[path], principal_groups):
+            out.append(path)
     return out
+
+
+def visible_doc_paths(
+    conn: sqlite3.Connection, principal_groups: set[str] | None
+) -> Callable[[str], bool]:
+    """Membership predicate over visible documents, read ONCE (§9.2).
+
+    A closure so a caller filtering thousands of rows does one pass over
+    `documents` instead of one lookup per row. Anonymous callers over a corpus
+    with no acl anywhere short-circuit to everything-visible — the common case,
+    and `filter_rows` already established that _any_restricted must stay cheap.
+    """
+    if principal_groups is None and not _any_restricted(conn):
+        return lambda _path: True
+    seen = set(visible_paths(conn, principal_groups))
+    return lambda path: path in seen

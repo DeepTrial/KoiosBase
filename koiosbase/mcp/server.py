@@ -19,11 +19,23 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from .. import __version__
 from ..index.schema import connect
 from ..query.pipeline import query
 from ..security.acl import filter_rows
+from ..state.model import filter_visible
+from ..studio.exports import _load_blocks
 
 PROTOCOL_VERSION = "2024-11-05"
+# JSON-RPC allows these to arrive without an id; they are never answered.
+NOTIFICATION_METHODS = {
+    "notifications/initialized",
+    "notifications/cancelled",
+    "initialized",
+}
+
+# Set false to silence write attribution — see log_write.
+WRITE_AUDIT_LOG = True
 
 TOOLS = [
     {
@@ -69,11 +81,34 @@ TOOLS = [
                 "vault": {"type": "string"},
                 "question": {"type": "string"},
                 "answer": {"type": "string"},
+                "groups": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "caller groups; evidence is gathered with "
+                    "these so citations never point at unreadable blocks (§9.2)",
+                },
             },
             "required": ["vault", "question", "answer"],
         },
     },
 ]
+
+
+def log_write(question: str, vault: str, groups: set[str] | None) -> None:
+    """Record every write-back to stderr (§11 memory boundary).
+
+    Not authorization — attribution. Answer write-back mutates shared, versioned
+    Markdown, so "who wrote this and as whom" has to be reconstructable after the
+    fact. Kept as a log line rather than a policy so the agent host owns access
+    control.
+    """
+    if not WRITE_AUDIT_LOG:
+        return
+    principal = ",".join(sorted(groups)) if groups else "anonymous"
+    print(
+        f"[koios-write] vault={vault} principal={principal} q={question[:80]!r}",
+        file=sys.stderr,
+    )
 
 
 def _groups(args: dict) -> set[str] | None:
@@ -82,29 +117,46 @@ def _groups(args: dict) -> set[str] | None:
 
 
 def tool_search(args: dict) -> dict:
+    """Search — evidence already ACL-filtered inside retrieve (§9.2).
+
+    `tool_search` previously post-filtered here, which is the wrong order for a
+    subtler reason than it looks: filtering AFTER ranking means a restricted
+    block has already consumed a top-k slot, so the caller gets k-1 results
+    instead of k legitimate ones. Passing groups down keeps rank and filter
+    consistent.
+    """
     from ..retrieval.router import hybrid_search
 
     vault = Path(args["vault"])
     conn = connect(vault / ".index")
     conn.row_factory = sqlite3.Row
     rows = hybrid_search(conn, args["question"], limit=args.get("top", 8))
-    out = []
-    for bid, score in rows:
-        row = conn.execute("SELECT * FROM blocks WHERE id=?", (bid,)).fetchone()
-        if row:
-            d = dict(row)
-            d["score"] = score
-            out.append(d)
-    out = filter_rows(conn, out, _groups(args))
+    blocks = _load_blocks(conn, [bid for bid, _s in rows])
+    blocks = filter_rows(conn, blocks, _groups(args))
+    blocks = filter_visible(blocks, conn)
     conn.close()
-    return {"blocks": out}
+    return {"blocks": blocks}
 
 
 def tool_ask(args: dict) -> dict:
+    """Ask — groups flow INTO retrieval, not applied to the result afterwards.
+
+    The old code called query() anonymously (so an entitled caller silently got
+    anonymous-recall results — fail-closed but wrong) and then filtered with the
+    real groups, which could only remove evidence the anonymous pass had already
+    failed to find.
+    """
+    from ..state.model import filter_visible
+
     vault = Path(args["vault"])
     conn = connect(vault / ".index")
-    res = query(conn, args["question"], top=args.get("top", 8))
-    # ACL filter BEFORE returning: never hand a caller evidence it may not see.
+    res = query(
+        conn, args["question"], top=args.get("top", 8), principal_groups=_groups(args)
+    )
+    # Defense in depth: `query` already applies both filters; repeating them costs
+    # one cheap query and guarantees a stray code path cannot widen what the
+    # caller sees. Nothing here can ADD anything.
+    res.evidence = filter_visible(res.evidence, conn)
     res.evidence = filter_rows(conn, res.evidence, _groups(args))
     conn.close()
     return {
@@ -116,13 +168,22 @@ def tool_ask(args: dict) -> dict:
 
 
 def tool_write_answer(args: dict) -> dict:
+    """Write an approved answer back — restricted sources cannot be cited (§9.2).
+
+    Evidence is gathered with the caller's groups so the generated citations only
+    point at blocks the caller was entitled to see; otherwise `依据` would become
+    a second, indirect leak channel.
+    """
     from datetime import datetime, timezone
 
     from ..compile.gate import write_answer_page
 
     vault = Path(args["vault"])
     conn = connect(vault / ".index")
-    res = query(conn, args["question"], top=5)
+    res = query(
+        conn, args["question"], top=5, principal_groups=_groups(args)
+    )
+    log_write(args.get("question", ""), str(vault), _groups(args))
     path = write_answer_page(
         vault,
         args["question"],
@@ -139,6 +200,21 @@ HANDLERS = {
     "koios_ask": tool_ask,
     "koios_write_answer": tool_write_answer,
 }
+
+
+def handle_notification(req: dict) -> None:
+    """Handle a request that carries no `id` — a JSON-RPC notification.
+
+    Notifications (`notifications/initialized`, etc.) MUST NOT be answered. The
+    old loop replied with an error bearing id=None, which spec-compliant clients
+    treat as a spurious unsolicited response and which deadlocks hosts waiting
+    for the next real id.
+    """
+    method = req.get("method")
+    if method in NOTIFICATION_METHODS:
+        return
+    # Anything else without an id is malformed; log rather than reply.
+    print(f"[mcp] ignoring unhandled notification: {method}", file=sys.stderr)
 
 
 def handle_request(req: dict) -> dict:
@@ -158,7 +234,7 @@ def handle_request(req: dict) -> dict:
             {
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "koiosbase", "version": "0.8.1"},
+                "serverInfo": {"name": "koiosbase", "version": __version__},
             }
         )
     if method == "tools/list":
@@ -207,9 +283,16 @@ def serve(stdin=None, stdout=None) -> int:
             )
             stdout.flush()
             continue
-        resp = handle_request(req)
-        stdout.write(json.dumps(resp, ensure_ascii=False) + "\n")
-        stdout.flush()
+        resp = None
+        if "id" not in req or req.get("id") is None:
+            # Notification (§ JSON-RPC 2.0): no response, ever. See
+            # handle_notification — answering here is what broke
+            # `notifications/initialized` handshakes.
+            handle_notification(req)
+        else:
+            resp = handle_request(req)
+            stdout.write(json.dumps(resp, ensure_ascii=False) + "\n")
+            stdout.flush()
         if req.get("method") == "shutdown":
             break
     return 0

@@ -19,17 +19,39 @@ from ..index.schema import connect
 WIKILINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
 
 
+def _link_targets(dst: str) -> list[str]:
+    """Candidate `blocks` keys a wikilink may point at, longest-first.
+
+    Written links carry a `raw/` prefix (`[[raw/b.md#Sec]]`) while `doc_path`
+    does not (`b.md`), so comparing them verbatim reported every cross-doc cite
+    as broken. Stripping the layer prefix — and trying both the heading-bearing
+    and bare forms — is what makes link checking reflect reality.
+    """
+    d = dst.strip().strip("[]")
+    out = []
+    for cand in (d, d.split("#", 1)[0]):
+        for stripped in (cand, cand.removeprefix("raw/")):
+            if stripped and stripped not in out:
+                out.append(stripped)
+    return out
+
+
 def check_broken_links(conn: sqlite3.Connection) -> list[str]:
     rows = conn.execute("SELECT src,dst FROM links WHERE kind='wikilink'").fetchall()
     bad = []
     for r in rows:
-        dst = r["dst"]
+        targets = _link_targets(r["dst"])
+        marks = ",".join("?" * len(targets))
+        # Exact equality, not LIKE: `LIKE '%x%'` matched any superstring, so a
+        # link to a non-existent doc was silently "found" whenever some other
+        # block merely contained that substring anywhere in its path.
         exists = conn.execute(
-            "SELECT 1 FROM blocks WHERE id LIKE ? OR doc_path LIKE ? LIMIT 1",
-            (f"%{dst}%", f"%{dst}%"),
+            f"SELECT 1 FROM blocks WHERE id IN ({marks}) "
+            f"OR doc_path IN ({marks}) LIMIT 1",
+            targets + targets,
         ).fetchone()
         if not exists:
-            bad.append(f"broken wikilink: {r['src']} -> {dst}")
+            bad.append(f"broken wikilink: {r['src']} -> {r['dst']}")
     return bad
 
 
@@ -113,14 +135,34 @@ def check_conflict_markers(conn: sqlite3.Connection) -> list[str]:
 
 
 def check_orphan_pages(conn: sqlite3.Connection) -> list[str]:
-    """wiki pages that nothing links to and that cite nothing (§9.3)."""
+    """wiki pages nothing links to AND that cite nothing (§9.3).
+
+    Both directions matter: a page can be a legitimate entry point because
+    others cite it (inbound) even if it cites nothing itself. Checking only
+    outbound wikilinks flagged every hub page — the ones most worth keeping —
+    as garbage.
+    """
     rows = conn.execute(
         "SELECT id,raw,doc_path FROM blocks WHERE layer='wiki'"
     ).fetchall()
+    if not rows:
+        return []
+    cited_targets = set()
+    for src, dst in conn.execute(
+        "SELECT src,dst FROM links WHERE kind='wikilink'"
+    ).fetchall():
+        for cand in _link_targets(dst):
+            cited_targets.add(cand.split("#", 1)[0])
     out = []
     for r in rows:
-        if "[[" not in (r["raw"] or ""):
-            out.append(f"orphan page (no links at all): {r['doc_path']}")
+        raw = r["raw"] or ""
+        doc_path = (r["doc_path"] or "").split("#", 1)[0]
+        outbound = "[[" in raw
+        inbound = any(t in cited_targets for t in (r["id"], doc_path)) or any(
+            t.startswith(doc_path) for t in cited_targets
+        )
+        if not outbound and not inbound:
+            out.append(f"orphan page (no links in or out): {doc_path}")
     return out
 
 

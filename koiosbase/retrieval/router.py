@@ -12,6 +12,7 @@ from __future__ import annotations
 import re
 import sqlite3
 from collections import defaultdict
+from pathlib import Path
 
 CJK_RE = re.compile(r"[\u4e00-\u9fff]")
 TOKEN_RE = re.compile(r"[\w\u4e00-\u9fff]+")
@@ -32,6 +33,9 @@ def cjk_pad(text: str) -> str:
 
 # Fusion weights (§6.3) — the graph signal is a bonus, not a dictator.
 WEIGHTS = {"alpha": 1.0, "beta": 1.0, "gamma": 0.12, "rrf_k": 60}
+# Scales PPR mass into RRF score units — see hybrid_search. Named because a bare
+# `10` in the scoring line read as a tuned magic number with no stated reason.
+PPR_GAIN = 10.0
 
 
 def tokenize(text: str) -> list[str]:
@@ -52,22 +56,44 @@ def tokenize(text: str) -> list[str]:
 def query_terms(query: str) -> list[str]:
     """Split a query into FTS terms.
 
-    IMPORTANT: unlike :func:`tokenize`, this does NOT explode CJK into single
-    characters. SQLite's `unicode61` tokenizer indexes contiguous CJK runs, so
-    `营收` matches while `营 AND 收` matches nothing. Keeping multi-char CJK
-    terms whole is what makes exact surface matching work for terms and part
-    numbers alike (§8.4 vocabulary-level defence).
+    IMPORTANT: unlike :func:`tokenize`, this does NOT pre-explode CJK into
+    single characters — it hands whole CJK runs back to the caller. SQLite's
+    `unicode61` tokenizer indexes contiguous CJK runs, so `营收` matches while
+    `营 AND 收` matches nothing, and keeping multi-char terms whole is what makes
+    exact surface matching work for part numbers too (§8.4 vocabulary-level
+    defence).
+
+    This is NOT in conflict with `fts_search`, which does later split CJK into
+    characters: that happens in the third-tier fallback AFTER whole-term and
+    whole-run matching have failed, and it is guarded by a `_ch_hits` threshold,
+    whereas `tokenize` explodes CJK unconditionally for indexing padding.
     """
     return TOKEN_RE.findall(query or "")
 
 
-def _ch_hit(conn: sqlite3.Connection, block_id: str, chars: list[str]) -> int:
-    """How many distinct query characters appear in this block's raw text."""
-    row = conn.execute("SELECT raw FROM blocks WHERE id=?", (block_id,)).fetchone()
-    if not row:
-        return 0
-    text = row["raw"] or ""
-    return sum(1 for c in set(chars) if c in text)
+def _ch_hits(
+    conn: sqlite3.Connection, block_ids: list[str], chars: list[str]
+) -> dict[str, int]:
+    """Batch character-overlap counts — one query instead of one-per-block.
+
+    The per-character FTS fallback runs over every candidate row, so the old
+    row-at-a-time version issued one SELECT per block; at top-k that was the
+    dominant cost of the loose tier.
+    """
+    wanted = [c for c in dict.fromkeys(chars) if c]
+    if not wanted or not block_ids:
+        return {}
+    out: dict[str, int] = {}
+    for i in range(0, len(block_ids), 400):
+        chunk = block_ids[i : i + 400]
+        marks = ",".join("?" * len(chunk))
+        rows = conn.execute(
+            f"SELECT id,raw FROM blocks WHERE id IN ({marks})", chunk
+        ).fetchall()
+        for r in rows:
+            text = r["raw"] or ""
+            out[r["id"]] = sum(1 for c in wanted if c in text)
+    return out
 
 
 def fts_search(
@@ -120,10 +146,11 @@ def fts_search(
             # character (年) would drag in irrelevant blocks and, downstream, let
             # the escalation path defeat the refusal contract.
             if expr is char_expr and len(chars) > 1:
+                hits = _ch_hits(conn, [r["id"] for r in rows], chars)
                 rows = [
                     r
                     for r in rows
-                    if _ch_hit(conn, r["id"], chars) >= min(2, len(chars))
+                    if hits.get(r["id"], 0) >= min(2, len(chars))
                 ]
             if rows:
                 return [(r["id"], float(r["score"])) for r in rows]
@@ -143,6 +170,98 @@ def rrf_fuse(
         for rank, (doc_id, _score) in enumerate(ranks, start=1):
             fused[doc_id] += w * (1.0 / (k + rank))
     return sorted(fused.items(), key=lambda x: -x[1])
+
+
+def build_page_confidence(conn: sqlite3.Connection) -> dict[str, str]:
+    """Map link-source → its confidence, so PPR can discount drafts (§6.6).
+
+    Keys must be whatever appears in `links.src`, and that column holds a BLOCK
+    id (`report.md#财务分析/1`), not a document path — keying by path would miss
+    every lookup, fall through to the "draft" default and zero the entire graph.
+    So each distinct src is resolved to its owning document's confidence, and raw
+    documents default to `high`: they are human-authored source of truth (P1),
+    not machine-generated drafts, and treating them as drafts would throw away
+    the authority the §6.6 gate is meant to preserve.
+
+    The frontmatter lives on disk for wiki pages (Markdown is SoT, P1); the
+    indexed `documents.frontmatter` is only used for the quick path.
+    """
+    out: dict[str, str] = {}
+    root = _vault_root(conn)
+    try:
+        sources = conn.execute(
+            "SELECT DISTINCT l.src AS src, b.layer AS layer, b.doc_path AS doc_path"
+            " FROM links l LEFT JOIN blocks b ON b.id = l.src"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return {}
+    cache: dict[str, str] = {}
+    for r in sources:
+        src = r["src"]
+        layer = r["layer"] or "raw"
+        doc_path = r["doc_path"]
+        if layer == "raw":
+            out[src] = "high"
+            continue
+        if doc_path in cache:
+            out[src] = cache[doc_path]
+            continue
+        conf = None
+        if root is not None and doc_path:
+            for cand in (root / "wiki" / doc_path, root / doc_path):
+                if cand.exists():
+                    conf = _frontmatter_confidence(_read_text(cand))
+                    if conf is not None:
+                        break
+        if conf is None:
+            row = conn.execute(
+                "SELECT frontmatter FROM documents WHERE path=?", (doc_path,)
+            ).fetchone()
+            conf = _frontmatter_confidence(row["frontmatter"] if row else None)
+        conf = conf or "draft"
+        cache[doc_path] = conf
+        out[src] = conf
+    return out
+
+
+def _vault_root(conn: sqlite3.Connection):
+    """Vault root implied by the index path, or None when undiscoverable."""
+    try:
+        row = conn.execute(
+            "SELECT name FROM pragma_database_list WHERE seq=0"
+        ).fetchone()
+        db = Path(row[0]) if row and row[0] else None
+    except sqlite3.Error:
+        db = None
+    if db is None or len(db.parents) < 2:
+        return None
+    return db.parent.parent  # <vault>/.index/tree.db
+
+
+def _read_text(path) -> str | None:
+    try:
+        return Path(path).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def _frontmatter_confidence(fm_text: str | None) -> str | None:
+    """Read `confidence:` out of a frontmatter string or file body."""
+    import json as _json
+    import re as _re
+
+    if not fm_text:
+        return None
+    text = fm_text
+    if text.lstrip().startswith("{"):
+        try:
+            fm = _json.loads(text)
+        except _json.JSONDecodeError:
+            return None
+        val = fm.get("confidence")
+        return str(val) if val else None
+    m = _re.search(r"^confidence:\s*(\w+)", text, _re.MULTILINE)
+    return m.group(1) if m else None
 
 
 def load_graph(
@@ -231,8 +350,15 @@ def hybrid_search(
     limit: int = 20,
     vector_rank: list[tuple[str, float]] | None = None,
     use_graph: bool = True,
+    page_confidence: dict[str, str] | None = None,
 ) -> list[tuple[str, float]]:
-    """Channel ② hybrid recall (+ ③ graph bonus when a link graph exists)."""
+    """Channel ② hybrid recall (+ ③ graph bonus when a link graph exists).
+
+    `page_confidence` defaults to being *built* rather than left None: leaving it
+    None is what made §6.6 dead code — every caller got the unweighted graph, so
+    a draft page's citations conferred exactly as much authority as a verified
+    one's. Callers that already have the map pass it to avoid rebuilding it.
+    """
     lists = [fts_search(conn, query, limit=limit * 3)]
     weights = [WEIGHTS["beta"]]
     if vector_rank:
@@ -240,9 +366,19 @@ def hybrid_search(
         weights.append(WEIGHTS["alpha"])
     fused = rrf_fuse(lists, k=WEIGHTS["rrf_k"], weights=weights)
     if use_graph:
-        adj = load_graph(conn)
+        if page_confidence is None:
+            page_confidence = build_page_confidence(conn)
+        adj = load_graph(conn, page_confidence=page_confidence)
         pr = personalized_pagerank([d for d, _ in fused[: min(50, len(fused))]], adj)
         if pr:
-            fused = [(d, s + WEIGHTS["gamma"] * pr.get(d, 0.0) * 10) for d, s in fused]
+            # PPR mass is ~1/len(nodes) — a tiny absolute number — while RRF terms
+            # are ~1/(60+rank). The factor only rescales the graph bonus into the
+            # same order of magnitude as the fusion score so WEIGHTS['gamma']
+            # means "a small nudge", not "invisible". It is deliberately NOT a
+            # relevance judgement: ranking still comes from BM25 + RRF.
+            fused = [
+                (d, s + WEIGHTS["gamma"] * pr.get(d, 0.0) * PPR_GAIN)
+                for d, s in fused
+            ]
             fused.sort(key=lambda x: -x[1])
     return fused[:limit]

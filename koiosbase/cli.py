@@ -34,6 +34,19 @@ def cmd_init_wrapper(args) -> int:
     return cmd_init(_ns_to_argv(args, ("path",)))
 
 
+def parse_groups(args) -> set[str] | None:
+    """`--groups a,b` → the principal's set; absent ⇒ anonymous (never "skip").
+
+    Anonymous is a real principal that sees only public documents — it must NOT
+    default to a no-op check, which is how restricted docs leaked (§9.2).
+    """
+    raw = getattr(args, "groups", None)
+    if not raw:
+        return None
+    parts = [p.strip() for p in raw.split(",") if p.strip()]
+    return set(parts) or None
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="koios", description="KoiosBase CLI")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -59,6 +72,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["hybrid", "tree", "full", "graph"],
         help="force a retrieval channel (§6.1)",
     )
+    ps.add_argument("--groups", help="principal groups for ACL (§9.2), comma separated")
     ps.set_defaults(func=lambda a: cmd_search(a))
 
     pl = sub.add_parser("lint", help="run the knowledge-health gardener")
@@ -102,6 +116,7 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("-p", "--path", default=".", help="vault directory")
     pr.add_argument("-b", "--block", required=True, help="block id to retract")
     pr.add_argument("-r", "--reason", default="", help="why (recorded in the cascade)")
+    pr.add_argument("--groups", help="principal groups for ACL (§9.2), comma separated")
     pr.set_defaults(func=cmd_retract)
 
     ps = sub.add_parser("mcp", help="run the MCP server over stdio (§11)")
@@ -112,6 +127,7 @@ def build_parser() -> argparse.ArgumentParser:
     pst.add_argument("kind", choices=["brief", "mindmap"])
     pst.add_argument("-p", "--path", default=".", help="vault directory")
     pst.add_argument("-t", "--topic", required=True)
+    pst.add_argument("--groups", help="principal groups for ACL (§9.2), comma separated")
     pst.set_defaults(func=cmd_studio)
 
     pc2 = sub.add_parser("checkclaim", help="cross-judge one claim against evidence")
@@ -137,10 +153,11 @@ def cmd_studio(args) -> int:
     vault = Path(args.path).resolve()
     conn = connect(vault / ".index")
     conn.row_factory = sqlite3.Row
+    groups = parse_groups(args)
     if args.kind == "brief":
-        path = studio_brief(conn, vault, args.topic)
+        path = studio_brief(conn, vault, args.topic, principal_groups=groups)
     else:
-        path = studio_mindmap(conn, vault, args.topic)
+        path = studio_mindmap(conn, vault, args.topic, principal_groups=groups)
     print(f"wrote {path}")
     conn.close()
     return 0
@@ -244,7 +261,9 @@ def cmd_search(args) -> int:
     q = " ".join(args.query)
     from .query.pipeline import retrieve
 
-    blocks = retrieve(conn, q, top=args.top, channel=args.channel)
+    blocks = retrieve(
+        conn, q, top=args.top, channel=args.channel, principal_groups=parse_groups(args)
+    )
     if not blocks:
         print("(no hits)")
         return 0

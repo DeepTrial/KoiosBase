@@ -18,8 +18,8 @@ import sqlite3
 from dataclasses import dataclass, field
 
 from ..generation.contracts import citation_coverage, is_refusal
-from ..query.pipeline import assemble, retrieve
 from ..query.pipeline import query as full_query
+from ..query.pipeline import retrieve
 from ..retrieval.channels import retrieve_channel
 
 REFUSAL_MARK = "资料中未涉及"
@@ -94,6 +94,11 @@ def run_case(
         # path would hide the case where escalation smuggles in unrelated blocks.
         rep.refusal_total = 1
         res = full_query(conn, case.question, top=top)
+        # Coverage is still recorded for refusal cases: a single-sentence refusal
+        # marker has no citation, which is correct behaviour, and leaving the sum
+        # at 0 would average over fewer than `total` cases and inflate the metric.
+        _cited, _n = citation_coverage(res.answer)
+        rep.citation_cov_sum = _cited / _n if _n else 0.0
         if not res.evidence and is_refusal(res.answer):
             rep.refusals_ok = 1
             return True, rep
@@ -124,9 +129,13 @@ def run_case(
         rep.failures.append(
             f"[{case.kind}] {case.question} -> got {ids[:2]}, want {case.expect_block_id}"
         )
-    # citation coverage measured on the assembled context (mechanical part)
-    blocks = retrieve(conn, case.question, top=top)
-    cited, total = citation_coverage(assemble(blocks))
+    # §10.2 citation coverage is measured on the ANSWER, not the context: the
+    # citation contract (§6.5) is a property of what the model emits. Measuring
+    # the assembled context also broke mechanically — CITATION_RE looks for
+    # [[wikilink]] while the context format is a bare `[id]` line, so coverage
+    # was ~0 for every case and the metric could never detect a regression.
+    res = full_query(conn, case.question, top=top)
+    cited, total = citation_coverage(res.answer)
     rep.citation_cov_sum = cited / total if total else 0.0
     return hit, rep
 

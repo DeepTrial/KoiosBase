@@ -55,15 +55,27 @@ def render_synthesis(
     )
 
 
-def mark_syntheses_stale(conn, vault: str | Path) -> list[str]:
-    """Flag every synthesis page stale (called when sources change)."""
+def mark_syntheses_stale(
+    conn, vault: str | Path, topics: list[str] | None = None
+) -> list[str]:
+    """Flag synthesis pages stale (called when sources change).
+
+    `topics` narrows the blast radius to the pages that actually depend on the
+    changed source. Without it every synthesis page is flagged, so touching one
+    raw doc forced a full recompile of the most expensive layer on next read —
+    which is exactly what lazy update (§8.3) exists to avoid. Callers that pass
+    nothing keep the previous behaviour.
+    """
     vault = Path(vault)
     sdir = vault / "wiki" / "synthesis"
     if not sdir.exists():
         return []
     ensure_tables(conn)
+    wanted = None if topics is None else {t.strip() for t in topics if t and t.strip()}
     touched = []
     for p in sorted(sdir.glob("*.md")):
+        if wanted is not None and p.stem not in wanted:
+            continue
         rel = f"wiki/synthesis/{p.name}"
         mark_stale(conn, rel, "source changed")
         touched.append(rel)

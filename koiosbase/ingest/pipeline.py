@@ -1,7 +1,10 @@
 """Ingest pipeline: raw/ + wiki/ → .index/ (design doc §5).
 
 Synchronous indexing only in v0.1; the compile stage (entities/concepts) lands
-in v0.3 (§13). Indexing is idempotent: content hashes drive incremental updates.
+in v0.3 (§13). Ingestion is **idempotent, not incremental**: every document is
+re-parsed and its rows upserted on each run, so a rebuild reproduces exactly the
+same block set from the same Markdown. Content hashes make that upsert cheap and
+stable — they do not skip unchanged documents, and no doc is left unvisited.
 """
 
 from __future__ import annotations
@@ -54,16 +57,36 @@ def vault_paths(path: str | Path) -> tuple[Path, Path, Path]:
 def _is_derived_page(path: Path, base: Path) -> bool:
     """True for pages the tool regenerates (v0.2 sources/, v0.3 entities/).
 
-    Kept as a single predicate so new derived dirs (concepts/, synthesis/ when
-    they land) can be excluded the same way without touching the ingest loop.
-    Indexing derived pages would feed the compiler's own output back in, so the
-    block count would grow on every rebuild instead of staying idempotent.
+    Every derived directory is handled the SAME way: all of them are indexed. Excluding some (sources/, entities/) while letting others in
+    (synthesis/, answers/) — the old behaviour — split one worry two ways for no
+    reason: content hashes make ingestion idempotent, so a derived page cannot
+    grow the block count across rebuilds whatever it contains. Self-feeding is
+    prevented where it actually belongs, on the compile side, whose source set is
+    pinned to `layer='raw'` (see compile/pipeline.py).
+
+    Keeping entities/ OUT of the index also silently starved channel ⓪
+    (§6.1, wiki-first retrieval): there were no wiki rows for it to prefer.
+
+    Kept as a predicate so the set of derived dirs stays inspectable in one
+    place; it now drives layer tagging and bookkeeping rather than exclusion.
     """
     try:
         rel = path.relative_to(base)
     except ValueError:
         return False
-    return rel.parts[:1] in {("sources",), ("entities",)}
+    return rel.parts[:1] in {
+        ("sources",),
+        ("entities",),
+        ("synthesis",),
+        ("answers",),
+    }
+
+
+DERIVED_LAYERS = ("sources", "entities", "synthesis", "answers")
+
+# Escape hatch for vaults where re-indexing derived pages would be disruptive
+# during a migration. Default OFF: derived pages belong in the index (see above).
+EXCLUDE_DERIVED = False
 
 
 def build_index(vault: Path) -> int:
@@ -77,14 +100,21 @@ def build_index(vault: Path) -> int:
     raw_docs: list = []
     targets = [("raw", vault / "raw"), ("wiki", vault / "wiki")]
     seen_links: set[tuple[str, str, str]] = set()
+    # Derived pages are generated BEFORE the wiki walk so the same rebuild that
+    # creates them also indexes them — otherwise the first pass counts 3 blocks,
+    # the second counts 7, and `build_index` looks non-idempotent forever.
+    _write_source_pages(vault, _read_raw_docs(vault))
     for layer, base in targets:
         if not base.exists():
             continue
         for md in iter_docs(base):
-            # sources/ pages are DERIVED output (§4.3), not source truth (P1).
-            # Indexing them would feed generated pages back into the index and
-            # break idempotency — rebuilding would grow the block count forever.
-            if layer == "wiki" and _is_derived_page(md, base):
+            # Derived pages (sources/ entities/ synthesis/ answers/) ARE
+            # indexed — see `_is_derived_page`. Content hashes make ingestion
+            # idempotent regardless of who wrote the file, so counting them in
+            # cannot grow the block set across rebuilds; excluding them starved
+            # channel ⓪ (§6.1). Self-feeding is stopped on the compile side,
+            # whose inputs are pinned to `layer='raw'`.
+            if layer == "wiki" and EXCLUDE_DERIVED and _is_derived_page(md, base):
                 continue
             doc = parse_any(md, base)
             if doc is None:
@@ -106,20 +136,40 @@ def build_index(vault: Path) -> int:
             count += len(blocks)
             if layer == "raw" and base.name == "raw":
                 raw_docs.append((doc, blocks))
-    # v0.2: sources/ guide pages are DERIVED output of ingest (§4.3). Written
-    # only for raw-layer docs; they are Markdown truth for navigation but always
-    # regenerable, so handing them to the index happens next time round.
-    if raw_docs:
-        from datetime import datetime, timezone
-
-        from ..compile.sources import write_source_pages
-
-        write_source_pages(
-            vault, raw_docs, datetime.now(timezone.utc).date().isoformat()
-        )
+    # v0.2: sources/ guide pages are DERIVED output of ingest (§4.3) — written
+    # at the head of the run (see above) so the wiki pass below indexes them.
     conn.commit()
     conn.close()
     return count
+
+
+def _read_raw_docs(vault: Path) -> list:
+    """Parse every raw-layer doc through the adapter map (§5.1).
+
+    raw/ can hold PDFs, and parsing those as Markdown crashes with
+    UnicodeDecodeError, so the adapter must be chosen by suffix.
+    """
+    docs = []
+    base = vault / "raw"
+    if not base.exists():
+        return docs
+    for p in sorted(iter_docs(base)):
+        doc = parse_any(p, base)
+        if doc is None:
+            continue
+        docs.append((doc, all_blocks(doc)))
+    return docs
+
+
+def _write_source_pages(vault: Path, raw_docs: list) -> None:
+    """Regenerate sources/ navigation pages from the raw corpus (§4.3)."""
+    if not raw_docs:
+        return
+    from datetime import datetime, timezone
+
+    from ..compile.sources import write_source_pages
+
+    write_source_pages(vault, raw_docs, datetime.now(timezone.utc).date().isoformat())
 
 
 def cmd_ingest(argv=None) -> int:

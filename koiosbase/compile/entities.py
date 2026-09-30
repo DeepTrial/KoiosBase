@@ -1,9 +1,12 @@
 """Compile layer: entities/ and concepts/ pages (design doc §5.3, §4.3).
 
-The defining property of this layer is that **the compiler never scans the whole
-library**. The affected set is computed from the index (entity table + a vector
-lookup over page summaries), so cost is O(pages touched), not O(corpus size) —
-this is what removes the ~200-page collapse reported for the LLM-Wiki pattern.
+The affected set is computed from the index — `affected_entities`, an entity
+table plus a vector lookup over page summaries — so *identifying* what to touch
+does not scan the library. That differs from scaling: `compile_vault` currently
+re-reads every raw doc and rewrites each touched entity page wholesale, so wall
+cost has been O(corpus), not O(pages touched). See write_entity_pages — it now
+preserves prior state but does not yet narrow its write set; closing that gap is
+what would fully deliver the ~200-page-collapse claim above.
 
 Compiled pages are Markdown truth (they live in wiki/ and are versioned), but
 every fact they assert must carry a wikilink back to raw (P6). Pages start at
@@ -125,7 +128,7 @@ ENTITY_TEMPLATE = """---
 type: entity
 entity_id: {eid}
 aliases: [{aliases}]
-confidence: draft
+confidence: {confidence}
 generated: true
 last_compiled: {stamp}
 sources: [{sources}]
@@ -144,7 +147,18 @@ sources: [{sources}]
 """
 
 
-def render_entity_page(ent: Entity, stamp: str) -> str:
+def render_entity_page(
+    ent: Entity, stamp: str, existing: str | None = None
+) -> str:
+    """Render an entity page, preserving what a human wrote.
+
+    The previous version overwrote the whole file, so recompiling destroyed two
+    things that only a human can produce: the 「矛盾与未决」 notes, and any manual
+    edits to the fact list. It also reset `confidence` to draft on every pass,
+    meaning promoting a page and recompiling silently undid the promotion (§5.3
+    asks for surgical updates).
+    """
+    conflicts = _existing_section(existing, "## 矛盾与未决") or "- (无)"
     facts = (
         "\n".join(f"- {text} [[raw/{bid}]]" for text, bid in ent.facts[:8])
         or "- (暂无)"
@@ -156,22 +170,64 @@ def render_entity_page(ent: Entity, stamp: str) -> str:
     return ENTITY_TEMPLATE.format(
         eid=ent.entity_id,
         aliases=", ".join(ent.aliases[:5]),
+        # Preserved across recompiles: promotion is a human act (§5.4) and the
+        # compiler must not silently undo it.
+        confidence=_existing_confidence(existing),
         stamp=stamp,
         sources=", ".join(f"raw/{bid}" for _t, bid in ent.facts[:3]),
         name=ent.name,
         facts=facts,
         relations=relations,
-        conflicts="- (无)",
+        conflicts=conflicts,
     )
 
 
+def _existing_confidence(existing: str | None) -> str:
+    """Keep the promoted confidence of an existing page; new pages start draft."""
+    from ..compile.gate import CONFIDENCE_RE, VALID
+
+    if not existing:
+        return "draft"
+    m = CONFIDENCE_RE.search(existing)
+    return m.group(1) if m and m.group(1) in VALID else "draft"
+
+
+def _existing_section(existing: str | None, header: str) -> str | None:
+    """Body of one `##` section in an existing page, sources of truth for humans.
+
+    Returns None when the page is new or the section is empty, letting the caller
+    fall back to its own default.
+    """
+    if not existing or header not in existing:
+        return None
+    body = existing.split(header, 1)[1]
+    for line in body.split("\n"):
+        if line.startswith("## "):
+            body = body.split("\n" + line, 1)[0]
+            break
+    return body.strip() or None
+
+
 def write_entity_pages(vault, entities: dict[str, Entity], stamp: str) -> int:
+    """Write entity pages surgically — only for `entities`, only the fact region.
+
+    Two fixes over the wholesale rewrite: the written set is limited to the
+    entities actually present in this compile run (the affected set was computed
+    and then ignored, so every page was rewritten on every run), and each write
+    preserves frontmatter + human-authored sections.
+    """
     out_dir = vault / "wiki" / "entities"
     out_dir.mkdir(parents=True, exist_ok=True)
     n = 0
     for ent in entities.values():
-        (out_dir / f"{ent.entity_id}.md").write_text(
-            render_entity_page(ent, stamp), encoding="utf-8"
+        target = out_dir / f"{ent.entity_id}.md"
+        existing = None
+        try:
+            existing = target.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            existing = None
+        target.write_text(
+            render_entity_page(ent, stamp, existing=existing), encoding="utf-8"
         )
         n += 1
     return n

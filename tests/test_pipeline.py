@@ -132,3 +132,71 @@ def test_l1_detects_unsourced_wiki_assertion(vault):
     conn.row_factory = sqlite3.Row
     findings = run_l1(conn)
     assert findings["unsourced_assertions"], "L1 must flag unsourced claims (P6)"
+
+
+def test_derived_pages_are_indexed_and_idempotent(vault):
+    """P2-9: derived pages belong in the index, and repeated builds converge.
+
+    Excluding some derived dirs (entities/) while indexing others left channel ⓪
+    with no data; at the same time generating sources/ AFTER the wiki walk made
+    the first build count fewer blocks than every build after it.
+    """
+    first = build_index(vault)
+    assert build_index(vault) == first, "rebuild must not change the block count"
+
+    from koiosbase.compile.pipeline import compile_vault
+
+    compile_vault(vault)
+    after_compile = build_index(vault)
+    assert build_index(vault) == after_compile, "still stable after compiling"
+
+    conn = sqlite3.connect(str(vault / ".index" / "tree.db"))
+    conn.row_factory = sqlite3.Row
+    try:
+        layers = {r["layer"] for r in conn.execute("SELECT DISTINCT layer FROM blocks")}
+        wiki_blocks = conn.execute(
+            "SELECT COUNT(*) c FROM blocks WHERE layer='wiki'"
+        ).fetchone()["c"]
+    finally:
+        conn.close()
+    assert "wiki" in layers
+    assert wiki_blocks > 0, "compiled/derived pages must be retrievable (§6.1 ⓪)"
+
+
+def test_compile_reads_only_raw_layer(vault):
+    """P2-9 guard: self-feeding is prevented by pinning compile input to raw.
+
+    With derived pages now in the index, the safety property moves from 'keep
+    them out' to 'the compiler never consumes them'.
+    """
+    from koiosbase.compile.pipeline import compile_vault
+
+    # Poison a DERIVED page (lives in the index now) with an entity name that
+    # exists nowhere in raw/. If the compiler ever widened its input beyond
+    # `layer=\'raw\'`, this would show up as a generated entity page.
+    poisoned = vault / "wiki" / "entities" / "Zpoison.md"
+    poisoned.parent.mkdir(parents=True, exist_ok=True)
+    poisoned.write_text(
+        "# Zpoison\n\nZzqpoison Unique 公司 2024 年营收 999 亿元。\n",
+        encoding="utf-8",
+    )
+    build_index(vault)
+    # `Zpoison.md` is indexed (it is derived), so it IS retrievable:
+    conn = sqlite3.connect(str(vault / ".index" / "tree.db"))
+    conn.row_factory = sqlite3.Row
+    try:
+        hit = conn.execute(
+            "SELECT 1 FROM blocks WHERE layer=? AND doc_path LIKE ? LIMIT 1",
+            ("wiki", "%Zpoison%"),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert hit, "derived page must be indexed (P2-9)"
+
+    compile_vault(vault)
+    generated = {
+        p.stem for p in (vault / "wiki" / "entities").glob("*.md")
+    } - {"Zpoison"}
+    assert not any("Zzqpoison" in s or "Unique" in s for s in generated), (
+        f"compiler consumed the wiki layer and spread derived content: {generated}"
+    )

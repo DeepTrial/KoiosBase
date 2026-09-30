@@ -23,7 +23,9 @@ from ..retrieval.channels import (
     retrieve_channel,
     tree_search,
 )
-from ..retrieval.router import CJK_RE, hybrid_search
+from ..retrieval.router import hybrid_search
+from ..security.acl import filter_rows
+from ..state.model import apply_disposition, filter_visible
 
 
 @dataclass
@@ -72,9 +74,41 @@ def retrieve(
     # must still be filtered: treating None as "skip the check" is what leaked
     # restricted documents to unauthenticated callers.
     from ..security.acl import filter_rows
+    from ..state.model import filter_visible
 
     blocks = filter_rows(conn, blocks, principal_groups)
+    # §8.2 hard filter: a retracted/superseded block must never enter the
+    # context, on ANY path. The state machinery was written and unit-tested but
+    # never reached the read path, so `koios retract` had no observable effect
+    # on search / ask / MCP / eval — the cascade marked pages stale while the
+    # offending block itself kept answering questions.
+    blocks = filter_visible(blocks, conn)
+    # §8.3 query-time disposition: stale pages are down-ranked (never silently
+    # treated as fresh) and a retracted page is dropped entirely.
+    blocks = apply_disposition(conn, blocks)
     return blocks
+
+
+def score_blocks(
+    conn, question: str, blocks: list[dict]
+) -> list[tuple[float, dict]]:
+    """Rank already-loaded blocks by BM25 relevance — no second storage pass.
+
+    Used by the Self-Route escalation, which needs `full_corpus` order (prompt-
+    cache stability) replaced by relevance order. Scoring is done through the
+    FTS index so the ranking path has exactly one definition of relevance.
+    """
+    from ..retrieval.router import fts_search
+
+    order: dict[str, float] = {}
+    ranked = fts_search(conn, question, limit=max(20, len(blocks)))
+    for rank, (bid, score) in enumerate(ranked):
+        order[bid] = -rank if score is None else score
+    floor = float("-inf")
+    return sorted(
+        ((order.get(b["id"], floor), b) for b in blocks),
+        key=lambda pair: -pair[0],
+    )
 
 
 def assemble(blocks: list[dict], budget_chars: int = 6000) -> str:
@@ -94,6 +128,31 @@ def assemble(blocks: list[dict], budget_chars: int = 6000) -> str:
     return "\n---\n".join(parts)
 
 
+def _shared_terms(question: str, joined: str) -> list[str]:
+    """The query terms that actually occur in `joined` — one definition of a hit.
+
+    `grade()` (main verdict) and `_has_terms()` (escalation guard) used different
+    strictness: grade counted any single character, including 年/的, so it said
+    `enough` on noise; the guard demanded a ≥2-char CJK run or a latin token, so
+    it said "no real term" on the same evidence. The asymmetry let weak evidence
+    pass the Grader while a stricter bar governed escalation — the loophole that
+    makes Self-Route either too eager or dead. Both now read this one function.
+    """
+    found: list[str] = []
+    # A lone CJK character occurs in virtually any Chinese corpus, so honouring
+    # one (年, 的) would let any question match any document — this is why both
+    # the verdict and the escalation guard require a multi-character run.
+    for run in re.findall(r"[\u4e00-\u9fff]+", question):
+        if len(run) < 2:
+            continue  # a lone character occurs in nearly any Chinese corpus
+        if run in joined:
+            found.append(run)
+    for tok in re.findall(r"[A-Za-z0-9]+", question):
+        if tok.lower() in joined:
+            found.append(tok.lower())
+    return found
+
+
 def grade(question: str, blocks: list[dict]) -> str:
     """Grader verdict (§6.2): enough | missing | conflict | evidence_absent.
 
@@ -106,15 +165,13 @@ def grade(question: str, blocks: list[dict]) -> str:
     if not blocks:
         return "evidence_absent"
     joined = " ".join(b["raw"] for b in blocks)[:2000].lower()
-    hits = 0
-    for ch in set(question):
-        if ch.isalnum():
-            hits += 1 if ch.lower() in joined else 0
-        elif "\u4e00" <= ch <= "\u9fff":
-            hits += 1 if ch in joined else 0
-    if hits == 0:
+    if not _shared_terms(question, joined):
         return "missing"
     return "enough"
+
+
+def _cited(snippet: str, block_id: str) -> str:
+    return f"- {snippet} [[raw/{block_id}]]"
 
 
 def generate(question: str, context: str, blocks: list[dict], llm=None) -> str:
@@ -127,33 +184,27 @@ def generate(question: str, context: str, blocks: list[dict], llm=None) -> str:
     if not blocks:
         return f"{REFUSAL}：当前知识库中没有任何相关证据。"
     if llm is None:
+        # The built-in generator must pass `check_contracts` like any other
+        # producer — a header line with no citation made every default answer a
+        # citation violation, which quietly trained callers to ignore that signal.
         lines = []
         for b in blocks[:3]:
             snippet = b["raw"].replace("\n", " ")[:180]
-            lines.append(f"- {snippet} ({b['id']})")
-        return "检索到的证据如下：\n" + "\n".join(lines)
+            lines.append(_cited(snippet, b["id"]))
+        return "\n".join(lines)
     return llm(question, context)
 
 
 def _has_terms(question: str, blocks: list[dict]) -> bool:
     """True only if a REAL query term appears — never a stray single character.
 
-    The guard intentionally ignores isolated CJK characters (年, 的, 公司…):
-    they occur in virtually any Chinese corpus, so honouring them would make the
-    escalation path hand the whole corpus to any question. Multi-char CJK terms
-    and latin/number words count; lone characters do not.
+    Shares `_shared_terms` with `grade()` so the two cannot drift apart again
+    (see that function for why the previous strictness mismatch mattered).
     """
     if not blocks:
         return False
     joined = " ".join(b["raw"] for b in blocks).lower()
-    runs = CJK_RE.findall(question)
-    for run in runs:
-        if len(run) >= 2 and run in joined:
-            return True
-    for tok in re.findall(r"[A-Za-z0-9]+", question):
-        if tok.lower() in joined:
-            return True
-    return False
+    return bool(_shared_terms(question, joined))
 
 
 def query(
@@ -187,12 +238,21 @@ def query(
         "verdict": verdict,
     }
     if verdict == "evidence_absent" and allow_full:
-        # loophole that defeats the refusal contract (§6.5). We only escalate when
-        # the full corpus actually contains evidence for THIS question; otherwise
-        # we keep the empty result set so the refusal contract still fires.
-        cand = _to_blocks(conn, full_corpus(conn))[: top * 5]
+        # This branch does NOT have a loophole that defeats the refusal contract
+        # (§6.5). We only escalate when the full corpus actually contains evidence
+        # for THIS question; otherwise we keep the empty result set so the refusal
+        # contract still fires.
+        cand = _to_blocks(conn, full_corpus(conn))
+        cand = filter_rows(conn, cand, principal_groups)
+        cand = filter_visible(cand, conn)
         if cand and _has_terms(question, cand):
-            blocks = cand
+            # Re-rank instead of taking `full_corpus` order: that order is
+            # doc_path/ordinal — chosen for prompt-cache stability, not relevance.
+            # Substituting it wholesale meant the escalation path answered with
+            # the first blocks in the library rather than the best ones, and threw
+            # away every hybrid score that had already ranked these blocks.
+            scored = score_blocks(conn, question, cand)
+            blocks = [b for _s, b in scored][: top * 5]
             trace["escalated"] = "full"
             trace["verdict"] = grade(question, blocks)
     context = assemble(blocks)

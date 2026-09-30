@@ -28,7 +28,15 @@ HEADING_MAX_LEN = 80
 HEADING_RE = re.compile(r"^\s*(#{1,6})\s+(.*)$")
 
 
-def file_sha256(path: str | Path, limit: int = 1 << 24) -> str:
+def file_sha256(path: str | Path, limit: int | None = None) -> str:
+    """Content hash of a file, full by default.
+
+    `limit` truncated at 16MB, so any edit past that offset was invisible: the
+    doc_hash used for provenance (§4.1) and the parse cache key both agreed with
+    a version of the file that no longer existed, and re-ingesting edited PDFs
+    returned the cached parse. Set `limit` deliberately if you want a cheap probe
+    of just the head; correctness-sensitive callers must hash everything.
+    """
     h = hashlib.sha256()
     with open(path, "rb") as fh:
         while True:
@@ -36,7 +44,7 @@ def file_sha256(path: str | Path, limit: int = 1 << 24) -> str:
             if not chunk:
                 break
             h.update(chunk)
-            if fh.tell() > limit:
+            if limit is not None and fh.tell() > limit:
                 break
     return h.hexdigest()
 
@@ -149,10 +157,13 @@ def parse_pdf(
     path: str | Path,
     root: str | Path = "",
     cache_dir: str | Path | None = None,
-    vlm: Callable[[str, str], str] | None = None,
+    vlm: Callable[[str, bytes], str] | None = None,
 ) -> Document:
-    """Parse a PDF into a Document whose Blocks carry page-level provenance."""
-    path = Path(path)
+    """Parse a PDF into a Document whose Blocks carry page-level provenance.
+
+    `vlm(path, image_bytes)` receives PNG bytes — see the call site for why it
+    must not be a str-typed placeholder.
+    """
     root_str = str(root) if root else ""
     if root_str and str(path).startswith(root_str):
         doc_path = str(path.relative_to(root_str))
@@ -173,8 +184,13 @@ def parse_pdf(
             try:
                 for page in doc:
                     pix = page.get_pixmap()
-                    img = pix.tobytes("png")
-                    pages.append(vlm(str(path), img.hex()[:0] or img.decode("latin-1")))
+                    # Hand the VLM the PNG BYTES. The previous `img.hex()[:0] or
+                    # img.decode("latin-1")` was a placeholder that always took the
+                    # right-hand branch (hex()[:0] is the empty string), smuggling
+                    # raw binary through a text decode: it survives only for bytes
+                    # < 0x80 and corrupts everything else, so anything beyond an
+                    # ASCII-only PNG would have reached the model mangled.
+                    pages.append(vlm(str(path), pix.tobytes("png")))
             finally:
                 doc.close()
 
