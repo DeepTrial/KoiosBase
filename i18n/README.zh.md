@@ -2,7 +2,7 @@
 [![GitHub Release](https://img.shields.io/github/v/release/DeepTrial/KoiosBase)](https://github.com/DeepTrial/KoiosBase/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-[English](README.md) | [中文](README.zh.md) | [日本語](README.ja.md)
+[English](README.md) | [中文](i18n/README.zh.md) | [日本語](i18n/README.ja.md)
 
 # KoiosBase
 
@@ -146,6 +146,7 @@ rust-cli/      Rust shell（同一 vault 格式）
 ## 文档
 
 - `docs/KoiosBase设计文档v1.3.md` — 完整设计基线（中文）
+- `docs/i18n.md` — 翻译文档的组织约定（译文位于 `i18n/`）
 - `AGENTS.md` — 写入每个 vault 的维护契约（§4.4）
 
 ## 许可
