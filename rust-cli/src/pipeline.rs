@@ -7,6 +7,7 @@
 
 use once_cell::sync::Lazy;
 use regex::Regex;
+use std::collections::HashMap;
 use rusqlite::{params, Connection};
 
 use crate::retrieval::{full_corpus, hybrid_search, is_cjk};
@@ -22,6 +23,50 @@ static CITATION_RE: Lazy<Regex> =
 
 fn is_sentence_end(c: char) -> bool {
     matches!(c, '。' | '！' | '？' | '；' | '!' | '?' | ';')
+}
+
+/// Public companion to `citation_coverage`: the reusable pieces of §6.5 as
+/// plain predicates, mirroring koiosbase/generation/contracts.py.
+///
+/// Python exposes these because the point of the contracts is that a CALLER's
+/// model is judged by the same rules as the built-in generator — supplying an
+/// `llm` to `query()` must not let it invent. Rust had them only buried inside
+/// citation_coverage, so an external generator had nothing to check against.
+pub fn has_citation(sentence: &str) -> bool {
+    CITATION_RE.is_match(sentence)
+}
+
+pub fn is_refusal_pub(answer: &str) -> bool {
+    answer.contains(REFUSAL)
+}
+
+/// Refusal contract: answering substantively with zero evidence and no marker
+/// is a violation; with evidence present anything goes (conflict protocol).
+pub fn check_refusal(evidence_empty: bool, answer: &str) -> bool {
+    if !evidence_empty {
+        return true;
+    }
+    is_refusal_pub(answer)
+}
+
+/// All-in-one gate matching Python's return shape: empty = every contract met.
+/// Keys stay identical ("citation" / "refusal") so CI output is comparable.
+pub fn check_contracts(answer: &str, evidence: &[Ev]) -> HashMap<String, String> {
+    let (cited, total) = citation_coverage(answer);
+    let mut violations: HashMap<String, String> = HashMap::new();
+    if total > 0 && cited < total {
+        violations.insert(
+            "citation".to_string(),
+            format!("{cited}/{total} sentences cited"),
+        );
+    }
+    if !check_refusal(evidence.is_empty(), answer) {
+        violations.insert(
+            "refusal".to_string(),
+            "answer asserted with no evidence and no refusal marker".to_string(),
+        );
+    }
+    violations
 }
 
 fn split_sentences(text: &str) -> Vec<String> {
