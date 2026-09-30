@@ -161,7 +161,12 @@ pub fn retrieve_channel(
     }
     let mut out: Vec<Ev> = ids.iter().filter_map(|i| get_block(conn, i)).collect();
     out = crate::acl::filter_blocks(conn, out, groups);
-    crate::state::filter_visible(conn, out)
+    out = crate::state::filter_visible(conn, out);
+    // §8.3 query-time disposition: stale pages are down-ranked (never silently
+    // treated as fresh) and a retracted page is dropped entirely. Python's
+    // retrieve() does this too; without it `koios retract` changed nothing on
+    // this shell's read paths.
+    crate::state::apply_disposition(conn, out, false)
 }
 
 /// Grader verdict over ALL evidence joined, first 2000 chars, lowercased.

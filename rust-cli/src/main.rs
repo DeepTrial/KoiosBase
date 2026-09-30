@@ -59,6 +59,9 @@ enum Cmd {
         /// principal groups for ACL (§9.2), comma separated
         #[arg(long)]
         groups: Option<String>,
+        /// force a retrieval channel: hybrid | tree | full | graph (§6.1)
+        #[arg(short = 'c', long, value_parser = ["hybrid", "tree", "full", "graph"])]
+        channel: Option<String>,
     },
     /// channel ① tree navigation
     Tree {
@@ -143,21 +146,10 @@ enum Cmd {
 /// Insert spaces between CJK characters — mirrors Python's cjk_pad().
 
 fn cmd_init(path: &Path) -> std::io::Result<()> {
-    for d in [
-        "raw",
-        "wiki/sources",
-        "wiki/entities",
-        "wiki/concepts",
-        "wiki/synthesis",
-        "wiki/answers",
-        ".index",
-    ] {
-        fs::create_dir_all(path.join(d))?;
-    }
-    let agents = path.join("AGENTS.md");
-    if !agents.exists() {
-        fs::write(agents, "# AGENTS.md\n\nKoiosBase maintenance contract.\n")?;
-    }
+    // Delegates to lib::init_vault so the binary and integration tests exercise
+    // the SAME scaffolding — the two copies used to drift (the bin wrote a
+    // one-line AGENTS.md stub).
+    koios::init_vault(path)?;
     println!("initialized KoiosBase vault at {}", path.display());
     Ok(())
 }
@@ -194,17 +186,66 @@ fn parse_groups(raw: Option<&str>) -> Option<Vec<String>> {
     .filter(|v: &Vec<String>| !v.is_empty())
 }
 
+/// Dispatch a named retrieval channel to block ids (§6.1).
+///
+/// Mirrors koiosbase/retrieval/channels.py retrieve_channel() one-for-one,
+/// including the `full` slice (`[: limit * 20]`) so the same channel yields the
+/// same number of candidates on both shells.
+fn channel_ids(
+    conn: &rusqlite::Connection,
+    channel: &str,
+    query: &str,
+    top: usize,
+) -> Vec<String> {
+    match channel {
+        "tree" => koios::retrieval::tree_search(conn, query, 3).unwrap_or_default(),
+        "full" => {
+            let mut ids = koios::retrieval::full_corpus(conn, 200_000).unwrap_or_default();
+            ids.truncate(top * 20);
+            ids
+        }
+        "hybrid" => koios::retrieval::hybrid_search(conn, query, top, false)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(i, _)| i)
+            .collect(),
+        "graph" => koios::retrieval::hybrid_search(conn, query, top, true)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(i, _)| i)
+            .collect(),
+        other => {
+            eprintln!("error: unknown channel: {other}");
+            std::process::exit(2);
+        }
+    }
+}
+
 fn cmd_search(
     path: &Path,
     query: &str,
     top: usize,
     groups: Option<Vec<String>>,
+    channel: Option<&str>,
 ) -> rusqlite::Result<()> {
     let conn = connect(path)?;
     // Route through retrieve_channel so the ACL applies. The previous raw-FTS
     // ladder here bypassed it completely, so `koios search` handed restricted
     // blocks to whoever asked.
-    let ev = pipeline::retrieve_channel(&conn, query, top, groups.as_deref());
+    //
+    // `--channel` selects ONE route (§6.1) exactly like Python's
+    // koiosbase/query/pipeline.py retrieve(). Without this the Rust shell had
+    // no way to reach channels ①/③/④ at all.
+    let ev = if let Some(ch) = channel {
+        let ids = channel_ids(&conn, ch, query, top);
+        let mut out: Vec<pipeline::Ev> =
+            ids.iter().filter_map(|i| pipeline::get_block(&conn, i)).collect();
+        out = acl::filter_blocks(&conn, out, groups.as_deref());
+        out = state::filter_visible(&conn, out);
+        state::apply_disposition(&conn, out, false)
+    } else {
+        pipeline::retrieve_channel(&conn, query, top, groups.as_deref())
+    };
     for b in &ev {
         println!("[{}] {}\n    {}", b.doc_path, b.id, {
             let s: String = b.raw.chars().take(110).collect();
@@ -398,11 +439,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             path,
             top,
             groups,
+            channel,
         } => cmd_search(
             &path,
             &query.join(" "),
             top,
             parse_groups(groups.as_deref()),
+            channel.as_deref(),
         )?,
         Cmd::Tree { query, path } => cmd_tree(&path, &query.join(" "))?,
         Cmd::Full { path, max_chars } => cmd_full(&path, max_chars)?,

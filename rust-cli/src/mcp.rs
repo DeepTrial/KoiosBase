@@ -18,6 +18,9 @@ use crate::pipeline::Ev;
 
 pub const PROTOCOL_VERSION: &str = "2024-11-05";
 
+/// Set false to silence write attribution — mirrors Python's WRITE_AUDIT_LOG.
+const WRITE_AUDIT_LOG: bool = true;
+
 fn tool_defs() -> Value {
     json!([
       {
@@ -198,6 +201,28 @@ fn tool_write_answer(args: &Value) -> Result<Value, String> {
     let vault = Path::new(&as_str(args, "vault")?).to_path_buf();
     let question = as_str(args, "question")?;
     let answer = as_str(args, "answer")?;
+    let groups = groups_of(args);
+    // §11 memory boundary: write-back mutates shared, versioned Markdown, so
+    // "who wrote this and as whom" has to be reconstructable after the fact.
+    // This is attribution, not authorization — the host owns access control.
+    // Reproduced verbatim from koiosbase/mcp/server.py log_write() so stderr
+    // is identical on both shells.
+    if WRITE_AUDIT_LOG {
+        let principal = match &groups {
+            Some(g) if !g.is_empty() => {
+                let mut s = g.clone();
+                s.sort();
+                s.join(",")
+            }
+            _ => "anonymous".to_string(),
+        };
+        eprintln!(
+            "[koios-write] vault={} principal={} q={:?}",
+            vault.display(),
+            principal,
+            question.chars().take(80).collect::<String>()
+        );
+    }
     let conn = crate::connect(&vault).map_err(|e| e.to_string())?;
     let ev = crate::pipeline::retrieve_channel(&conn, &question, 5, groups_of(args).as_deref());
     let path = crate::compile::write_answer_page(

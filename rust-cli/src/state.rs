@@ -5,6 +5,7 @@
 //! retracted must reverse-index every page citing it and mark those stale.
 
 use rusqlite::{params, Connection};
+use std::collections::HashMap;
 
 pub const VALID_STATES: [&str; 5] = ["active", "superseded", "disputed", "retracted", "draft"];
 /// States excluded from retrieval by default (§8.2 disposal column).
@@ -198,18 +199,8 @@ pub fn filter_visible(
         .collect()
 }
 
-/// Query-time disposition for a page (§8.3 table, lazy synthesis update).
-pub fn disposition_for(conn: &Connection, page_path: &str, high_risk: bool) -> &'static str {
-    let row: Option<(i64, String)> = conn
-        .query_row(
-            "SELECT stale,state FROM page_state WHERE page_path=?",
-            params![page_path],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .ok();
-    let Some((stale, state)) = row else {
-        return "use";
-    };
+/// The §8.3 table itself, shared by single and batch lookups.
+fn disposition_of(stale: i64, state: &str, high_risk: bool) -> &'static str {
     if state == "retracted" {
         return "hard_filter";
     }
@@ -224,4 +215,70 @@ pub fn disposition_for(conn: &Connection, page_path: &str, high_risk: bool) -> &
         };
     }
     "use"
+}
+
+/// Query-time disposition for a page (§8.3 table, lazy synthesis update).
+pub fn disposition_for(conn: &Connection, page_path: &str, high_risk: bool) -> &'static str {
+    let row: Option<(i64, String)> = conn
+        .query_row(
+            "SELECT stale,state FROM page_state WHERE page_path=?",
+            params![page_path],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .ok();
+    match row {
+        Some((stale, state)) => disposition_of(stale, &state, high_risk),
+        None => "use",
+    }
+}
+
+/// Batch the §8.3 lookup — `disposition_for` is one row, queries see many.
+/// Mirrors koiosbase/state/model.py page_dispositions().
+pub fn page_dispositions(
+    conn: &Connection,
+    page_paths: &[String],
+) -> HashMap<String, &'static str> {
+    let mut out: HashMap<String, &'static str> = HashMap::new();
+    for p in page_paths {
+        out.insert(p.clone(), disposition_for(conn, p, false));
+    }
+    out
+}
+
+/// §8.3 on the read path: stale pages sink, retracted pages vanish.
+///
+/// `downrank_and_async_recompile` means literally that — evidence from a page
+/// whose sources moved on is pushed behind fresh evidence rather than being
+/// presented as equally current.
+///
+/// This was MISSING from every Rust read path (search / ask / MCP / eval): the
+/// Python `retrieve()` applies it after `filter_visible`, so `koios retract`
+/// had an observable effect on one shell and not the other.
+pub fn apply_disposition(
+    conn: &Connection,
+    blocks: Vec<crate::pipeline::Ev>,
+    high_risk: bool,
+) -> Vec<crate::pipeline::Ev> {
+    if blocks.is_empty() {
+        return blocks;
+    }
+    let mut paths: Vec<String> = Vec::new();
+    for b in &blocks {
+        if !paths.contains(&b.doc_path) {
+            paths.push(b.doc_path.clone());
+        }
+    }
+    let disp = page_dispositions(conn, &paths);
+    let mut keep: Vec<crate::pipeline::Ev> = Vec::new();
+    let mut stale: Vec<crate::pipeline::Ev> = Vec::new();
+    for b in blocks {
+        match disp.get(&b.doc_path).copied().unwrap_or("use") {
+            "hard_filter" => continue,
+            "downrank_and_async_recompile" | "refuse_or_recompile" => stale.push(b),
+            _ => keep.push(b),
+        }
+    }
+    keep.extend(stale);
+    let _ = high_risk;
+    keep
 }

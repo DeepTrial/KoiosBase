@@ -512,6 +512,46 @@ pub fn index_pdf(
     Ok(count)
 }
 
+/// §4.4 — the maintenance contract written INTO the vault, so it travels with
+/// the knowledge rather than living only in this repo's docs.
+///
+/// Lives in the lib (not main.rs) so integration tests can assert the vault a
+/// real `koios init` produces — `cmd_index` lives here for the same reason.
+pub fn init_vault(path: &Path) -> std::io::Result<()> {
+    for d in [
+        "raw",
+        "wiki/sources",
+        "wiki/entities",
+        "wiki/concepts",
+        "wiki/synthesis",
+        "wiki/answers",
+        ".index",
+    ] {
+        fs::create_dir_all(path.join(d))?;
+    }
+    let agents = path.join("AGENTS.md");
+    if !agents.exists() {
+        // Byte-identical to ingest/pipeline.py cmd_init() — this file is the
+        // §4.4 maintenance contract written INTO the vault, so a short version
+        // silently drops three rules the vault is supposed to carry.
+        fs::write(
+            agents,
+            "# AGENTS.md\n\n\
+             KoiosBase maintenance contract. `raw/` and `wiki/` are Markdown and are\n\
+             the source of truth; `.index/` is derived and rebuildable.\n\n\
+             - Every factual assertion in `wiki/` must carry a `[[wikilink]]` to raw.\n\
+             - New compiled pages start at `confidence: draft`.\n\
+             - Promotion requires cross-family verification or human confirmation,\n  \
+             never citation counts (§5.4).\n\
+             - Rebuild at any time: `koios index <vault>`\n",
+        )?;
+    }
+    // Python also marks the derived dir as ignored; without it a built vault
+    // looks dirty to git.
+    fs::write(path.join(".index").join(".gitignore"), "*\n")?;
+    Ok(())
+}
+
 pub fn cmd_index(path: &Path) -> rusqlite::Result<()> {
     let conn = connect(path)?;
     // Wrap the whole ingest in ONE transaction. Without it every INSERT is its
