@@ -145,14 +145,12 @@ pub fn referencing_pages(
         return pages;
     }
     let like = format!("%{marker}%");
-    conn.prepare(
-        "SELECT DISTINCT doc_path FROM blocks WHERE layer='wiki' AND raw LIKE ?",
-    )
-    .and_then(|mut s| {
-        s.query_map(params![like], |r| r.get::<_, String>(0))?
-            .collect::<Result<Vec<_>, _>>()
-    })
-    .unwrap_or_default()
+    conn.prepare("SELECT DISTINCT doc_path FROM blocks WHERE layer='wiki' AND raw LIKE ?")
+        .and_then(|mut s| {
+            s.query_map(params![like], |r| r.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .unwrap_or_default()
 }
 
 pub fn mark_stale(conn: &Connection, page_path: &str, reason: &str) -> rusqlite::Result<()> {
@@ -190,7 +188,10 @@ pub fn cascade_retraction(
 }
 
 /// Drop blocks whose source block is superseded/retracted (§8.2).
-pub fn filter_visible(conn: &Connection, blocks: Vec<crate::pipeline::Ev>) -> Vec<crate::pipeline::Ev> {
+pub fn filter_visible(
+    conn: &Connection,
+    blocks: Vec<crate::pipeline::Ev>,
+) -> Vec<crate::pipeline::Ev> {
     blocks
         .into_iter()
         .filter(|b| !FILTERED.contains(&get_block_state(conn, &b.id).as_str()))

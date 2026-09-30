@@ -12,55 +12,27 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-mod acl;
-mod compile;
-mod ingest;
-mod lint;
-mod mcp;
-mod pdf;
-mod pipeline;
-mod retrieval;
-mod state;
-mod studio;
+use koios::acl;
+use koios::cjk_pad;
+use koios::cmd_index;
+use koios::compile;
+use koios::connect;
+use koios::fm_title;
+use koios::ingest;
+use koios::lint;
+use koios::mcp;
+use koios::pdf;
+use koios::pipeline;
+use koios::retrieval;
+use koios::split_frontmatter;
+use koios::state;
+use koios::studio;
 
 use clap::{Parser, Subcommand};
 use rusqlite::{params, Connection};
 
-/// Mirrors koiosbase/index/schema.py SCHEMA + state/model.py SCHEMA_EXTRA.
-/// Every statement must stay in lockstep with the Python side or one shell
-/// writes a db the other cannot read (P1: the index is derived, but both
-/// shells must agree on what "derived" means).
-const SCHEMA: &str = r#"
-CREATE TABLE IF NOT EXISTS documents (
-  path TEXT PRIMARY KEY, title TEXT, frontmatter TEXT, hash TEXT);
-CREATE TABLE IF NOT EXISTS sections (
-  id TEXT PRIMARY KEY, doc_path TEXT, parent_id TEXT, title TEXT,
-  summary TEXT, ordinal INTEGER, layer TEXT NOT NULL DEFAULT 'raw');
-CREATE TABLE IF NOT EXISTS blocks (
-  id TEXT PRIMARY KEY, doc_path TEXT, section_id TEXT, type TEXT,
-  breadcrumb TEXT, raw TEXT, hash TEXT, page_range TEXT, meta TEXT,
-  ordinal INTEGER NOT NULL DEFAULT 0, layer TEXT NOT NULL DEFAULT 'raw');
-CREATE VIRTUAL TABLE IF NOT EXISTS blocks_fts USING fts5(
-  id, breadcrumb, raw, tokenize='unicode61');
-CREATE TABLE IF NOT EXISTS links (
-  src TEXT, dst TEXT, kind TEXT, weight REAL);
-CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
-CREATE INDEX IF NOT EXISTS idx_blocks_section ON blocks(section_id);
-CREATE INDEX IF NOT EXISTS idx_links_src ON links(src);
-CREATE TABLE IF NOT EXISTS block_state (
-  block_id TEXT PRIMARY KEY,
-  state TEXT NOT NULL DEFAULT 'active',
-  reason TEXT,
-  updated TEXT
-);
-CREATE TABLE IF NOT EXISTS page_state (
-  page_path TEXT PRIMARY KEY,
-  stale INTEGER NOT NULL DEFAULT 0,
-  state TEXT NOT NULL DEFAULT 'active',
-  reason TEXT,
-  updated TEXT
-);
-"#;
+/// The SCHEMA and `connect()` live in `koios` (src/lib.rs) — see the note there
+/// for why there is exactly one copy.
 
 #[derive(Parser)]
 #[command(name = "koios", version, about = "KoiosBase (Rust shell spike)")]
@@ -159,36 +131,18 @@ enum Cmd {
     Mcp,
 }
 
-fn is_cjk(c: char) -> bool {
-    ('\u{4e00}'..='\u{9fff}').contains(&c)
-}
-
 /// Insert spaces between CJK characters — mirrors Python's cjk_pad().
-fn cjk_pad(text: &str) -> String {
-    let mut out = String::with_capacity(text.len() * 2);
-    for c in text.chars() {
-        if is_cjk(c) {
-            out.push(' ');
-            out.push(c);
-            out.push(' ');
-        } else {
-            out.push(c);
-        }
-    }
-    out
-}
-
-fn connect(vault: &Path) -> rusqlite::Result<Connection> {
-    let dir = vault.join(".index");
-    fs::create_dir_all(&dir).ok();
-    let conn = Connection::open(dir.join("tree.db"))?;
-    conn.execute_batch(SCHEMA)?;
-    Ok(conn)
-}
 
 fn cmd_init(path: &Path) -> std::io::Result<()> {
-    for d in ["raw", "wiki/sources", "wiki/entities", "wiki/concepts",
-              "wiki/synthesis", "wiki/answers", ".index"] {
+    for d in [
+        "raw",
+        "wiki/sources",
+        "wiki/entities",
+        "wiki/concepts",
+        "wiki/synthesis",
+        "wiki/answers",
+        ".index",
+    ] {
         fs::create_dir_all(path.join(d))?;
     }
     let agents = path.join("AGENTS.md");
@@ -203,325 +157,26 @@ fn cmd_init(path: &Path) -> std::io::Result<()> {
 /// paragraphs become blocks. Tables/code are kept whole (P2).
 /// Index one Markdown document. PDFs go through `index_pdf` instead (§5.1:
 /// a new format = one new adapter, never a special case inside this function).
-fn index_file(
-    conn: &Connection,
-    doc_path: &str,
-    text: &str,
-    layer: &str,
-) -> rusqlite::Result<usize> {
-    let (fm, body) = split_frontmatter(text);
-    let title = fm_title(&fm).unwrap_or_else(|| doc_path.to_string());
-    conn.execute(
-        "INSERT OR REPLACE INTO documents(path,title,frontmatter,hash) VALUES(?,?,?,?)",
-        params![doc_path, title, fm, ""],
-    )?;
 
-    let title = fm_title(&fm).unwrap_or_else(|| doc_path.to_string());
-    let mut ordinal = 0usize;
-    let mut count = 0usize;
-    // Heading stack mirrors koiosbase/parsers/markdown.py: (level, path_titles).
-    // Block ids must be byte-identical to Python's
-    //   f"{doc_path}#{'/'.join(section_titles)}/{ordinal}"
-    // or the two shells write different trees into the same schema and eval
-    // results cannot be compared (P1: index is derived, Markdown is truth).
-    let base_title = title.clone();
-    let mut stack: Vec<(usize, String)> = Vec::new();
-    let mut pending: Vec<String> = Vec::new();
-    let mut section_no = 0i64;
-
-    let flush = |pending: &mut Vec<String>, sec_path: &str, breadcrumb: &str,
-                 ordinal: &mut usize, count: &mut usize,
-                 conn: &Connection, doc_path: &str| -> rusqlite::Result<()> {
-        let body: String = pending
-            .iter()
-            .map(|l| l.trim())
-            .filter(|l| !l.is_empty())
-            .collect::<Vec<_>>()
-            .join(" ");
-        pending.clear();
-        if body.is_empty() {
-            return Ok(());
-        }
-        *ordinal += 1;
-        *count += 1;
-        // id matches Python exactly: "{doc}#{sec_path}/{ordinal}", or
-        // "{doc}/{ordinal}" when there is no enclosing heading at all.
-        let id = if sec_path.is_empty() {
-            format!("{}/{}", doc_path, *ordinal)
-        } else {
-            format!("{}#{}/{}", doc_path, sec_path, *ordinal)
-        };
-        let sec_id = if sec_path.is_empty() {
-            doc_path.to_string()
-        } else {
-            format!("{}#{}", doc_path, sec_path)
-        };
-        let crumb = if sec_path.is_empty() {
-            breadcrumb.to_string()
-        } else {
-            format!("{} > {}", breadcrumb,
-                    sec_path.split('/').collect::<Vec<_>>().join(" > "))
-        };
-        let kind = if body.contains('|') { "table" } else { "paragraph" };
-        conn.execute(
-            "INSERT OR REPLACE INTO blocks(id,doc_path,section_id,type,breadcrumb,raw,\
-             hash,page_range,meta,ordinal,layer) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-            params![id, doc_path, sec_id, kind, crumb, body, "", None::<String>,
-                    "{}", *ordinal, layer],
-        )?;
-        conn.execute("DELETE FROM blocks_fts WHERE id=?", params![&id])?;
-        // store BOTH forms, mirroring the Python side
-        conn.execute(
-            "INSERT INTO blocks_fts(id,breadcrumb,raw) VALUES(?,?,?)",
-            params![&id, format!("{} {}", crumb, cjk_pad(&crumb)),
-                    format!("{} {}", body, cjk_pad(&body))],
-        )?;
-        Ok(())
-    };
-
-    // sec_path: current "/"-joined heading titles; "" means no heading yet.
-    let mut sec_path = String::new();
-    for line in body.lines() {
-        let s = line.trim();
-        if s.is_empty() {
-            flush(&mut pending, &sec_path, &base_title,
-                  &mut ordinal, &mut count, conn, doc_path)?;
-            continue;
-        }
-        if let Some(heading) = s.strip_prefix('#') {
-            flush(&mut pending, &sec_path, &base_title,
-                  &mut ordinal, &mut count, conn, doc_path)?;
-            let hashes = s.chars().take_while(|c| *c == '#').count();
-            let title = heading.trim_start_matches('#').trim().to_string();
-            let level = hashes.min(6);
-            while stack.last().map(|(l, _)| *l >= level).unwrap_or(false) {
-                stack.pop();
-            }
-            stack.push((level, title.clone()));
-            let titles: Vec<String> = stack.iter().map(|(_, t)| t.clone()).collect();
-            sec_path = titles.join("/");
-            // Python calls split_blocks() per section with start_ord=0, so the
-            // ordinal restarts at 1 inside every section (not global).
-            ordinal = 0;
-            section_no += 1;
-            let sid = format!("{}#{}", doc_path, sec_path);
-            let parent_id: Option<String> = if stack.len() > 1 {
-                let parent: Vec<String> =
-                    stack[..stack.len() - 1].iter().map(|(_, t)| t.clone()).collect();
-                Some(format!("{}#{}", doc_path, parent.join("/")))
-            } else {
-                None
-            };
-            conn.execute(
-                "INSERT OR REPLACE INTO sections(id,doc_path,parent_id,title,summary,\
-                 ordinal,layer) VALUES(?,?,?,?,?,?,'raw')",
-                params![sid, doc_path, parent_id, title, "" as &str, section_no],
-            )?;
-            continue;
-        }
-        pending.push(line.to_string());
-    }
-    flush(&mut pending, &sec_path, &base_title,
-          &mut ordinal, &mut count, conn, doc_path)?;
-    Ok(count)
-}
-
-fn split_frontmatter(text: &str) -> (String, String) {
-    if let Some(rest) = text.strip_prefix("---") {
-        if let Some(end) = rest.find("\n---") {
-            return (rest[..end].to_string(), rest[end + 4..].to_string());
-        }
-    }
-    (String::new(), text.to_string())
-}
-
-fn fm_title(fm: &str) -> Option<String> {
-    for line in fm.lines() {
-        if let Some((k, v)) = line.split_once(':') {
-            if k.trim() == "title" {
-                return Some(v.trim().trim_matches('"').to_string());
-            }
-        }
-    }
-    None
-}
-
-fn cmd_index(path: &Path) -> rusqlite::Result<()> {
-    let conn = connect(path)?;
-    // Wrap the whole ingest in ONE transaction. Without it every INSERT is its
-    // own implicit transaction and fsyncs, which dominated the runtime.
-    let tx = conn.unchecked_transaction()?;
-    // links are DERIVED from Markdown (§5.2), so a rebuild must start from an
-    // empty edge set — otherwise deleted wikilinks keep polluting the graph.
-    conn.execute("DELETE FROM links", [])?;
-    let mut total = 0usize;
-    let mut seen_links: std::collections::HashSet<(String, String, String)> =
-        std::collections::HashSet::new();
-    for (layer, dir_name) in [("raw", "raw"), ("wiki", "wiki")] {
-        let base = path.join(dir_name);
-        if !base.exists() {
-            continue;
-        }
-        for entry in walk_docs(&base) {
-            let rel = entry.strip_prefix(&base).unwrap().to_string_lossy().to_string();
-            // Derived pages (sources/, entities/) are regenerated by the
-            // compiler and must NOT be indexed, or every rebuild feeds the
-            // compiler's own output back in and the block count grows forever
-            // (this exact bug bit the Python side in v0.2 and v0.3).
-            if layer == "wiki"
-                && ingest::is_derived_page(&entry, &base)
-            {
-                continue;
-            }
-            let n = if entry.extension().and_then(|x| x.to_str()) == Some("pdf") {
-                index_pdf(&conn, &rel, &entry)?
-            } else {
-                let text = fs::read_to_string(&entry).unwrap_or_default();
-                index_file(&conn, &rel, &text, layer)?
-            };
-            total += n;
-            // Graph edges derive purely from Markdown (§5.2). Incremental
-            // rebuilds would otherwise leave dangling edges behind, so the
-            // whole table is cleared above and rebuilt here.
-            let mut evs: Vec<pipeline::Ev> = Vec::new();
-            {
-                let mut stmt = conn.prepare(
-                    "SELECT id,raw,breadcrumb,doc_path FROM blocks \
-                     WHERE doc_path=? AND layer=? ORDER BY ordinal",
-                )?;
-                let m = stmt.query_map(params![rel, layer], |r| {
-                    Ok(pipeline::Ev {
-                        id: r.get(0)?,
-                        raw: r.get::<_, String>(1).unwrap_or_default(),
-                        breadcrumb: r.get::<_, String>(2).unwrap_or_default(),
-                        doc_path: r.get::<_, String>(3).unwrap_or_default(),
-                    })
-                })?;
-                for e in m.flatten() {
-                    evs.push(e);
-                }
-            }
-            ingest::add_wikilink_edges(&conn, &evs, &mut seen_links)?;
-        }
-    }
-    // Backfill navigational summaries: a section's first block becomes its
-    // summary (§4.1). Done after ingest because the body arrives AFTER the
-    // heading, so it is not available when the heading line is seen.
-    let mut upd = conn.prepare(
-        "UPDATE sections SET summary = COALESCE((SELECT raw FROM blocks \
-         WHERE blocks.section_id = sections.id ORDER BY ordinal LIMIT 1), '')",
-    )?;
-    upd.execute([])?;
-    drop(upd);
-    tx.commit()?;
-    println!("indexed {total} blocks from {}", path.display());
-    Ok(())
-}
-
-fn walk_md(base: &Path) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    let mut stack = vec![base.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        if let Ok(rd) = fs::read_dir(&dir) {
-            for e in rd.flatten() {
-                let p = e.path();
-                if p.is_dir() {
-                    if p.file_name().and_then(|n| n.to_str()) != Some(".index") {
-                        stack.push(p);
-                    }
-                } else if p.extension().and_then(|x| x.to_str()) == Some("md") {
-                    out.push(p);
-                }
-            }
-        }
-    }
-    out.sort();
-    out
-}
+/// Collect (rel_path, title, raw blocks) + per-doc sections for every Markdown
+/// file in raw/. Shared by `index` and `compile` so both see the same inputs.
+///
+/// This exists because `index` must REGENERATE sources/ before the wiki walk —
+/// otherwise the first pass counts only the raw blocks and the second counts the
+/// derived ones too, making the command look non-idempotent (the Python side had
+/// exactly this bug; see build_index's "Derived pages are generated BEFORE the
+/// wiki walk" comment).
 
 /// Same walk, but accepting every format an adapter handles (§5.1).
-fn walk_docs(base: &Path) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    let mut stack = vec![base.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        if let Ok(rd) = fs::read_dir(&dir) {
-            for e in rd.flatten() {
-                let p = e.path();
-                if p.is_dir() {
-                    if p.file_name().and_then(|n| n.to_str()) != Some(".index") {
-                        stack.push(p);
-                    }
-                } else if ingest::is_supported(&p) {
-                    out.push(p);
-                }
-            }
-        }
-    }
-    out.sort();
-    out
-}
 
 /// Index a PDF: one Section per page, Blocks tagged with page_range (§4.1).
 ///
 /// `page_range` lives in the blocks.page_range column as a JSON pair, matching
 /// `json.dumps(b.page_range)` on the Python side.
-fn index_pdf(conn: &Connection, doc_path: &str, path: &std::path::Path) -> rusqlite::Result<usize> {
-    let pages = pdf::extract_pages_cpu(path);
-    let scanned = pdf::looks_scanned(&pages, 40);
-    let fm = pdf::pdf_frontmatter(path, scanned);
-    let title = fm_title(&fm).unwrap_or_else(|| doc_path.to_string());
-    conn.execute(
-        "INSERT OR REPLACE INTO documents(path,title,frontmatter,hash) VALUES(?,?,?,?)",
-        params![doc_path, title, fm, ""],
-    )?;
-    let mut count = 0usize;
-    let mut ordinal = 0usize;
-    for (i, text) in pages.iter().enumerate() {
-        let page_no = i + 1;
-        let sid = format!("{doc_path}#p{page_no}");
-        conn.execute(
-            "INSERT OR REPLACE INTO sections(id,doc_path,parent_id,title,summary,ordinal,layer)\
-             VALUES(?,?,NULL,?,?,?,'raw')",
-            params![sid, doc_path, format!("p.{page_no}"), "" as &str, page_no as i64],
-        )?;
-        for b in pdf::page_to_blocks(doc_path, page_no, text, ordinal) {
-            ordinal = ordinal.max(
-                b.id.rsplit('/').next().and_then(|n| n.parse().ok()).unwrap_or(ordinal),
-            );
-            // Python stores json.dumps(b.page_range) / json.dumps(b.meta), which
-            // use ", " / ": " separators — the columns must match byte-for-byte.
-            let page_range = format!("[{page_no}, {page_no}]");
-            let meta = r#"{"source_format": "pdf"}"#.to_string();
-            let kind = if b.raw.contains('|') { "table" } else { "paragraph" };
-            conn.execute(
-                "INSERT OR REPLACE INTO blocks(id,doc_path,section_id,type,breadcrumb,raw,hash,\
-                 page_range,meta,ordinal,layer) VALUES(?,?,?,?,?,?,?,?,?,?,'raw')",
-                params![
-                    b.id, doc_path, sid, kind, b.breadcrumb, b.raw, "", page_range, meta,
-                    ordinal as i64
-                ],
-            )?;
-            conn.execute("DELETE FROM blocks_fts WHERE id=?", params![&b.id])?;
-            conn.execute(
-                "INSERT INTO blocks_fts(id,breadcrumb,raw) VALUES(?,?,?)",
-                params![
-                    &b.id,
-                    format!("{} {}", b.breadcrumb, cjk_pad(&b.breadcrumb)),
-                    format!("{} {}", b.raw, cjk_pad(&b.raw))
-                ],
-            )?;
-            count += 1;
-        }
-    }
-    Ok(count)
-}
 
 fn cmd_search(path: &Path, query: &str, top: usize) -> rusqlite::Result<()> {
     let conn = connect(path)?;
-    let terms: Vec<String> = query
-        .split_whitespace()
-        .map(cjk_pad)
-        .collect();
+    let terms: Vec<String> = query.split_whitespace().map(cjk_pad).collect();
     if terms.is_empty() {
         println!("(no hits)");
         return Ok(());
@@ -544,7 +199,9 @@ fn cmd_search(path: &Path, query: &str, top: usize) -> rusqlite::Result<()> {
         }
         for (id, score) in rows {
             let raw: String = conn
-                .query_row("SELECT raw FROM blocks WHERE id=?", params![id], |r| r.get(0))
+                .query_row("SELECT raw FROM blocks WHERE id=?", params![id], |r| {
+                    r.get(0)
+                })
                 .unwrap_or_default();
             let snippet: String = raw.chars().take(110).collect();
             println!("[{score:.4}] {id}\n    {snippet}");
@@ -562,7 +219,9 @@ fn print_blocks(conn: &Connection, ids: &[String]) -> rusqlite::Result<()> {
     }
     for (i, id) in ids.iter().enumerate() {
         let raw: String = conn
-            .query_row("SELECT raw FROM blocks WHERE id=?", params![id], |r| r.get(0))
+            .query_row("SELECT raw FROM blocks WHERE id=?", params![id], |r| {
+                r.get(0)
+            })
             .unwrap_or_default();
         let snippet: String = raw.chars().take(110).collect();
         println!("[{i}] {id}\n    {snippet}");
@@ -593,7 +252,12 @@ fn cmd_query(path: &Path, query: &str, top: usize) -> rusqlite::Result<()> {
     let ids: Vec<String> = rows.iter().map(|(i, _)| i.clone()).collect();
     let first: String = ids
         .first()
-        .and_then(|id| conn.query_row("SELECT raw FROM blocks WHERE id=?", params![id], |r| r.get::<_, String>(0)).ok())
+        .and_then(|id| {
+            conn.query_row("SELECT raw FROM blocks WHERE id=?", params![id], |r| {
+                r.get::<_, String>(0)
+            })
+            .ok()
+        })
         .unwrap_or_default();
     let joined = first;
     let mut verdict = retrieval::grade(query, &joined);
@@ -605,13 +269,21 @@ fn cmd_query(path: &Path, query: &str, top: usize) -> rusqlite::Result<()> {
             escalated = true;
             let j2 = full
                 .iter()
-                .filter_map(|id| conn.query_row("SELECT raw FROM blocks WHERE id=?", params![id], |r| r.get::<_, String>(0)).ok())
+                .filter_map(|id| {
+                    conn.query_row("SELECT raw FROM blocks WHERE id=?", params![id], |r| {
+                        r.get::<_, String>(0)
+                    })
+                    .ok()
+                })
                 .collect::<Vec<_>>()
                 .join(" ");
             verdict = retrieval::grade(query, &j2);
         }
     }
-    println!("verdict: {verdict}  hits: {}  escalated: {escalated}", ids.len());
+    println!(
+        "verdict: {verdict}  hits: {}  escalated: {escalated}",
+        ids.len()
+    );
     print_blocks(&conn, &ids)
 }
 
@@ -619,9 +291,21 @@ fn cmd_eval(path: &Path) -> rusqlite::Result<()> {
     // Seed golden set — must stay identical to koiosbase/eval/harness.py
     // SEED_CASES, otherwise the two shells report incomparable scores.
     let cases: Vec<(&str, Option<&str>, bool)> = vec![
-        ("ACME 公司的营收是多少？", Some("report.md#财务分析/负债分析/1"), false),
-        ("这家公司的现金流是多少？", Some("report.md#财务分析/现金流/1"), false),
-        ("负债金额是多少？", Some("report.md#财务分析/负债分析/1"), false),
+        (
+            "ACME 公司的营收是多少？",
+            Some("report.md#财务分析/负债分析/1"),
+            false,
+        ),
+        (
+            "这家公司的现金流是多少？",
+            Some("report.md#财务分析/现金流/1"),
+            false,
+        ),
+        (
+            "负债金额是多少？",
+            Some("report.md#财务分析/负债分析/1"),
+            false,
+        ),
         ("火星基地 2030 年的预算是多少？", None, false),
         ("公司是否披露了季度分红政策？", None, true), // needs_llm -> skipped
     ];
@@ -675,7 +359,10 @@ fn cmd_eval(path: &Path) -> rusqlite::Result<()> {
         if ids.iter().any(|i| i == want) {
             recall_ok += 1;
         } else {
-            println!("  FAIL [factual] {q} -> got {:?}, want {want}", &ids[..ids.len().min(2)]);
+            println!(
+                "  FAIL [factual] {q} -> got {:?}, want {want}",
+                &ids[..ids.len().min(2)]
+            );
         }
         // citation coverage measured on the assembled context (harness 128-130)
         let blocks2 = pipeline::retrieve_channel(&conn, q, top);
@@ -853,9 +540,8 @@ fn cmd_compile(vault: &Path) -> rusqlite::Result<()> {
             }
         }
         {
-            let mut stmt = conn.prepare(
-                "SELECT title,id FROM sections WHERE doc_path=? ORDER BY ordinal",
-            )?;
+            let mut stmt =
+                conn.prepare("SELECT title,id FROM sections WHERE doc_path=? ORDER BY ordinal")?;
             let m = stmt.query_map(params![rel], |r| {
                 Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
             })?;

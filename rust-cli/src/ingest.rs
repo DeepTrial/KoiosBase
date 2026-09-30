@@ -35,9 +35,7 @@ pub fn is_derived_page(path: &Path, base: &Path) -> bool {
         Err(_) => return false,
     };
     matches!(
-        rel.components()
-            .next()
-            .and_then(|c| c.as_os_str().to_str()),
+        rel.components().next().and_then(|c| c.as_os_str().to_str()),
         Some("sources") | Some("entities")
     )
 }

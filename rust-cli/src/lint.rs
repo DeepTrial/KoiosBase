@@ -138,7 +138,10 @@ fn parse_ymd_days(s: &str) -> Option<i64> {
 
 /// Report pages flagged stale by cascade propagation (§8.3).
 pub fn check_stale_pages(conn: &Connection) -> Vec<String> {
-    if conn.execute("SELECT 1 FROM page_state LIMIT 1", []).is_err() {
+    if conn
+        .execute("SELECT 1 FROM page_state LIMIT 1", [])
+        .is_err()
+    {
         return Vec::new();
     }
     let mut stmt = match conn.prepare("SELECT page_path,reason FROM page_state WHERE stale=1") {
@@ -157,9 +160,9 @@ pub fn check_stale_pages(conn: &Connection) -> Vec<String> {
 /// Open conflicts parked in 「矛盾与未决」 must not be silently forgotten.
 pub fn check_conflict_markers(conn: &Connection) -> Vec<String> {
     let mut out = Vec::new();
-    let mut stmt = match conn.prepare(
-        "SELECT id,raw FROM blocks WHERE layer='wiki' AND raw LIKE '%矛盾与未决%'",
-    ) {
+    let mut stmt = match conn
+        .prepare("SELECT id,raw FROM blocks WHERE layer='wiki' AND raw LIKE '%矛盾与未决%'")
+    {
         Ok(s) => s,
         Err(_) => return out,
     };

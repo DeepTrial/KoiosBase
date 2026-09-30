@@ -241,7 +241,10 @@ pub fn full_query(conn: &Connection, question: &str, top: usize) -> QueryResult 
     }
     let context = assemble(&blocks, 6000);
     let answer = generate(question, &context, &blocks);
-    QueryResult { answer, evidence: blocks }
+    QueryResult {
+        answer,
+        evidence: blocks,
+    }
 }
 
 pub fn is_refusal(answer: &str) -> bool {

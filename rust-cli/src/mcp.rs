@@ -133,8 +133,8 @@ fn tool_search(args: &Value) -> Result<Value, String> {
     let conn = crate::connect(&vault).map_err(|e| e.to_string())?;
     // Python scores via hybrid_search then re-reads each row and attaches
     // `d["score"] = score`, so `score` is the LAST key in the emitted dict.
-    let rows = crate::retrieval::hybrid_search(&conn, &question, top, true)
-        .map_err(|e| e.to_string())?;
+    let rows =
+        crate::retrieval::hybrid_search(&conn, &question, top, true).map_err(|e| e.to_string())?;
     let ids: Vec<String> = rows.iter().map(|(i, _)| i.clone()).collect();
     let mut blocks: Vec<Ev> = ids
         .iter()
@@ -217,7 +217,13 @@ fn tool_write_answer(args: &Value) -> Result<Value, String> {
 fn python_dumps(v: &Value) -> String {
     match v {
         Value::Null => "null".to_string(),
-        Value::Bool(b) => if *b { "true".to_string() } else { "false".to_string() },
+        Value::Bool(b) => {
+            if *b {
+                "true".to_string()
+            } else {
+                "false".to_string()
+            }
+        }
         Value::Number(n) => n.to_string(),
         Value::String(s) => {
             let esc = s
@@ -235,7 +241,11 @@ fn python_dumps(v: &Value) -> String {
         Value::Object(m) => format!(
             "{{{}}}",
             m.iter()
-                .map(|(k, val)| format!("{}: {}", python_dumps(&Value::String(k.clone())), python_dumps(val)))
+                .map(|(k, val)| format!(
+                    "{}: {}",
+                    python_dumps(&Value::String(k.clone())),
+                    python_dumps(val)
+                ))
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
@@ -249,9 +259,7 @@ pub fn handle_request(req: &Value) -> Value {
     let params = req.get("params").cloned().unwrap_or_else(|| json!({}));
 
     let ok = |result: Value| json!({"jsonrpc": "2.0", "id": rid, "result": result});
-    let err = |code: i64, msg: String| {
-        json!({"jsonrpc": "2.0", "id": rid, "error": {"code": code, "message": msg}})
-    };
+    let err = |code: i64, msg: String| json!({"jsonrpc": "2.0", "id": rid, "error": {"code": code, "message": msg}});
 
     match method {
         "initialize" => ok(json!({
@@ -262,7 +270,10 @@ pub fn handle_request(req: &Value) -> Value {
         "tools/list" => ok(json!({"tools": tool_defs()})),
         "tools/call" => {
             let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
-            let arguments = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+            let arguments = params
+                .get("arguments")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
             let payload = match name {
                 "koios_search" => tool_search(&arguments),
                 "koios_ask" => tool_ask(&arguments),

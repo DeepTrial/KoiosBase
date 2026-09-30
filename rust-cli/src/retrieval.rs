@@ -58,13 +58,23 @@ pub fn fts_search(
         if t.chars().any(is_cjk) {
             // whole-phrase first: per-character padding is only a fallback, since
             // matching on one common char (年) breaks the refusal contract.
-            padded.push(t.chars().collect::<Vec<_>>()
-                .iter().map(|c| c.to_string()).collect::<Vec<_>>().join(" "));
+            padded.push(
+                t.chars()
+                    .collect::<Vec<_>>()
+                    .iter()
+                    .map(|c| c.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            );
         } else {
             padded.push(t.clone());
         }
     }
-    let quoted: Vec<String> = padded.iter().take(32).map(|p| format!("\"{}\"", p)).collect();
+    let quoted: Vec<String> = padded
+        .iter()
+        .take(32)
+        .map(|p| format!("\"{}\"", p))
+        .collect();
     let mut chars: Vec<String> = Vec::new();
     for p in &padded {
         if p.chars().any(is_cjk) {
@@ -102,8 +112,9 @@ pub fn fts_search(
                 .into_iter()
                 .filter(|(id, _)| {
                     let raw: String = conn
-                        .query_row("SELECT raw FROM blocks WHERE id=?", params![id],
-                                   |r| r.get(0))
+                        .query_row("SELECT raw FROM blocks WHERE id=?", params![id], |r| {
+                            r.get(0)
+                        })
                         .unwrap_or_default();
                     chars.iter().filter(|c| raw.contains(c.as_str())).count() >= need
                 })
@@ -131,7 +142,13 @@ pub fn rrf_fuse(lists: &[Vec<(String, f64)>], weights: &[f64], k: f64) -> Vec<(S
 
 pub fn load_graph(conn: &Connection) -> rusqlite::Result<HashMap<String, Vec<(String, f64)>>> {
     let mut stmt = conn.prepare("SELECT src,dst,weight FROM links")?;
-    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, f64>(2)?)))?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, f64>(2)?,
+        ))
+    })?;
     let mut adj: HashMap<String, Vec<(String, f64)>> = HashMap::new();
     for r in rows.flatten() {
         adj.entry(r.0).or_default().push((r.1, r.2));
@@ -179,16 +196,27 @@ pub fn personalized_pagerank(
     let out_w: HashMap<String, f64> = nodes
         .iter()
         .map(|n| {
-            let w = adj.get(n).map(|e| e.iter().map(|(_, x)| x).sum::<f64>()).unwrap_or(0.0);
+            let w = adj
+                .get(n)
+                .map(|e| e.iter().map(|(_, x)| x).sum::<f64>())
+                .unwrap_or(0.0);
             (n.clone(), w)
         })
         .collect();
 
-    let mut pr: HashMap<String, f64> = nodes.iter().map(|n| (n.clone(), 1.0 / nodes.len() as f64)).collect();
+    let mut pr: HashMap<String, f64> = nodes
+        .iter()
+        .map(|n| (n.clone(), 1.0 / nodes.len() as f64))
+        .collect();
     for _ in 0..iterations {
         let mut new: HashMap<String, f64> = nodes
             .iter()
-            .map(|n| (n.clone(), (1.0 - damping) * personal.get(n).cloned().unwrap_or(0.0)))
+            .map(|n| {
+                (
+                    n.clone(),
+                    (1.0 - damping) * personal.get(n).cloned().unwrap_or(0.0),
+                )
+            })
             .collect();
         let mut dangling = 0.0;
         for n in &nodes {
@@ -255,17 +283,28 @@ pub fn hybrid_search(
 }
 
 /// Channel ①: pick sections whose navigational summary matches, return their blocks.
-pub fn tree_search(conn: &Connection, query: &str, top_sections: usize) -> rusqlite::Result<Vec<String>> {
+pub fn tree_search(
+    conn: &Connection,
+    query: &str,
+    top_sections: usize,
+) -> rusqlite::Result<Vec<String>> {
     let terms: HashSet<String> = query_terms(query)
         .iter()
-        .flat_map(|t| cjk_pad(t).split_whitespace().map(|s| s.to_lowercase()).collect::<Vec<_>>())
+        .flat_map(|t| {
+            cjk_pad(t)
+                .split_whitespace()
+                .map(|s| s.to_lowercase())
+                .collect::<Vec<_>>()
+        })
         .collect();
     if terms.is_empty() {
         return Ok(Vec::new());
     }
     let mut stmt = conn.prepare("SELECT id,title,summary FROM sections")?;
     let rows: Vec<(String, String, String)> = stmt
-        .query_map([], |r| Ok((r.get(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?
+        .query_map([], |r| {
+            Ok((r.get(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+        })?
         .filter_map(Result::ok)
         .collect();
     let mut scored: Vec<(String, f64)> = Vec::new();
@@ -294,16 +333,17 @@ pub fn tree_search(conn: &Connection, query: &str, top_sections: usize) -> rusql
 
 /// Channel ④: whole corpus when small enough; empty when over the threshold.
 pub fn full_corpus(conn: &Connection, max_chars: usize) -> rusqlite::Result<Vec<String>> {
-    let size: i64 = conn.query_row(
-        "SELECT COALESCE(SUM(LENGTH(raw)),0) FROM blocks",
-        [],
-        |r| r.get(0),
-    )?;
+    let size: i64 = conn.query_row("SELECT COALESCE(SUM(LENGTH(raw)),0) FROM blocks", [], |r| {
+        r.get(0)
+    })?;
     if size as usize > max_chars {
         return Ok(Vec::new());
     }
     let mut stmt = conn.prepare("SELECT id FROM blocks ORDER BY doc_path, ordinal")?;
-    let ids = stmt.query_map([], |r| r.get(0))?.filter_map(Result::ok).collect();
+    let ids = stmt
+        .query_map([], |r| r.get(0))?
+        .filter_map(Result::ok)
+        .collect();
     Ok(ids)
 }
 
@@ -313,15 +353,20 @@ pub fn grade(question: &str, joined: &str) -> &'static str {
         return "evidence_absent";
     }
     let lower = joined.to_lowercase();
-    let hits = question.chars().collect::<HashSet<char>>().iter().filter(|c| {
-        if c.is_alphanumeric() {
-            lower.contains(&c.to_lowercase().to_string())
-        } else if is_cjk(**c) {
-            lower.contains(**c)
-        } else {
-            false
-        }
-    }).count();
+    let hits = question
+        .chars()
+        .collect::<HashSet<char>>()
+        .iter()
+        .filter(|c| {
+            if c.is_alphanumeric() {
+                lower.contains(&c.to_lowercase().to_string())
+            } else if is_cjk(**c) {
+                lower.contains(**c)
+            } else {
+                false
+            }
+        })
+        .count();
     if hits == 0 {
         "missing"
     } else {

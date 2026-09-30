@@ -71,12 +71,7 @@ fn is_heading(line: &str) -> bool {
 }
 
 /// Turn one page's text into Blocks tagged with its page_range (§4.1).
-pub fn page_to_blocks(
-    doc_path: &str,
-    page_no: usize,
-    text: &str,
-    start_ord: usize,
-) -> Vec<Ev> {
+pub fn page_to_blocks(doc_path: &str, page_no: usize, text: &str, start_ord: usize) -> Vec<Ev> {
     let mut blocks: Vec<Ev> = Vec::new();
     let mut ordinal = start_ord;
     let base_title = match doc_path.rsplit_once('.') {
@@ -112,10 +107,7 @@ pub fn page_to_blocks(
 
     let mut lines: Vec<&str> = text.split('\n').collect();
     // borrow-checker-friendly two-pass: collect (is_heading, line) first
-    let classified: Vec<(bool, &str)> = lines
-        .iter()
-        .map(|l| (is_heading(l), *l))
-        .collect();
+    let classified: Vec<(bool, &str)> = lines.iter().map(|l| (is_heading(l), *l)).collect();
     for (is_h, line) in classified {
         let s = line.trim();
         if s.is_empty() {

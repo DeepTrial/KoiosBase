@@ -109,13 +109,22 @@ pub fn render_brief(title: &str, blocks: &[Ev], stamp: &str) -> String {
             if bullets.is_empty() {
                 "- (无证据)".to_string()
             } else {
-                bullets.iter().take(12).cloned().collect::<Vec<_>>().join("\n")
+                bullets
+                    .iter()
+                    .take(12)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join("\n")
             }
             .as_str(),
         )
         .replace(
             "{evidence}",
-            if evidence.is_empty() { "- (无)" } else { &evidence },
+            if evidence.is_empty() {
+                "- (无)"
+            } else {
+                &evidence
+            },
         )
         .replace("{sources}", &sources)
 }
@@ -175,7 +184,11 @@ pub fn studio_brief(
     std::fs::create_dir_all(&out)?;
     let stamp = crate::state::now_date();
     let slug = crate::compile::slugify(&topic.chars().take(40).collect::<String>());
-    let slug = if slug.is_empty() { "brief".to_string() } else { slug };
+    let slug = if slug.is_empty() {
+        "brief".to_string()
+    } else {
+        slug
+    };
     let target = out.join(format!("brief-{slug}.md"));
     std::fs::write(&target, render_brief(topic, &blocks, &stamp))?;
     Ok(target)
@@ -224,7 +237,11 @@ pub fn studio_mindmap(
     std::fs::create_dir_all(&out)?;
     let stamp = crate::state::now_date();
     let slug = crate::compile::slugify(&root.chars().take(40).collect::<String>());
-    let slug = if slug.is_empty() { "map".to_string() } else { slug };
+    let slug = if slug.is_empty() {
+        "map".to_string()
+    } else {
+        slug
+    };
     let target = out.join(format!("mindmap-{slug}.md"));
     std::fs::write(&target, render_mindmap(root, root, &branches, &stamp))?;
     Ok(target)

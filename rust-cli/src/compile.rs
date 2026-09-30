@@ -22,14 +22,28 @@ static ALLCAPS: Lazy<Regex> = Lazy::new(|| Regex::new(r"\b([A-Z]{2,}[A-Za-z0-9]*
 static ORG_SUFFIX: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"([\x{4e00}-\x{9fff}]{2,8}(?:公司|集团|银行|研究院|大学|中心|部))").unwrap()
 });
-static CONFIDENCE_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?m)^confidence:\s*(\w+)").unwrap());
+static CONFIDENCE_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?m)^confidence:\s*(\w+)").unwrap());
 static TERMS_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"[A-Za-z0-9\x{4e00}-\x{9fff}]{3,}").unwrap());
 
 const STOPWORDS: [&str; 17] = [
-    "The", "This", "That", "However", "Therefore", "In", "On", "For", "Note", "Total",
-    "Revenue", "Operating", "Cash", "Debt", "Net", "Gross", "Annual",
+    "The",
+    "This",
+    "That",
+    "However",
+    "Therefore",
+    "In",
+    "On",
+    "For",
+    "Note",
+    "Total",
+    "Revenue",
+    "Operating",
+    "Cash",
+    "Debt",
+    "Net",
+    "Gross",
+    "Annual",
 ];
 
 #[derive(Default)]
@@ -206,7 +220,15 @@ pub fn render_entity_page(ent: &Entity, stamp: &str) -> String {
         .join(", ");
     ENTITY_TEMPLATE
         .replace("{eid}", &ent.entity_id)
-        .replace("{aliases}", &ent.aliases.iter().take(5).cloned().collect::<Vec<_>>().join(", "))
+        .replace(
+            "{aliases}",
+            &ent.aliases
+                .iter()
+                .take(5)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", "),
+        )
         .replace("{stamp}", stamp)
         .replace("{sources}", &sources)
         .replace("{name}", &ent.name)
