@@ -2,58 +2,63 @@
 [![GitHub Release](https://img.shields.io/github/v/release/DeepTrial/KoiosBase)](https://github.com/DeepTrial/KoiosBase/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-English version | [中文版](README.md)
+[English](README.md) | [中文](README.zh.md) | [日本語](README.ja.md)
 
 # KoiosBase
 
-KoiosBase 是一个轻量级、Markdown 原生的 LLM 知识库系统。
+KoiosBase 是一个轻量、Markdown 原生的 LLM 知识库。
 
-主流 RAG 范式——「把文档切成 chunk、嵌入成向量、按相似度捞取 top-k」——丢弃了知识的
-结构、关系与生命周期；后来叠加的各种补丁（混合检索、重排序、上下文化）只缓解症状。
+主流 RAG 范式——*把文档切成块、嵌入、按相似度取 top-k*——丢掉了结构、关系与
+生命周期。此后叠加的每一项修补（混合检索、重排、块上下文化）都只治症状。
 
-KoiosBase 的立场不同：**把知识库当作一个持续构建的软件工程来对待**。
+KoiosBase 采取另一种立场：**把知识库当作被持续构建的软件工程**。
 
 | 软件工程 | KoiosBase |
 | --- | --- |
-| 源代码仓库 | `raw/` —— 人维护的 Markdown Vault |
-| 编译器 | 编译层 —— 摄入时把源文档综合为结构化知识页 |
-| 构建产物 | `.index/` —— 向量、BM25、图索引，全部可重建 |
-| 运行时 | 查询管线 —— 在构建产物上导航与推理 |
-| 静态检查 / CI | lint 园丁 —— 周期性体检 |
+| 源码仓库 | `raw/` — 人工维护的 Markdown（vault） |
+| 编译器 | 编译层 — 在 ingest 时把源文档合成为结构化页面 |
+| 构建产物 | `.index/` — BM25、图；始终可重建 |
+| 运行时 | 查询流水线 — 在产物上导航与推理 |
+| Lint / CI | gardener — 周期性健康检查 |
 | 版本控制 | Git + 版本链 |
 
-## 与纯 RAG 的区别
+## 与普通 RAG 的差异
 
-| | 纯 RAG | KoiosBase |
+| | 普通 RAG | KoiosBase |
 | --- | --- | --- |
-| 存储 | 扁平 chunk 池 | 三层知识模型（原料 / 编译 / 派生） |
-| 检索 | 单次 top-k | 通道路由 + 充分性迭代 |
-| 增长 | 只进不出 | 摄入编译 + 问答回流 + lint 自愈 |
-| 纠错 | 重切重嵌 | 状态标记 + 沿引用链传播 |
-| 信任 | 相似度分数 | 引用契约 + 页码级溯源 |
+| 存储 | 扁平块池 | 三层模型（raw / 编译 / 派生） |
+| 检索 | 一次性 top-k | 通道路由 + 充分性迭代 |
+| 增长 | 只增不改 | ingest 编译 + 答案回流 + lint 自愈 |
+| 纠错 | 重新切块、重新嵌入 | 状态标记 + 沿引用链传播 |
+| 可信度 | 相似度分数 | 引用契约 + 页级溯源 |
 
-## 七条第一性原理
+## 第一性原理
+
+所有机制都由七条原则推导而来，不允许拼凑组件：
 
 - **P1** Markdown 是唯一真相源。
-- **P2** 存最细的，取任意粒度（粗粒度只是视图）。
+- **P2** 以最细粒度存储；以任意粒度检索（视图）。
 - **P3** 检索是导航与推理，不是相似度竞赛。
-- **P4** 知识在摄入时综合，不在查询时重推导。
-- **P5** 知识有状态，错误可传播式修正。
-- **P6** 一切断言可审计到原文。
-- **P7** 判定者与生成者必须异源（反自证）。
+- **P4** 知识在 ingest 时合成，不在每次查询时重算。
+- **P5** 知识有状态；错误会传播，且可修复。
+- **P6** 每条断言都可回溯到源头。
+- **P7** 判定者必须与生成者不同源（反自证）。
 
 ## 安装
 
-需要 Python 3.10+（SQLite 自带 FTS5）。
+需要 Python 3.10+（SQLite 带 FTS5 —— CPython 已内置）。
 
 ```bash
 pip install -e ".[test]"
 ```
 
+每个 [release](https://github.com/DeepTrial/KoiosBase/releases) 附带预编译二进制
+（无需 Python）：`koios-linux-x86_64`（musl 静态）与 `koios-windows-x86_64.exe`。
+
 ## 快速开始
 
 ```bash
-koios init myvault          # 建库并写入 AGENTS.md 契约
+koios init myvault          # 搭建 vault + AGENTS.md 契约
 # 编辑 myvault/raw/*.md
 koios index myvault         # 构建派生索引（幂等）
 koios search "营收" -p myvault
@@ -61,70 +66,88 @@ koios lint myvault          # L1 程序化健康检查
 koios checkclaim "营收 32 亿元" "营收 32 亿元"
 ```
 
-## 当前进度（v0.8）
+## 两个 shell，同一个 vault
 
-已实现（对应 `docs/KoiosBase设计文档v1.3.md` 路线图）：
+KoiosBase 同时提供 Python 实现与 Rust 实现。两者读写**相同**的 vault 格式——
+`raw/` + `wiki/` 是真相，`.index/` 是派生产物，因此任一侧建索引、任一侧查询都
+可以。
 
-- **ACL / 多租户**（§9.2）：写在 frontmatter，**在检索阶段过滤**，受限内容绝不
-  进入模型上下文（生成后遮掩会以改写形式泄漏）
-- **MCP 服务器**（§11）：`koios mcp` 走 stdio JSON-RPC，暴露 `koios_search`、
-  `koios_ask`、`koios_write_answer`；直接按协议实现，不依赖 SDK，可离线运行
-- **Studio 输出**（§13）：`koios studio brief|mindmap`，不新增断言且带引用（P6）
-- 知识状态机、级联传播、懒更新、园丁检查（v0.4）
-- 编译层、质量门、答案回流、PPR 置信加权（v0.3）
-- PDF 适配、页码溯源、sources/ 导读页（v0.2）、四通道检索、评测骨架（v0.1）
-- 60 个 pytest 用例 + CI（ruff、3.10/3.11/3.12、PDF 专项）
+Python CLI 是参考实现，覆盖全部命令。Rust 二进制覆盖同样的命令面，并在共享
+fixture 上与 Python 输出逐项比对（block id、breadcrumb、生成的页面、MCP 响应
+均为字节级比对）。
 
 ```bash
-koios mcp                                   # MCP 服务端（stdio，§11）
-koios studio brief  -p myvault -t 财务       # 简报（§13）
-koios studio mindmap -p myvault -t 年报      # 思维导图（§13）
+koios search "营收" -p myvault -c tree     # 强制指定通道（§6.1）
+koios search "营收" -p myvault --groups finance-team   # ACL 主体（§9.2）
+koios eval -p myvault                      # 评测基线
+koios eval -p myvault --strict             # 已知语义缺口也算失败
 ```
 
-```bash
-koios retract -p myvault -b "r.md#财务/1" -r "数字错误"   # 级联传播（§8.3）
-koios lint myvault                                        # 园丁体检（§9.3）
-```
+## 当前范围（v0.8.1）
 
-```bash
-koios compile -p myvault                      # 编译 entities/（§5.3）
-koios promote wiki/entities/acme.md --verified # 晋升（须验证/人工，§5.4）
-koios answer -p myvault -q "..." -a "..."      # 答案回流（§6.6）
-```
+- **ACL / 多租户**（§9.2）：在 frontmatter 中声明，**在检索时**强制——受限文本
+  永不进入模型（生成后再遮蔽会以转述形式泄漏）。派生 `sources/` 页继承其源
+  raw 文档的授权：生成的页面本身不声明 `acl`，若按字面读取会把受限内容判为
+  公开。
+- **知识状态机**（§8.2/§8.3）：块带 `active | superseded | disputed |
+  retracted | draft`；撤回沿引用链传播。被撤回的块在所有读路径上硬过滤。引用
+  了「源文档已变动」页面的回答会标注（待更新）。
+- **MCP server**（§11）：`koios mcp` 通过 stdio 讲 JSON-RPC，暴露
+  `koios_search`、`koios_ask`、`koios_write_answer`。直接按协议实现——不依赖
+  SDK，可离线运行。
+- **Studio 导出**（§13）：`koios studio brief|mindmap` ——不新增断言且带引用的
+  投影（P6）。两者均过 ACL：导出会落盘，因此那里的泄漏比生成侧泄漏更持久。
+- **编译层**（§5.3/§5.4）：实体页与源页；晋升必须经跨族验证或人工确认，绝不
+  按引用计数。重编译保留页面已晋升的 confidence 与人工区段。
+- **PDF 适配器**（§5.1）：CPU 文本档 + 页级溯源，引用可指向确切页码。VLM
+  档是 hook，不是依赖。
+- **四通道**（§6.1）+ Grader 驱动的 Self-Route 升级（§6.2）。
+- 65 条 pytest 用例 + CI（ruff、Python 3.10/3.11/3.12、PDF job）。
 
-```bash
-koios search "营收" -p myvault -c tree     # 指定通道 ①
-koios eval -p myvault                      # 评测基线（needs-llm 题计入不计过）
-koios eval -p myvault --strict             # 连已知语义缺口也算失败
-```
+### 已知缺口 —— 如实登记，不隐藏
 
-诚实标注的已知限制：`koios eval` 输出 `needs_llm` 计数。这类问题关键词证据会
-误判（例如语料提到「公司」≠ 能回答「分红政策」），区分「提到」与「回答」要等 v0.3
-的跨家族 reranker/Grader；当前把它们计为缺口，不静默放过。
+以下均为已记录的边界，不是疏漏。依赖本系统前请先阅读。
 
-尚未实现（后续版本）：编译层（entities/concepts，含通道 ⓪ wiki 优先与 LLM 撰写的
-导航式摘要）、PDF 适配器、VLM 抽检环；跨家族 L2 判定目前是确定性占位实现（仅实现接口）。
-v0.1 的通道 ① 树导航已由首段派生摘要驱动（无需 LLM），Grader 为确定性判据。
+- **`needs_llm` 用例。** `koios eval` 会报 `needs_llm` 计数：那些关键词证据
+  命中、但实际没有答案的问题（提到「公司」≠ 回答「分红政策」问题）。区分
+  「提及」与「回答」需要 v0.3 的跨族 reranker/Grader，因此它们被计为缺口而非
+  静默通过。
+- **L2 judge 是确定性占位实现。** 它实现了接口，只判定可程序化检验的关系
+  （数字），其余诚实地返回 `unknown`。
+- **编译写集仍是 O(全库)。** 实体页整体重编译；正确性（保留 confidence 与人工
+  区段）已解决，但受影响集算出来后并未用于收窄写入。作为技术债登记，见
+  `docs/KoiosBase设计文档v1.3.md`。
+- **stale 的异步重编译未实现。** 陈旧页会被标注并降权，但清除它的重编译不会
+  自动触发（§5.3 禁止为此阻塞可用性）。
+- **Windows 二进制仅做了结构验证。** 它能构建且是合法的 PE32+ 可执行文件，
+  但当时没有 Windows runner 或 Wine 可实际执行它。
 
 ## 目录结构
 
 ```
 koiosbase/
   core/        Block / Section / Document 数据模型
-  parsers/     格式适配器（当前 Markdown）
+  parsers/     格式适配器（Markdown、PDF）
   ingest/      raw + wiki -> 派生索引
-  index/       SQLite schema（树、块、全文、链接）
-  retrieval/   BM25、RRF 融合、个性化 PageRank
-  generation/  引用/拒答契约、跨家族判定
-  lint/        L1 程序化园丁
-  query/       检索 -> 组装 -> 生成 管线
-  cli.py       koios 命令行
+  index/       SQLite schema（tree、blocks、FTS、links）
+  retrieval/   BM25 检索、RRF 融合、个性化 PageRank
+  generation/  引用与拒答契约、跨族 judge
+  compile/     实体页与源页、质量闸门
+  state/       知识状态机与级联
+  lint/        L1 程序化 gardener
+  query/       retrieve -> assemble -> generate 流水线
+  security/    ACL / 多租户
+  mcp/         stdio JSON-RPC server
+  studio/      brief / mindmap 导出
+  cli.py       koios 命令行接口
+rust-cli/      Rust shell（同一 vault 格式）
 ```
 
 ## 文档
 
-- `docs/KoiosBase设计文档v1.3.md` —— 完整设计基线
+- `docs/KoiosBase设计文档v1.3.md` — 完整设计基线（中文）
+- `AGENTS.md` — 写入每个 vault 的维护契约（§4.4）
 
-## 许可证
+## 许可
 
-MIT —— 见 [LICENSE](LICENSE)。
+MIT — 见 [LICENSE](LICENSE)。
