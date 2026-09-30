@@ -214,6 +214,52 @@ koios mcp
 
 ---
 
+## 接入 LLM
+
+默认开箱状态下，KoiosBase 只依据检索到的块作答——内置生成器返回带引用的前三块，
+绝不编造。这是刻意为之：默认模式在零配置下也必须是可信赖的。
+
+若要改为生成散文式回答，请传入一个可调用对象。它接收已组装好的上下文并返回文本：
+
+```python
+from koiosbase.index.schema import connect
+from koiosbase.query.pipeline import query
+
+def my_llm(question: str, context: str) -> str:
+    return call_your_model(context)      # OpenAI, Anthropic, local, anything
+
+conn = connect("myvault/.index")
+result = query(conn, "revenue", top=8, principal_groups={"finance-team"}, llm=my_llm)
+print(result.answer)
+print(result.violations)                 # {} when the contracts hold
+```
+
+可调用对象的契约是 `llm(question, context) -> str`，代码库中没有任何 provider
+适配器或 API-key 配置——可调用对象由你提供，因此不会把任何厂商写死进去。
+
+### 护栏依然生效
+
+这一点值得了解：**契约同样作用于你模型的输出**，而不只作用于内置生成器。给
+KoiosBase 接上一个 LLM 并不意味着它可以凭空编造。
+
+```python
+result.violations
+# {}                                              cited its sources
+# {'citation': '0/1 sentences cited'}             model omitted citations
+# {'refusal': 'answered without evidence'}        answered with zero blocks
+```
+
+检索保持权威地位——受限文档在模型看到任何东西之前就已经被剔除，所以 `llm()`
+无法泄漏它从未获得的内容。
+
+### 升级要解决的问题
+
+默认的抽取式模式有两个已知弱点，LLM 路径正是为此而来：`koios eval` 中的
+`needs_llm` 情形（命中了关键词但没有真正的答案），以及跨家族判定（§P7——judge
+必须与生成器来源不同）。二者都列在已知缺口中。
+
+---
+
 ## 维护
 
 ### 日常
@@ -275,6 +321,50 @@ koios index myvault --full
 
 ---
 
+## 多模态（视觉）模型
+
+PDF 分两层解析（§5.1）：一层是始终可用的 CPU 文本层，另一层是 **VLM tier**，
+只在页面看起来是扫描件时才会启用——即没有可提取文本的图像。
+
+```mermaid
+flowchart LR
+    P[PDF] --> C{"可提取\n文本？"}
+    C -->|yes| T["pdf-cpu\n页级溯源"]
+    C -->|no| V{"提供了 vlm？"}
+    V -->|no| S["跳过\n该页不贡献任何内容"]
+    V -->|yes| M["pdf-vlm\n视觉模型转写"]
+    M --> T
+    style T fill:#e8f4ea,stroke:#4a7c59
+    style S fill:#fdecea,stroke:#a94442
+```
+
+VLM tier 之所以重要，是因为不做 OCR 的流水线会静默丢失扫描页：一份被扫描成 PDF
+的合同对关键词搜索和每一个答案来说都是隐形的，而且没有任何错误提示。把页面图像
+交给视觉模型可以把它找回来，而找回的文本带有与 CPU 层相同的页级引用。
+
+以接收 **PNG 字节**（而非路径）的可调用对象形式提供：
+
+```python
+from koiosbase.parsers.pdf import parse_pdf
+
+def my_vlm(path: str, image_bytes: bytes) -> str:
+    return vision_model_transcribe(image_bytes)
+
+doc = parse_pdf("scan.pdf", vlm=my_vlm)
+```
+
+两个诚实的提醒，因为这一层很容易被过度承诺：
+
+- **VLM tier 目前仅限库内使用。** `parse_pdf(vlm=...)` 只是一个可调用对象参数，
+  没有 CLI 标志，在 `ingest/` 里也没有调用点——把它接入 `koios index` 需要写
+  代码，而不是改配置。它是一个钩子，不是一个可以打开的特性。
+- **它需要 `pymupdf`** 来光栅化页面。没有它，这一层会被静默跳过。
+
+PDF 之外的多模态输入——图像、图表、截图作为一等来源——尚未实现。KoiosBase 是
+Markdown 原生的（P1）；视觉只作为文本抽取失败时的恢复路径参与进来。
+
+---
+
 ## 概念（简版）
 
 不懂这些你也可以用 KoiosBase，但它们能解释输出。
@@ -287,6 +377,7 @@ koios index myvault --full
 | **channel** | 检索策略：① tree，② BM25，③ graph，④ 全库 |
 | **state** | `active / superseded / disputed / retracted / draft` |
 | **stale** | 编译页的来源已变化；仍可用，但被标记 |
+| **VLM tier** | 用视觉模型恢复无可提取文本的 PDF 页 |
 
 约束每一个机制的是七条原则：
 

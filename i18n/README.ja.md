@@ -225,6 +225,57 @@ stdio 経由で JSON-RPC 2.0 を話し、`koios_search`、`koios_ask`、
 
 ---
 
+## LLM を接続する
+
+既定では、KoiosBase は取得したブロックだけから回答します——組み込みの生成器は
+引用付きの上位 3 ブロックを返し、決して捏造しません。これは意図的なものです。
+既定の動作は設定なしでも信頼できなければなりません。
+
+散文を生成させたい場合は、呼び出し可能オブジェクトを渡します。これは組み立て済みの
+コンテキストを受け取り、テキストを返します：
+
+```python
+from koiosbase.index.schema import connect
+from koiosbase.query.pipeline import query
+
+def my_llm(question: str, context: str) -> str:
+    return call_your_model(context)      # OpenAI, Anthropic, local, anything
+
+conn = connect("myvault/.index")
+result = query(conn, "revenue", top=8, principal_groups={"finance-team"}, llm=my_llm)
+print(result.answer)
+print(result.violations)                 # {} when the contracts hold
+```
+
+呼び出し可能オブジェクトの契約は `llm(question, context) -> str` で、コードベース
+のどこにもプロバイダーアダプターや API キー設定はありません——呼び出し可能
+オブジェクトはあなたが渡すので、特定のベンダーが埋め込まれることはありません。
+
+### ガードレールは依然として働く
+
+ここが知っておく価値のある点です：**契約は組み込みの生成器だけでなく、あなたの
+モデルの出力にも適用されます**。KoiosBase に LLM を渡しても、それが捏造できる
+ようにはなりません。
+
+```python
+result.violations
+# {}                                              cited its sources
+# {'citation': '0/1 sentences cited'}             model omitted citations
+# {'refusal': 'answered without evidence'}        answered with zero blocks
+```
+
+検索は権威であり続けます——制限付き文書はモデルが何を見る前に既に除外されている
+ため、`llm()` は与えられていないものを漏らすことができません。
+
+### アップグレードが解決するもの
+
+既定の抽取モードには、LLM 経路が対処する 2 つの既知の弱点があります。`koios eval`
+の `needs_llm` ケース（キーワードは一致するが実際の答えがない）と、ファミリを
+またぐ判定（§P7——judge は生成器と出自が異ならなければならない）です。どちらも
+既知のギャップに記載されています。
+
+---
+
 ## 保守
 
 ### 日常
@@ -293,6 +344,55 @@ koios index myvault --full
 
 ---
 
+## マルチモーダル（視覚）モデル
+
+PDF は 2 層で解析されます（§5.1）。常に利用可能な CPU テキスト層と、**VLM tier**
+です。後者はページがスキャンされたように見える場合——抽出可能なテキストのない
+画像の場合——にのみ作動します。
+
+```mermaid
+flowchart LR
+    P[PDF] --> C{"抽出可能な\nテキスト？"}
+    C -->|yes| T["pdf-cpu\nページ単位の出所"]
+    C -->|no| V{"vlm が渡された？"}
+    V -->|no| S["スキップ\nそのページは何も寄与しない"]
+    V -->|yes| M["pdf-vlm\n視覚モデルが文字起こし"]
+    M --> T
+    style T fill:#e8f4ea,stroke:#4a7c59
+    style S fill:#fdecea,stroke:#a94442
+```
+
+VLM tier が重要なのは、OCR を使わないパイプラインがスキャンされたページを静かに
+失うからです。PDF にスキャンされた契約書はキーワード検索にもすべての回答にも
+見えなくなり、しかもエラーは出ません。ページ画像を視覚モデルに渡せばそれを
+回復でき、回復されたテキストは CPU 層と同じページ単位の引用を伴います。
+
+**PNG バイト**（パスではなく）を受け取る呼び出し可能オブジェクトとして渡します：
+
+```python
+from koiosbase.parsers.pdf import parse_pdf
+
+def my_vlm(path: str, image_bytes: bytes) -> str:
+    return vision_model_transcribe(image_bytes)
+
+doc = parse_pdf("scan.pdf", vlm=my_vlm)
+```
+
+この層は誇張しやすいため、正直な注意点を 2 つ挙げます：
+
+- **VLM tier は現時点ではライブラリ専用です。** `parse_pdf(vlm=...)` は呼び出し
+  可能オブジェクトの引数にすぎず、CLI フラグはなく `ingest/` 内にも呼び出し箇所は
+  ありません——`koios index` に組み込むには設定ではなくコードが必要です。これは
+  オンにできる機能ではなく、フックです。
+- **ページのラスタライズに `pymupdf` が必要です。** なければこの層は静かに
+  スキップされます。
+
+PDF 以外のマルチモーダル入力——画像、グラフ、スクリーンショットをファーストクラスの
+ソースとして扱うこと——は未実装です。KoiosBase は Markdown ネイティブであり（P1）、
+視覚はテキスト抽出が失敗したときの回復経路としてのみ関与します。
+
+---
+
 ## 概念（簡略版）
 
 これらがなくても KoiosBase は使えますが、出力を理解する助けになります。
@@ -305,6 +405,7 @@ koios index myvault --full
 | **channel** | 検索戦略：① tree、② BM25、③ graph、④ コーパス全体 |
 | **state** | `active / superseded / disputed / retracted / draft` |
 | **stale** | ソースが変わったコンパイル済みページ。まだ使えるがフラグ付き |
+| **VLM tier** | 抽出可能なテキストがない PDF ページを視覚モデルで回復する |
 
 すべてのメカニズムを制約する七つの原理：
 
