@@ -224,7 +224,59 @@ Speaks JSON-RPC 2.0 over stdio and exposes `koios_search`, `koios_ask`,
 
 ---
 
+## Connect an LLM
+
+Out of the box KoiosBase answers from retrieved blocks alone — the built-in
+generator returns the top three blocks with citations and never fabricates. That
+is deliberate: the default must be trustworthy with zero configuration.
+
+To generate prose instead, pass a callable. It receives the assembled context
+and returns text:
+
+```python
+from koiosbase.index.schema import connect
+from koiosbase.query.pipeline import query
+
+def my_llm(question: str, context: str) -> str:
+    return call_your_model(context)      # OpenAI, Anthropic, local, anything
+
+conn = connect("myvault/.index")
+result = query(conn, "revenue", top=8, principal_groups={"finance-team"}, llm=my_llm)
+print(result.answer)
+print(result.violations)                 # {} when the contracts hold
+```
+
+The callable contract is `llm(question, context) -> str`, and there is no
+provider adapter or API-key configuration anywhere in the codebase — you supply
+the callable, so no vendor is baked in.
+
+### The guardrails still apply
+
+This is the part worth knowing: **contracts are enforced on your model's output
+too**, not only on the built-in generator. Handing KoiosBase an LLM does not let
+it invent.
+
+```python
+result.violations
+# {}                                              cited its sources
+# {'citation': '0/1 sentences cited'}             model omitted citations
+# {'refusal': 'answered without evidence'}        answered with zero blocks
+```
+
+Retrieval stays authoritative — restricted documents are already gone before the
+model sees anything, so `llm()` cannot leak what it was never given.
+
+### What upgrading is meant to fix
+
+The default extractive mode has two known weaknesses the LLM path addresses:
+the `needs_llm` cases in `koios eval` (keywords hit, no real answer), and
+cross-family judging (§P7 — the judge must differ in origin from the generator).
+Both are listed under Known gaps.
+
+---
+
 ## Maintenance
+
 
 ### Daily
 
@@ -288,7 +340,57 @@ koios index myvault --full
 
 ---
 
+## Multimodal (vision) models
+
+PDFs are parsed in two tiers (§5.1): a CPU text tier that is always available,
+and a **VLM tier** that kicks in only when a page looks scanned — an image with
+no extractable text.
+
+```mermaid
+flowchart LR
+    P[PDF] --> C{"extractable\ntext?"}
+    C -->|yes| T["pdf-cpu\npage-level provenance"]
+    C -->|no| V{"vlm provided?"}
+    V -->|no| S["skipped\npage contributes nothing"]
+    V -->|yes| M["pdf-vlm\nvision model transcribes"]
+    M --> T
+    style T fill:#e8f4ea,stroke:#4a7c59
+    style S fill:#fdecea,stroke:#a94442
+```
+
+The VLM tier matters because OCR-free pipelines silently lose scanned pages: a
+contract scanned to PDF becomes invisible to keyword search and to every answer,
+with no error to tell you. Handing the page image to a vision model recovers it,
+and the recovered text carries the same page-level citations as the CPU tier.
+
+Supply it as a callable receiving **PNG bytes**, not a path:
+
+```python
+from koiosbase.parsers.pdf import parse_pdf
+
+def my_vlm(path: str, image_bytes: bytes) -> str:
+    return vision_model_transcribe(image_bytes)
+
+doc = parse_pdf("scan.pdf", vlm=my_vlm)
+```
+
+Two honest caveats, because this tier is easy to over-promise:
+
+- **The VLM tier is library-only today.** `parse_pdf(vlm=...)` is a callable
+  parameter with no CLI flag and no call site inside `ingest/` — wiring it into
+  `koios index` requires code, not configuration. It is a hook, not a feature
+  you can switch on.
+- **It needs `pymupdf`** to rasterize pages. Without it the tier is skipped
+  silently.
+
+Multimodal input beyond PDF — images, charts, screenshots as first-class sources
+— is not implemented. KoiosBase is Markdown-native (P1); vision enters only as
+the recovery path when text extraction fails.
+
+---
+
 ## Concepts (short)
+
 
 You can use KoiosBase without these, but they explain the output.
 
@@ -300,6 +402,7 @@ You can use KoiosBase without these, but they explain the output.
 | **channel** | retrieval strategy: ① tree, ② BM25, ③ graph, ④ whole corpus |
 | **state** | `active / superseded / disputed / retracted / draft` |
 | **stale** | a compiled page whose sources changed; still usable, flagged |
+| **VLM tier** | vision-model recovery for PDF pages with no extractable text |
 
 Seven principles constrain every mechanism:
 
