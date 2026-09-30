@@ -158,6 +158,9 @@ def mark_stale(conn: sqlite3.Connection, page_path: str, reason: str = "") -> No
     erased the record of another.
     """
     ensure_tables(conn)
+    # §8.3: `stale` and `state` are orthogonal. Preserve any existing review
+    # verdict (disputed, retracted…) — clobbering it meant cascading a retraction
+    # silently un-disputed every page it touched.
     prev = conn.execute(
         "SELECT state FROM page_state WHERE page_path=?", (page_path,)
     ).fetchone()
