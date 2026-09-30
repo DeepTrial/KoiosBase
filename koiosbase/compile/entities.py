@@ -147,9 +147,7 @@ sources: [{sources}]
 """
 
 
-def render_entity_page(
-    ent: Entity, stamp: str, existing: str | None = None
-) -> str:
+def render_entity_page(ent: Entity, stamp: str, existing: str | None = None) -> str:
     """Render an entity page, preserving what a human wrote.
 
     The previous version overwrote the whole file, so recompiling destroyed two

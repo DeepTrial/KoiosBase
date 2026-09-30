@@ -127,7 +127,9 @@ def build_parser() -> argparse.ArgumentParser:
     pst.add_argument("kind", choices=["brief", "mindmap"])
     pst.add_argument("-p", "--path", default=".", help="vault directory")
     pst.add_argument("-t", "--topic", required=True)
-    pst.add_argument("--groups", help="principal groups for ACL (§9.2), comma separated")
+    pst.add_argument(
+        "--groups", help="principal groups for ACL (§9.2), comma separated"
+    )
     pst.set_defaults(func=cmd_studio)
 
     pc2 = sub.add_parser("checkclaim", help="cross-judge one claim against evidence")

@@ -194,9 +194,9 @@ def test_compile_reads_only_raw_layer(vault):
     assert hit, "derived page must be indexed (P2-9)"
 
     compile_vault(vault)
-    generated = {
-        p.stem for p in (vault / "wiki" / "entities").glob("*.md")
-    } - {"Zpoison"}
+    generated = {p.stem for p in (vault / "wiki" / "entities").glob("*.md")} - {
+        "Zpoison"
+    }
     assert not any("Zzqpoison" in s or "Unique" in s for s in generated), (
         f"compiler consumed the wiki layer and spread derived content: {generated}"
     )

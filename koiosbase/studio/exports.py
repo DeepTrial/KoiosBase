@@ -115,9 +115,7 @@ def render_mindmap(
     )
 
 
-def _load_blocks(
-    conn: sqlite3.Connection, bids: list[str]
-) -> list[dict]:
+def _load_blocks(conn: sqlite3.Connection, bids: list[str]) -> list[dict]:
     """Fetch full rows for ids, dropping any that vanished since scoring."""
     out = []
     for bid in bids:

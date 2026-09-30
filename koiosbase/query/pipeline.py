@@ -89,9 +89,7 @@ def retrieve(
     return blocks
 
 
-def score_blocks(
-    conn, question: str, blocks: list[dict]
-) -> list[tuple[float, dict]]:
+def score_blocks(conn, question: str, blocks: list[dict]) -> list[tuple[float, dict]]:
     """Rank already-loaded blocks by BM25 relevance — no second storage pass.
 
     Used by the Self-Route escalation, which needs `full_corpus` order (prompt-

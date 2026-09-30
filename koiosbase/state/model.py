@@ -126,9 +126,7 @@ def referencing_pages(
     return [r[0] for r in rows]
 
 
-def get_block_states(
-    conn: sqlite3.Connection, block_ids: list[str]
-) -> dict[str, str]:
+def get_block_states(conn: sqlite3.Connection, block_ids: list[str]) -> dict[str, str]:
     """Batch state lookup — one query instead of one-per-row.
 
     `filter_visible` runs on every retrieval; doing it row-by-row turned a single

@@ -147,11 +147,7 @@ def fts_search(
             # the escalation path defeat the refusal contract.
             if expr is char_expr and len(chars) > 1:
                 hits = _ch_hits(conn, [r["id"] for r in rows], chars)
-                rows = [
-                    r
-                    for r in rows
-                    if hits.get(r["id"], 0) >= min(2, len(chars))
-                ]
+                rows = [r for r in rows if hits.get(r["id"], 0) >= min(2, len(chars))]
             if rows:
                 return [(r["id"], float(r["score"])) for r in rows]
     return []
@@ -377,8 +373,7 @@ def hybrid_search(
             # means "a small nudge", not "invisible". It is deliberately NOT a
             # relevance judgement: ranking still comes from BM25 + RRF.
             fused = [
-                (d, s + WEIGHTS["gamma"] * pr.get(d, 0.0) * PPR_GAIN)
-                for d, s in fused
+                (d, s + WEIGHTS["gamma"] * pr.get(d, 0.0) * PPR_GAIN) for d, s in fused
             ]
             fused.sort(key=lambda x: -x[1])
     return fused[:limit]

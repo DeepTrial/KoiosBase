@@ -180,9 +180,7 @@ def tool_write_answer(args: dict) -> dict:
 
     vault = Path(args["vault"])
     conn = connect(vault / ".index")
-    res = query(
-        conn, args["question"], top=5, principal_groups=_groups(args)
-    )
+    res = query(conn, args["question"], top=5, principal_groups=_groups(args))
     log_write(args.get("question", ""), str(vault), _groups(args))
     path = write_answer_page(
         vault,
