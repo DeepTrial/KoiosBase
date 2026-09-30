@@ -32,6 +32,63 @@ Two things make it different from "chunk + embed + top-k":
 
 ---
 
+## How it works
+
+Markdown in, cited answers out. The index is a build artifact, so the flow is
+always one direction:
+
+```mermaid
+flowchart LR
+    A["raw/\n(you write)"] --> B["koios index"]
+    B --> C[".index/\n(build artifact)"]
+    C --> D["koios search / MCP"]
+    D --> E["answer + citation"]
+    B --> F["wiki/\n(compiled pages)"]
+    F --> D
+    style A fill:#e8f4ea,stroke:#4a7c59
+    style C fill:#eef2f7,stroke:#5b6d82
+    style F fill:#fff6e5,stroke:#8a6d3b
+```
+
+Trust accumulates in two ladders instead of one score. A compiled page starts
+low and is only promoted by evidence the generator did not produce itself; a
+block can be retracted, and that propagates to every page citing it.
+
+```mermaid
+stateDiagram-v2
+    [*] --> draft: compiled
+    draft --> medium: --verified
+    medium --> high: --human
+    active --> disputed: challenged
+    active --> superseded: replaced
+    active --> retracted: wrong
+    superseded --> [*]: filtered from retrieval
+    retracted --> [*]: filtered from retrieval
+```
+
+Retrieval picks a channel rather than always doing the same thing, and asks
+whether the evidence was enough before answering:
+
+```mermaid
+flowchart TD
+    Q[question] --> C1{"choose channel"}
+    C1 -->|①| T["tree\nfollow headings"]
+    C1 -->|②| B["BM25\nkeyword"]
+    C1 -->|③| G["graph\nPPR over links"]
+    C1 -->|④| F["full corpus\nsmall vaults only"]
+    T --> J{"Grader:\nenough?"}
+    B --> J
+    G --> J
+    F --> J
+    J -->|yes| A1[answer with citations]
+    J -->|no, escalatable| C1
+    J -->|no evidence| R["refuse\n(never invent)"]
+    style R fill:#fdecea,stroke:#a94442
+    style A1 fill:#e8f4ea,stroke:#4a7c59
+```
+
+---
+
 ## Install
 
 ### Option A — pip (any OS, needs Python 3.10+)
