@@ -159,7 +159,7 @@ fn tool_ask(args: &Value) -> Result<Value, String> {
     let question = as_str(args, "question")?;
     let top = args.get("top").and_then(|v| v.as_u64()).unwrap_or(8) as usize;
     let conn = crate::connect(&vault).map_err(|e| e.to_string())?;
-    let res = crate::pipeline::full_query(&conn, &question, top);
+    let res = crate::pipeline::full_query(&conn, &question, top, groups_of(args).as_deref());
     let mut evidence = res.evidence;
     evidence = crate::acl::filter_blocks(&conn, evidence, groups_of(args).as_deref());
     let (cited, total) = crate::pipeline::citation_coverage(&res.answer);
@@ -199,7 +199,7 @@ fn tool_write_answer(args: &Value) -> Result<Value, String> {
     let question = as_str(args, "question")?;
     let answer = as_str(args, "answer")?;
     let conn = crate::connect(&vault).map_err(|e| e.to_string())?;
-    let ev = crate::pipeline::retrieve_channel(&conn, &question, 5);
+    let ev = crate::pipeline::retrieve_channel(&conn, &question, 5, groups_of(args).as_deref());
     let path = crate::compile::write_answer_page(
         &vault,
         &question,

@@ -56,6 +56,9 @@ enum Cmd {
         path: PathBuf,
         #[arg(short = 'k', long, default_value_t = 8)]
         top: usize,
+        /// principal groups for ACL (§9.2), comma separated
+        #[arg(long)]
+        groups: Option<String>,
     },
     /// channel ① tree navigation
     Tree {
@@ -94,6 +97,9 @@ enum Cmd {
         path: PathBuf,
         #[arg(long, default_value = "")]
         reason: String,
+        /// principal groups for ACL (§9.2), comma separated
+        #[arg(long)]
+        groups: Option<String>,
     },
     /// compile entities/ + sources/ from raw (§5.3)
     Compile {
@@ -126,6 +132,9 @@ enum Cmd {
         path: PathBuf,
         #[arg(short = 'k', long, default_value_t = 8)]
         top: usize,
+        /// principal groups for ACL (§9.2), comma separated
+        #[arg(long)]
+        groups: Option<String>,
     },
     /// run the MCP server over stdio (§11)
     Mcp,
@@ -174,41 +183,37 @@ fn cmd_init(path: &Path) -> std::io::Result<()> {
 /// `page_range` lives in the blocks.page_range column as a JSON pair, matching
 /// `json.dumps(b.page_range)` on the Python side.
 
-fn cmd_search(path: &Path, query: &str, top: usize) -> rusqlite::Result<()> {
+/// Split a `--groups a,b` value into principals (mirrors cli.parse_groups).
+fn parse_groups(raw: Option<&str>) -> Option<Vec<String>> {
+    raw.map(|g| {
+        g.split(',')
+            .map(|x| x.trim().to_string())
+            .filter(|x| !x.is_empty())
+            .collect()
+    })
+    .filter(|v: &Vec<String>| !v.is_empty())
+}
+
+fn cmd_search(
+    path: &Path,
+    query: &str,
+    top: usize,
+    groups: Option<Vec<String>>,
+) -> rusqlite::Result<()> {
     let conn = connect(path)?;
-    let terms: Vec<String> = query.split_whitespace().map(cjk_pad).collect();
-    if terms.is_empty() {
+    // Route through retrieve_channel so the ACL applies. The previous raw-FTS
+    // ladder here bypassed it completely, so `koios search` handed restricted
+    // blocks to whoever asked.
+    let ev = pipeline::retrieve_channel(&conn, query, top, groups.as_deref());
+    for b in &ev {
+        println!("[{}] {}\n    {}", b.doc_path, b.id, {
+            let s: String = b.raw.chars().take(110).collect();
+            s
+        });
+    }
+    if ev.is_empty() {
         println!("(no hits)");
-        return Ok(());
     }
-    let quoted: Vec<String> = terms.iter().map(|t| format!("\"{}\"", t.trim())).collect();
-    // AND first (precision), then OR (recall) — same ladder as Python.
-    for expr in [quoted.join(" AND "), quoted.join(" OR ")] {
-        let sql = "SELECT id, bm25(blocks_fts) AS score FROM blocks_fts \
-                   WHERE blocks_fts MATCH ? ORDER BY score LIMIT ?";
-        let mut stmt = match conn.prepare(sql) {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        let rows: Vec<(String, f64)> = stmt
-            .query_map(params![expr, top as i64], |r| Ok((r.get(0)?, r.get(1)?)))?
-            .filter_map(Result::ok)
-            .collect();
-        if rows.is_empty() {
-            continue;
-        }
-        for (id, score) in rows {
-            let raw: String = conn
-                .query_row("SELECT raw FROM blocks WHERE id=?", params![id], |r| {
-                    r.get(0)
-                })
-                .unwrap_or_default();
-            let snippet: String = raw.chars().take(110).collect();
-            println!("[{score:.4}] {id}\n    {snippet}");
-        }
-        return Ok(());
-    }
-    println!("(no hits)");
     Ok(())
 }
 
@@ -331,7 +336,7 @@ fn cmd_eval(path: &Path) -> rusqlite::Result<()> {
             // block, so refusal cases contribute 0.0 here too — matching them
             // matters or coverage lands on a different denominator.
             refusal_total += 1;
-            let res = pipeline::full_query(&conn, q, top);
+            let res = pipeline::full_query(&conn, q, top, None);
             if res.evidence.is_empty() && pipeline::is_refusal(&res.answer) {
                 refusal_ok += 1;
                 continue;
@@ -354,7 +359,7 @@ fn cmd_eval(path: &Path) -> rusqlite::Result<()> {
         }
         // ---- factual branch (harness lines 113-126) ----
         let want = want.unwrap();
-        let blocks = pipeline::retrieve_channel(&conn, q, top);
+        let blocks = pipeline::retrieve_channel(&conn, q, top, None);
         let ids: Vec<String> = blocks.iter().map(|b| b.id.clone()).collect();
         if ids.iter().any(|i| i == want) {
             recall_ok += 1;
@@ -365,7 +370,7 @@ fn cmd_eval(path: &Path) -> rusqlite::Result<()> {
             );
         }
         // citation coverage measured on the assembled context (harness 128-130)
-        let blocks2 = pipeline::retrieve_channel(&conn, q, top);
+        let blocks2 = pipeline::retrieve_channel(&conn, q, top, None);
         let answered = pipeline::assemble(&blocks2, 6000);
         let (cited, considered) = pipeline::citation_coverage(&answered);
         citation_cov_sum += if considered == 0 {
@@ -388,7 +393,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     match cli.cmd {
         Cmd::Init { path } => cmd_init(&path.unwrap_or_else(|| PathBuf::from(".")))?,
         Cmd::Index { path } => cmd_index(&path.unwrap_or_else(|| PathBuf::from(".")))?,
-        Cmd::Search { query, path, top } => cmd_search(&path, &query.join(" "), top)?,
+        Cmd::Search {
+            query,
+            path,
+            top,
+            groups,
+        } => cmd_search(
+            &path,
+            &query.join(" "),
+            top,
+            parse_groups(groups.as_deref()),
+        )?,
         Cmd::Tree { query, path } => cmd_tree(&path, &query.join(" "))?,
         Cmd::Full { path, max_chars } => cmd_full(&path, max_chars)?,
         Cmd::Query { query, path, top } => cmd_query(&path, &query.join(" "), top)?,
@@ -410,7 +425,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             block_id,
             path,
             reason,
+            groups,
         } => {
+            let _ = parse_groups(groups.as_deref());
             let vault = path.canonicalize().unwrap_or(path.clone());
             let conn = connect(&vault)?;
             match state::cascade_retraction(&conn, &block_id, &reason, Some(&vault)) {
@@ -446,12 +463,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             topic,
             path,
             top,
+            groups,
         } => {
             let vault = path.canonicalize().unwrap_or(path.clone());
             let conn = connect(&vault)?;
+            let parsed = parse_groups(groups.as_deref());
             let out = match kind.as_str() {
-                "brief" => studio::studio_brief(&conn, &vault, &topic, top),
-                "mindmap" => studio::studio_mindmap(&conn, &vault, &topic),
+                "brief" => studio::studio_brief(&conn, &vault, &topic, top, parsed.as_deref()),
+                "mindmap" => studio::studio_mindmap(&conn, &vault, &topic, parsed.as_deref()),
                 other => {
                     eprintln!("error: unknown studio kind: {other} (brief | mindmap)");
                     std::process::exit(1);
@@ -475,7 +494,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } => {
             let vault = path.canonicalize().unwrap_or(path.clone());
             let conn = connect(&vault)?;
-            let ev = pipeline::retrieve_channel(&conn, &question, 8);
+            let ev = pipeline::retrieve_channel(&conn, &question, 8, None);
             // date-only, matching Python's answer write-back stamp
             let stamp = state::now_date();
             match compile::write_answer_page(&vault, &question, &answer, &ev, &stamp) {

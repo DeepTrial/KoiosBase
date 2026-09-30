@@ -178,8 +178,13 @@ pub fn studio_brief(
     vault: &Path,
     topic: &str,
     top: usize,
+    groups: Option<&[String]>,
 ) -> std::io::Result<std::path::PathBuf> {
-    let blocks = crate::pipeline::retrieve_channel(conn, topic, top);
+    // ACL FIRST. An export is written to disk, so a leak here outlives the
+    // request and cannot be recalled. Anonymous callers previously received a
+    // restricted HR figure verbatim because this path did no filtering at all.
+    let blocks = crate::pipeline::retrieve_channel(conn, topic, top, groups);
+    let blocks = crate::acl::filter_blocks(conn, blocks, groups);
     let out = vault.join("wiki").join("synthesis");
     std::fs::create_dir_all(&out)?;
     let stamp = crate::state::now_date();
@@ -199,8 +204,14 @@ pub fn studio_mindmap(
     conn: &Connection,
     vault: &Path,
     root: &str,
+    groups: Option<&[String]>,
 ) -> std::io::Result<std::path::PathBuf> {
     let mut rows: Vec<(String, String, Option<String>)> = Vec::new();
+    // A section TITLE is content: 「薪酬」 alone discloses that pay data exists.
+    // Same rationale as Python's visible_doc_paths — filter the tree, not just
+    // the prose.
+    let visible = crate::acl::visible_paths(conn, groups).unwrap_or_default();
+    let visible_ref: Vec<String> = visible;
     if let Ok(mut stmt) =
         conn.prepare("SELECT doc_path,title,parent_id FROM sections ORDER BY doc_path, ordinal")
     {
@@ -211,7 +222,10 @@ pub fn studio_mindmap(
                 r.get::<_, Option<String>>(2)?,
             ))
         }) {
-            rows = m.filter_map(Result::ok).collect();
+            rows = m
+                .filter_map(Result::ok)
+                .filter(|r| visible_ref.contains(&r.0))
+                .collect();
         }
     }
     // insertion-ordered grouping (Python dict preserves first-seen order)

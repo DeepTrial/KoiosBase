@@ -7,8 +7,8 @@
 
 use once_cell::sync::Lazy;
 use regex::Regex;
-use std::collections::HashMap;
 use rusqlite::{params, Connection};
+use std::collections::HashMap;
 
 use crate::retrieval::{full_corpus, hybrid_search, is_cjk};
 
@@ -136,7 +136,19 @@ pub fn get_block(conn: &Connection, id: &str) -> Option<Ev> {
 ///   * state (§8.2)  — superseded/retracted blocks are excluded from recall
 /// Skipping either one is how Python v0.1 leaked restricted docs to anonymous
 /// callers, so both stay on the hot path even though they cost a query.
-pub fn retrieve_channel(conn: &Connection, question: &str, limit: usize) -> Vec<Ev> {
+/// Channel dispatch — `groups` carries the caller's principal.
+///
+/// It previously hardcoded `filter_blocks(..., None)`, so EVERY caller
+/// (studio, MCP, answer write-back) silently retrieved as anonymous and an
+/// entitled caller saw nothing. The principal has to travel with the request,
+/// not be re-derived per call site — that is what makes "filter at retrieval,
+/// never after generation" (§9.2) actually hold.
+pub fn retrieve_channel(
+    conn: &Connection,
+    question: &str,
+    limit: usize,
+    groups: Option<&[String]>,
+) -> Vec<Ev> {
     let rows = hybrid_search(conn, question, limit, true).unwrap_or_default();
     let mut ids: Vec<String> = rows.into_iter().map(|(i, _)| i).collect();
     if ids.is_empty() {
@@ -148,7 +160,7 @@ pub fn retrieve_channel(conn: &Connection, question: &str, limit: usize) -> Vec<
             .collect();
     }
     let mut out: Vec<Ev> = ids.iter().filter_map(|i| get_block(conn, i)).collect();
-    out = crate::acl::filter_blocks(conn, out, None);
+    out = crate::acl::filter_blocks(conn, out, groups);
     crate::state::filter_visible(conn, out)
 }
 
@@ -270,8 +282,13 @@ pub struct QueryResult {
 }
 
 /// Full pipeline with Grader-driven escalation (Self-Route, §6.2).
-pub fn full_query(conn: &Connection, question: &str, top: usize) -> QueryResult {
-    let mut blocks = retrieve_channel(conn, question, top);
+pub fn full_query(
+    conn: &Connection,
+    question: &str,
+    top: usize,
+    groups: Option<&[String]>,
+) -> QueryResult {
+    let mut blocks = retrieve_channel(conn, question, top, groups);
     let verdict = grade(question, &blocks);
     if verdict == "evidence_absent" {
         let cand_ids = full_corpus(conn, 200_000).unwrap_or_default();

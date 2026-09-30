@@ -11,8 +11,43 @@ use rusqlite::Connection;
 use serde_json::Value;
 use std::collections::HashMap;
 
-/// An empty/absent acl means unrestricted.
-pub fn grants_for(conn: &Connection, doc_path: &str) -> Option<Vec<String>> {
+/// A compiled `sources/<name>.md` is generated from a raw doc but declares NO
+/// acl of its own, so reading it literally pronounces restricted content
+/// public — which is exactly how anonymous Studio exports leaked a restricted
+/// HR figure (measured: `grep -c "500 万"` on a brief returned a hit). Grants
+/// are therefore resolved through the ORIGIN raw document, mirroring
+/// `_origin_doc` in koiosbase/security/acl.py.
+fn origin_doc(conn: &Connection, doc_path: &str) -> String {
+    if !doc_path.starts_with("sources/") {
+        return doc_path.to_string();
+    }
+    let fm: String = match conn.query_row(
+        "SELECT frontmatter FROM documents WHERE path=?",
+        rusqlite::params![doc_path],
+        |r| r.get(0),
+    ) {
+        Ok(s) => s,
+        Err(_) => return doc_path.to_string(),
+    };
+    let v: Value = match serde_json::from_str(&fm) {
+        Ok(v) => v,
+        Err(_) => return doc_path.to_string(),
+    };
+    match v.get("source").and_then(|s| s.as_str()) {
+        Some(src) => {
+            let rel = src.strip_prefix("raw/").unwrap_or(src);
+            if rel.is_empty() {
+                doc_path.to_string()
+            } else {
+                rel.to_string()
+            }
+        }
+        None => doc_path.to_string(),
+    }
+}
+
+/// The literal frontmatter read, with no derived-page indirection.
+fn grants_for_path(conn: &Connection, doc_path: &str) -> Option<Vec<String>> {
     let fm: String = conn
         .query_row(
             "SELECT frontmatter FROM documents WHERE path=?",
@@ -20,7 +55,13 @@ pub fn grants_for(conn: &Connection, doc_path: &str) -> Option<Vec<String>> {
             |r| r.get(0),
         )
         .ok()?;
-    let v: Value = serde_json::from_str(&fm).ok()?;
+    let v: Value = match serde_json::from_str(&fm) {
+        Ok(v) => v,
+        // Vaults indexed before the JSON migration hold raw YAML here. Parsing
+        // it as before would silently report "public" again, so fall back to a
+        // YAML read rather than failing open.
+        Err(_) => crate::fm_to_json(&fm),
+    };
     let acl = v.get("acl")?;
     let list = if let Some(s) = acl.as_str() {
         vec![s.to_string()]
@@ -35,6 +76,11 @@ pub fn grants_for(conn: &Connection, doc_path: &str) -> Option<Vec<String>> {
     } else {
         Some(list)
     }
+}
+
+/// An empty/absent acl means unrestricted. Derived pages inherit their origin's.
+pub fn grants_for(conn: &Connection, doc_path: &str) -> Option<Vec<String>> {
+    grants_for_path(conn, &origin_doc(conn, doc_path))
 }
 
 /// True if the principal may see this document.
@@ -58,13 +104,14 @@ fn any_restricted(conn: &Connection) -> bool {
         Ok(m) => m.filter_map(Result::ok).collect(),
         Err(_) => return false,
     };
-    rows.iter().any(|fm| {
-        serde_json::from_str::<Value>(fm)
-            .ok()
-            .and_then(|v| v.get("acl").cloned())
-            .map(|a| !a.is_null())
-            .unwrap_or(false)
-    })
+    // Same derived-page trap as `grants_for`: a sources/ page looks unrestricted
+    // on its own, so judge restriction through the ORIGIN document. Otherwise a
+    // vault whose only restricted content has been compiled would skip the ACL
+    // filter entirely and hand every block to the caller.
+    rows.iter()
+        .filter_map(|fm| serde_json::from_str::<Value>(fm).ok())
+        .filter(|v| !v.get("source").map(|s| s.is_string()).unwrap_or(false))
+        .any(|v| v.get("acl").map(|a| !a.is_null()).unwrap_or(false))
 }
 
 /// Drop blocks the principal is not entitled to — before context assembly.

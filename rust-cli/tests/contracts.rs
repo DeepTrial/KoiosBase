@@ -35,7 +35,10 @@ fn contracts_match_python() {
             true,
             vec![
                 ("citation", "0/1 sentences cited"),
-                ("refusal", "answer asserted with no evidence and no refusal marker"),
+                (
+                    "refusal",
+                    "answer asserted with no evidence and no refusal marker",
+                ),
             ],
         ),
         (

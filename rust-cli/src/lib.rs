@@ -105,7 +105,7 @@ pub fn index_file(
     let title = fm_title(&fm).unwrap_or_else(|| doc_path.to_string());
     conn.execute(
         "INSERT OR REPLACE INTO documents(path,title,frontmatter,hash) VALUES(?,?,?,?)",
-        params![doc_path, title, fm, ""],
+        params![doc_path, title, fm_for_storage(&fm), ""],
     )?;
 
     let title = fm_title(&fm).unwrap_or_else(|| doc_path.to_string());
@@ -276,6 +276,47 @@ pub fn split_frontmatter(text: &str) -> (String, String) {
     (String::new(), text.to_string())
 }
 
+/// Parse YAML frontmatter into the JSON object Python stores.
+///
+/// `documents.frontmatter` must hold JSON — `{"acl": ["finance-team"]}` — not
+/// the raw YAML text. Every CONSUMER (acl::grants_for, cross-shell reads)
+/// json.loads() this column, and Rust was writing raw YAML into it, so the
+/// parse failed silently and every restricted document was pronounced PUBLIC.
+/// That is how anonymous Studio exports leaked a restricted figure.
+pub fn fm_to_json(fm: &str) -> serde_json::Value {
+    let mut map = serde_json::Map::new();
+    for line in fm.lines() {
+        let t = line.trim_end();
+        if t.is_empty() || t.starts_with('#') {
+            continue;
+        }
+        let Some((k, v)) = t.split_once(':') else {
+            continue;
+        };
+        let key = k.trim().trim_matches('"').to_string();
+        let val = v.trim();
+        let json_v = if val.starts_with('[') && val.ends_with(']') {
+            // inline list: [finance-team] / [finance-team, hr]
+            let items: Vec<serde_json::Value> = val[1..val.len() - 1]
+                .split(',')
+                .map(|x| x.trim().trim_matches('"').trim_matches('\''))
+                .filter(|x| !x.is_empty())
+                .map(|x| serde_json::Value::String(x.to_string()))
+                .collect();
+            serde_json::Value::Array(items)
+        } else {
+            serde_json::Value::String(val.trim_matches('"').trim_matches('\'').to_string())
+        };
+        map.insert(key, json_v);
+    }
+    serde_json::Value::Object(map)
+}
+
+/// Render frontmatter for storage — JSON, matching koiosbase's column format.
+pub fn fm_for_storage(fm: &str) -> String {
+    serde_json::to_string(&fm_to_json(fm)).unwrap_or_else(|_| "{}".to_string())
+}
+
 pub fn fm_title(fm: &str) -> Option<String> {
     for line in fm.lines() {
         if let Some((k, v)) = line.split_once(':') {
@@ -406,7 +447,7 @@ pub fn index_pdf(
     let title = fm_title(&fm).unwrap_or_else(|| doc_path.to_string());
     conn.execute(
         "INSERT OR REPLACE INTO documents(path,title,frontmatter,hash) VALUES(?,?,?,?)",
-        params![doc_path, title, fm, ""],
+        params![doc_path, title, fm_for_storage(&fm), ""],
     )?;
     let mut count = 0usize;
     let mut ordinal = 0usize;
