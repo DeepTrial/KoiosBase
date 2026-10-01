@@ -60,10 +60,7 @@ fn stale_page_is_downranked_on_the_read_path() {
         "downrank reorders, it must NOT silently drop evidence"
     );
     // The stale doc's blocks must now come last.
-    let first_is_fresh = after
-        .first()
-        .map(|b| b.doc_path != "r.md")
-        .unwrap_or(true);
+    let first_is_fresh = after.first().map(|b| b.doc_path != "r.md").unwrap_or(true);
     let last_is_stale = after.last().map(|b| b.doc_path == "r.md").unwrap_or(false);
     assert!(
         first_is_fresh && last_is_stale,
@@ -103,7 +100,10 @@ fn disposition_table_matches_python() {
     let conn = connect(&v).unwrap();
 
     // no row -> use
-    assert_eq!(koios::state::disposition_for(&conn, "missing.md", false), "use");
+    assert_eq!(
+        koios::state::disposition_for(&conn, "missing.md", false),
+        "use"
+    );
 
     koios::state::mark_stale(&conn, "r.md", "x").unwrap();
     assert_eq!(
@@ -154,9 +154,15 @@ fn init_writes_the_full_maintenance_contract() {
         "cross-family verification",
         "koios index <vault>",
     ] {
-        assert!(text.contains(rule), "AGENTS.md is missing rule {rule:?}:\n{text}");
+        assert!(
+            text.contains(rule),
+            "AGENTS.md is missing rule {rule:?}:\n{text}"
+        );
     }
     // Python marks the derived dir ignored too; without it a built vault looks
     // dirty to git.
-    assert_eq!(fs::read_to_string(p.join(".index/.gitignore")).unwrap(), "*\n");
+    assert_eq!(
+        fs::read_to_string(p.join(".index/.gitignore")).unwrap(),
+        "*\n"
+    );
 }

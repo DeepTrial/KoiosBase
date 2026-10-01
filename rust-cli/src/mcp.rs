@@ -18,6 +18,44 @@ use crate::pipeline::Ev;
 
 pub const PROTOCOL_VERSION: &str = "2024-11-05";
 
+/// JSON-RPC allows these to arrive without an id; they are never answered.
+/// Mirrors koiosbase/mcp/server.py NOTIFICATION_METHODS verbatim.
+const NOTIFICATION_METHODS: [&str; 3] = [
+    "notifications/initialized",
+    "notifications/cancelled",
+    "initialized",
+];
+
+/// Handle a request that carries no `id` — a JSON-RPC notification.
+///
+/// Notifications MUST NOT be answered. The previous loop fell through to the
+/// generic `method not found` arm and replied with an error bearing id=null,
+/// which spec-compliant clients treat as a spurious unsolicited response and
+/// which deadlocks hosts waiting for the next real id.
+///
+/// Returns true if the request was a notification (i.e. must not be answered).
+fn handle_notification(req: &Value) -> bool {
+    let Some(method) = req.get("method").and_then(|m| m.as_str()) else {
+        return false;
+    };
+    if NOTIFICATION_METHODS.contains(&method) {
+        return true;
+    }
+    // Anything else without an id is malformed; log rather than reply.
+    eprintln!("[mcp] ignoring unhandled notification: {method}");
+    true
+}
+
+/// Is this request a notification (no id)? Python checks `"id" not in req or
+/// req["id"] is None` — a JSON null id counts as absent.
+fn is_notification(req: &Value) -> bool {
+    match req.get("id") {
+        None => true,
+        Some(Value::Null) => true,
+        Some(_) => false,
+    }
+}
+
 /// Set false to silence write attribution — mirrors Python's WRITE_AUDIT_LOG.
 const WRITE_AUDIT_LOG: bool = true;
 
@@ -60,7 +98,10 @@ fn tool_defs() -> Value {
           "properties": {
             "vault": {"type": "string"},
             "question": {"type": "string"},
-            "answer": {"type": "string"}
+            "answer": {"type": "string"},
+            "groups": {"type": "array", "items": {"type": "string"},
+                       "description": "caller groups; evidence is gathered with \
+    these so citations never point at unreadable blocks (§9.2)"}
           },
           "required": ["vault", "question", "answer"]
         }
@@ -345,6 +386,16 @@ pub fn serve() -> std::io::Result<()> {
             }
         };
         let shutdown = req.get("method").and_then(|m| m.as_str()) == Some("shutdown");
+        // Mirrors Python's serve(): a request with no id is a notification and
+        // must never be answered — replying with id=null breaks the
+        // `notifications/initialized` handshake on spec-compliant hosts.
+        if is_notification(&req) {
+            handle_notification(&req);
+            if shutdown {
+                break;
+            }
+            continue;
+        }
         // The whole envelope is serialized with Python separators too, so the
         // wire bytes (not just the payload) match the Python server.
         let resp = python_dumps(&handle_request(&req));
@@ -358,6 +409,28 @@ pub fn serve() -> std::io::Result<()> {
 }
 
 /// Used by tests and by `--once` style callers: handle one raw line.
+///
+/// Returns "" for a NOTIFICATION — the same contract `serve()` implements, so a
+/// test driving this helper exercises the real dispatch decision rather than a
+/// separate code path.
+pub fn handle_line_stdio(line: &str) -> String {
+    let Ok(req) = serde_json::from_str::<Value>(line) else {
+        return python_dumps(&json!({"jsonrpc":"2.0","id":Value::Null,
+                                    "error":{"code":-32700,"message":"parse error"}}));
+    };
+    if is_notification(&req) {
+        handle_notification(&req);
+        return String::new();
+    }
+    python_dumps(&handle_request(&req))
+}
+
+/// The three tool definitions. Exposed for parity tests that assert the schema
+/// a client sees matches koiosbase/mcp/server.py TOOLS.
+pub fn tool_defs_for_test() -> Value {
+    tool_defs()
+}
+
 #[allow(dead_code)]
 pub fn handle_line(line: &str) -> String {
     match serde_json::from_str::<Value>(line) {

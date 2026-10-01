@@ -191,12 +191,7 @@ fn parse_groups(raw: Option<&str>) -> Option<Vec<String>> {
 /// Mirrors koiosbase/retrieval/channels.py retrieve_channel() one-for-one,
 /// including the `full` slice (`[: limit * 20]`) so the same channel yields the
 /// same number of candidates on both shells.
-fn channel_ids(
-    conn: &rusqlite::Connection,
-    channel: &str,
-    query: &str,
-    top: usize,
-) -> Vec<String> {
+fn channel_ids(conn: &rusqlite::Connection, channel: &str, query: &str, top: usize) -> Vec<String> {
     match channel {
         "tree" => koios::retrieval::tree_search(conn, query, 3).unwrap_or_default(),
         "full" => {
@@ -238,8 +233,10 @@ fn cmd_search(
     // no way to reach channels ①/③/④ at all.
     let ev = if let Some(ch) = channel {
         let ids = channel_ids(&conn, ch, query, top);
-        let mut out: Vec<pipeline::Ev> =
-            ids.iter().filter_map(|i| pipeline::get_block(&conn, i)).collect();
+        let mut out: Vec<pipeline::Ev> = ids
+            .iter()
+            .filter_map(|i| pipeline::get_block(&conn, i))
+            .collect();
         out = acl::filter_blocks(&conn, out, groups.as_deref());
         out = state::filter_visible(&conn, out);
         state::apply_disposition(&conn, out, false)
