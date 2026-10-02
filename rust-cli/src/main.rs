@@ -86,8 +86,13 @@ enum Cmd {
     },
     /// eval harness metrics (§10.2)
     Eval {
-        #[arg(short = 'p', long = "path", default_value = ".")]
-        path: PathBuf,
+        /// vault directory (positional, like index/lint); -p/--path also works
+        #[arg(short = 'p', long = "path")]
+        path_flag: Option<PathBuf>,
+        path: Option<PathBuf>,
+        /// fail on needs-llm cases too
+        #[arg(long)]
+        strict: bool,
     },
     /// L1 programmatic lint checks (§9.3, §10.3)
     Lint { path: Option<PathBuf> },
@@ -330,7 +335,7 @@ fn cmd_query(path: &Path, query: &str, top: usize) -> rusqlite::Result<()> {
     print_blocks(&conn, &ids)
 }
 
-fn cmd_eval(path: &Path) -> rusqlite::Result<()> {
+fn cmd_eval(path: &Path, strict: bool) -> rusqlite::Result<()> {
     // Seed golden set — must stay identical to koiosbase/eval/harness.py
     // SEED_CASES, otherwise the two shells report incomparable scores.
     let cases: Vec<(&str, Option<&str>, bool)> = vec![
@@ -366,6 +371,9 @@ fn cmd_eval(path: &Path) -> rusqlite::Result<()> {
     let mut refusal_total = 0usize;
     let mut needs_llm_skipped = 0usize;
     let mut citation_cov_sum = 0.0f64;
+    // Python's cmd_eval treats a needs-llm failure as blocking ONLY under
+    // --strict; without the flag those are known v0.1 gaps, not regressions.
+    let mut blocking = 0usize;
     for (q, want, needs_llm) in cases {
         total += 1;
         if want.is_none() {
@@ -375,6 +383,16 @@ fn cmd_eval(path: &Path) -> rusqlite::Result<()> {
             // matters or coverage lands on a different denominator.
             refusal_total += 1;
             let res = pipeline::full_query(&conn, q, top, None);
+            // REFUSAL cases DO contribute coverage, measured on the ANSWER.
+            // The Python harness records this before returning (harness
+            // comment: a refusal has no citation, which is correct, and
+            // leaving the sum at 0 would average over fewer than `total`
+            // cases and inflate the metric). Missing this is what made the
+            // two shells print different citation_cov on identical vaults.
+            {
+                let (cited, n) = pipeline::citation_coverage(&res.answer);
+                citation_cov_sum += if n == 0 { 0.0 } else { cited as f64 / n as f64 };
+            }
             if res.evidence.is_empty() && pipeline::is_refusal(&res.answer) {
                 refusal_ok += 1;
                 continue;
@@ -392,7 +410,12 @@ fn cmd_eval(path: &Path) -> rusqlite::Result<()> {
                     &res.answer.chars().take(40).collect::<String>()
                 )
             };
-            println!("  SKIP {detail}");
+            if strict || !needs_llm {
+                blocking += 1;
+                println!("  FAIL {detail}");
+            } else {
+                println!("  SKIP {detail}");
+            }
             continue;
         }
         // ---- factual branch (harness lines 113-126) ----
@@ -402,15 +425,19 @@ fn cmd_eval(path: &Path) -> rusqlite::Result<()> {
         if ids.iter().any(|i| i == want) {
             recall_ok += 1;
         } else {
+            blocking += 1;
             println!(
                 "  FAIL [factual] {q} -> got {:?}, want {want}",
                 &ids[..ids.len().min(2)]
             );
         }
-        // citation coverage measured on the assembled context (harness 128-130)
-        let blocks2 = pipeline::retrieve_channel(&conn, q, top, None);
-        let answered = pipeline::assemble(&blocks2, 6000);
-        let (cited, considered) = pipeline::citation_coverage(&answered);
+        // §10.2: coverage is measured on the ANSWER, not the assembled context.
+        // Python made this change deliberately (harness comment) because
+        // CITATION_RE looks for [[wikilink]] while the context format is a
+        // bare `[id]` line — measuring the context pinned coverage near 0 and
+        // the metric could never detect a regression.
+        let res = pipeline::full_query(&conn, q, top, None);
+        let (cited, considered) = pipeline::citation_coverage(&res.answer);
         citation_cov_sum += if considered == 0 {
             0.0
         } else {
@@ -423,6 +450,10 @@ fn cmd_eval(path: &Path) -> rusqlite::Result<()> {
         if refusal_total == 0 { 1.0 } else { refusal_ok as f64 / refusal_total as f64 },
         citation_cov_sum / total as f64
     );
+    // Mirrors Python's cmd_eval exit code: non-zero iff anything blocked.
+    if blocking > 0 {
+        std::process::exit(1);
+    }
     Ok(())
 }
 
@@ -447,7 +478,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Cmd::Tree { query, path } => cmd_tree(&path, &query.join(" "))?,
         Cmd::Full { path, max_chars } => cmd_full(&path, max_chars)?,
         Cmd::Query { query, path, top } => cmd_query(&path, &query.join(" "), top)?,
-        Cmd::Eval { path } => cmd_eval(&path)?,
+        Cmd::Eval {
+            path_flag,
+            path,
+            strict,
+        } => {
+            let p = path_flag
+                .or(path)
+                .unwrap_or_else(|| PathBuf::from("."));
+            cmd_eval(&p, strict)?
+        }
         Cmd::Lint { path } => {
             let code = lint::cmd_lint(&path.unwrap_or_else(|| PathBuf::from(".")))?;
             if code != 0 {

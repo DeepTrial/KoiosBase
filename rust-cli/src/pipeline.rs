@@ -269,16 +269,32 @@ pub fn assemble(blocks: &[Ev], budget_chars: usize) -> String {
 }
 
 /// Deterministic generator (llm=None branch of pipeline.generate).
-fn generate(question: &str, _context: &str, blocks: &[Ev]) -> String {
+///
+/// Three details mirror koiosbase/query/pipeline.py generate() exactly, and
+/// each one matters for metric parity rather than cosmetics:
+///   * NO preamble line. Python removed 检索到的证据如下： deliberately — a
+///     header sentence carrying no citation made every default answer a
+///     citation violation, which trained callers to ignore that signal.
+///   * citations are [[raw/{id}]], which is the form CITATION_RE matches;
+///     the old `(id)` form scored zero coverage and shifted every denominator.
+///   * stale pages get （待更新） appended, the *disclosure* half of §8.3 —
+///     apply_disposition only reorders, so without this a reader receives a
+///     stale page's answer with no hint its sources moved on.
+fn generate(conn: &Connection, question: &str, _context: &str, blocks: &[Ev]) -> String {
     if blocks.is_empty() {
         return format!("{REFUSAL}：当前知识库中没有任何相关证据。");
     }
     let mut lines: Vec<String> = Vec::new();
     for b in blocks.iter().take(3) {
         let snippet: String = b.raw.replace('\n', " ").chars().take(180).collect();
-        lines.push(format!("- {snippet} ({})", b.id));
+        let mut line = format!("- {snippet} [[raw/{}]]", b.id);
+        if crate::state::is_stale(conn, &b.doc_path) {
+            line.push_str(" （待更新）");
+        }
+        lines.push(line);
     }
-    format!("检索到的证据如下：\n{}", lines.join("\n"))
+    let _ = question;
+    lines.join("\n")
 }
 
 pub struct QueryResult {
@@ -307,7 +323,7 @@ pub fn full_query(
         }
     }
     let context = assemble(&blocks, 6000);
-    let answer = generate(question, &context, &blocks);
+    let answer = generate(conn, question, &context, &blocks);
     QueryResult {
         answer,
         evidence: blocks,
