@@ -77,6 +77,30 @@
    （已确认），但 id 集合和顺序一致。Python 的 test suite 不比对 stdout 格式，
    所以不影响 CI。
 
+## eval 指标差分法（2026-10-02 新增）
+
+同一 vault 上跑两壳的 `eval`，比对 `total=` 行。任何指标不同 = 行为缺口，不是噪声：
+
+```bash
+V=$(mktemp -d); rust-cli/target/release/koios init "$V"
+printf -- '---\ntitle: Report\n---\n# 财务分析\n## 负债分析\n负债合计 18 亿元，营收 32 亿元。\n## 现金流\n经营性现金流为正。\n' > "$V/raw/report.md"
+rust-cli/target/release/koios index "$V"
+rust-cli/target/release/koios eval "$V" | grep ^total
+PYTHONPATH=. .venv/bin/python -c "from koiosbase.cli import main; main(['eval','-p','$V'])" | grep ^total
+```
+
+预期两壳都是 `total=5 recall@1=0.600 refusal_acc=1.000 citation_cov=0.348`。
+
+这个方法一次性挖出三个真实 Rust 缺口（均已修）：
+
+1. coverage 测在 assembled context 上，而 Python 测 `res.answer`；
+2. refusal case 没计入 coverage 总和（导致平均值虚高）；
+3. `generate()` 输出了 `检索到的证据如下：` 前缀 + `(id)` 引用，而 Python
+   是裸行 + `[[raw/{id}]]`。Python 特意删掉前缀 —— 没有引用的抬头句会让
+   每个默认回答都违反 citation contract。每条都给所有分母多加一个句子。
+
+**永远比对指标，不要只比对「有没有结果」。**
+
 ## 未计划移植（设计如此）
 
 - `koiosbase/generation/judge.py` 的真实 cross-family judge（NLI 模型）——
