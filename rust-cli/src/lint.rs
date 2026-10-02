@@ -137,13 +137,16 @@ fn parse_ymd_days(s: &str) -> Option<i64> {
 }
 
 /// Report pages flagged stale by cascade propagation (§8.3).
+///
+/// The existence guard used to be `conn.execute("SELECT 1 ... ").is_err()`.
+/// That is wrong twice over: `Connection::execute()` is for statements that
+/// change rows and returns `Err(ExecuteReturnedResults)` for ANY SELECT, even
+/// one matching rows — so this check evaluated true unconditionally and the
+/// gardener silently reported ZERO stale pages on every vault. Tables are
+/// created by `koios::connect`, so the only honest guard is graceful
+/// degradation on query failure (which `let Ok(..) = .. else return` below
+/// already provides).
 pub fn check_stale_pages(conn: &Connection) -> Vec<String> {
-    if conn
-        .execute("SELECT 1 FROM page_state LIMIT 1", [])
-        .is_err()
-    {
-        return Vec::new();
-    }
     let mut stmt = match conn.prepare("SELECT page_path,reason FROM page_state WHERE stale=1") {
         Ok(s) => s,
         Err(_) => return Vec::new(),
