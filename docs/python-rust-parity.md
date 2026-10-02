@@ -92,3 +92,40 @@ cd rust-cli && cargo build --release && cargo test --release
 cd /home/ubuntu/dev/KoiosBase && .venv/bin/python -m pytest -q
 # 交叉：同一 vault 分别用两壳 index + search，比对 block id 集合
 ```
+
+## 能否删掉 Python、只留 Rust？（2026-10-02 实证结论）
+
+commit `505647a` 时的实测数据：
+
+| 指标 | Python | Rust |
+|---|---|---|
+| 实现 LOC | 4194 | 4155 |
+| 测试数 | 65 | 18 |
+| 运行时依赖 | pymupdf（**65 MB**） | 无（仅 cargo crate） |
+| 产物 | wheel，需解释器 | **8.3 MB** 静态二进制，已构建 3 个交叉目标 |
+
+**结论：不建议删，且原因不是「Rust 没写完」。**
+
+** blocker 1：PDF 引擎不是同一个东西。**
+Python 用 PyMuPDF（MuPDF 的 C++ binding，65 MB，成熟）；Rust 用 `pdf-extract`
+（纯 Rust，小得多）。这是**两个不同的 PDF 引擎**。在格式良好的文本型 PDF 上，
+实测两壳抽出的 block **逐字段完全一致**（含 type/breadcrumb/raw）。但边角情况会分叉：
+一页若每行都短且无句末标点，两壳共用的 heading 启发式会把正文误判成标题、
+**产出 0 个 block** —— 这是两壳**共有**的潜在 bug（同一算法的遗传），
+不是移植遗漏。换引擎意味着要在扫描件/图片型 PDF、表格、CJK 版式上重新建立信任，
+而这些恰恰两边测试都没覆盖。
+
+** blocker 2：Python 测试是 oracle。**
+Rust 的 18 个测试是对着它做 parity 断言的。删掉之后这些测试变成自证 ——
+断言「Rust 今天做什么」，而不是「应该是什么」。本轮修的 MCP 通知 bug、
+§8.3 disposition 缺口，**全部是靠跟 Python 比对才发现的**，Rust 自己的测试一个都没报。
+
+**若仍要推进，安全顺序是：**
+1. 先把 `pdf-extract` 换成 MuPDF 系 crate（`mupdf` crate），让两边的提取引擎变成同一个，
+   再重跑 PDF 差分测试。
+2. 把 Rust 测试从 18 补向 Python 的 65 个用例（用 Python 输出做 snapshot 基准），
+   **补完再删**，而不是反过来。
+3. Python 包可以停止加新功能（冻结），Rust 二进制作为默认 `koios` 发布；
+   **删源码是最后一步**。
+
+在 1、2 完成前不要删。
