@@ -13,26 +13,61 @@ use crate::pipeline::Ev;
 
 pub const HEADING_MAX_LEN: usize = 80;
 
+/// Normalize mupdf-rs page text to PyMuPDF's `page.get_text()` shape.
+///
+/// `Page::text()` routes through `mupdf_print_stext_page_as_text`, which emits a
+/// BLANK LINE after every content line. PyMuPDF's get_text() does not: it
+/// returns one newline per line. Keeping those blanks changes every block's
+/// `raw` text relative to the Python shell, shifting derived indices — and
+/// `page_to_blocks` would treat each blank as a paragraph separator, producing
+/// one block per line instead of one per paragraph.
+fn normalize_pymupdf_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for line in s.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
 /// Default CPU tier: text per page. Returns [] on any failure — a corrupt or
 /// unreadable PDF must degrade to "no pages", never abort the whole ingest.
 pub fn extract_pages_cpu(path: &Path) -> Vec<String> {
-    let bytes = match std::fs::read(path) {
-        Ok(b) => b,
+    // MuPDF via mupdf-rs — the SAME engine PyMuPDF binds, rather than a second
+    // independent parser. Page numbers are the provenance unit (§4.1), so this
+    // walks pages individually exactly like PyMuPDF's
+    // `for page in doc: page.get_text()`; a whole-document blob would stamp
+    // every citation with the wrong page.
+    let doc = match mupdf::Document::open(path) {
+        Ok(d) => d,
         Err(e) => {
             log_skip(&e.to_string());
             return Vec::new();
         }
     };
-    match pdf_extract::extract_text_from_mem_by_pages(&bytes) {
-        // Per-page, exactly like PyMuPDF's `for page in doc: page.get_text()`.
-        // Page numbers ARE the provenance unit (§4.1), so a whole-document blob
-        // would put wrong page numbers in every citation.
-        Ok(pages) => pages,
-        Err(e) => {
-            log_skip(&e.to_string());
-            Vec::new()
+    let n = doc.page_count().unwrap_or(0);
+    let mut pages = Vec::with_capacity(n as usize);
+    for i in 0..n {
+        // Default options are EMPTY flags, which is what PyMuPDF's
+        // `page.get_text()` uses — matching it keeps page text byte-identical
+        // between the two shells instead of merely "similar".
+        match doc
+            .load_page(i)
+            .and_then(|p| p.text(mupdf::TextExtractOptions::default()))
+        {
+            Ok(text) => pages.push(normalize_pymupdf_text(&text)),
+            Err(e) => {
+                // Degrade per page rather than aborting the document: one bad
+                // page must not cost the vault the other 40.
+                log_skip(&format!("page {}: {e}", i + 1));
+                pages.push(String::new());
+            }
         }
     }
+    pages
 }
 
 /// Record why a tier was skipped — silent degradation is undebuggable.

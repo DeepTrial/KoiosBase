@@ -2,6 +2,17 @@
 name = "koios"
 version = "0.8.2"
 edition = "2021"
+# LICENSE NOTE (deliberate, reviewed 2026-10-02):
+# KoiosBase itself is MIT (see /LICENSE), but the PDF tier links MuPDF via the
+# `mupdf` crate, which is AGPL-3.0-or-later OR Artifex commercial. That is the
+# SAME licensing position the Python shell already had — its single runtime
+# dependency, PyMuPDF, carries those exact terms — so this does not add a new
+# obligation; it keeps parity. What does change is that the AGPL obligation now
+# attaches to a DISTRIBUTED BINARY rather than to an interpreter-time import.
+# Anyone redistributing this binary must therefore offer the corresponding
+# source under AGPL-3.0 (or buy an Artifex commercial licence) for MuPDF.
+# Choose `features` below so you only pay for what you use.
+license = "MIT"
 
 [lib]
 name = "koios"
@@ -15,4 +26,8 @@ once_cell = "1"
 # preserve_order: serde_json defaults to BTreeMap (sorted keys), which reorders
 # every MCP payload relative to Python's dict ordering.
 serde_json = { version = "1", features = ["preserve_order"] }
-pdf-extract = "0.12.1"
+# MuPDF (via mupdf-rs) replaces `pdf-extract` so the Rust shell uses the SAME
+# extraction engine as PyMuPDF. Default features pull in js/xps/svg/epub/
+# tesseract/brotli — none of which §5.1 needs, and each adds build minutes plus
+# more copyleft surface. Strip to the PDF core.
+mupdf = { version = "0.8", default-features = false, features = ["base14-fonts"] }

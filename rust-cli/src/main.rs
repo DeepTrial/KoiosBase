@@ -46,7 +46,14 @@ enum Cmd {
     /// scaffold a vault
     Init { path: Option<PathBuf> },
     /// build the derived index from raw/ + wiki/
-    Index { path: Option<PathBuf> },
+    Index {
+        path: Option<PathBuf>,
+        /// force a full rebuild. Python exposes this flag; it is a no-op there
+        /// today because content hashes already make every rebuild correct, but
+        /// accepting it keeps scripts portable between the two shells.
+        #[arg(long)]
+        full: bool,
+    },
     /// BM25 + PPR hybrid search (channel ②+③)
     Search {
         /// query text
@@ -97,7 +104,15 @@ enum Cmd {
     /// L1 programmatic lint checks (§9.3, §10.3)
     Lint { path: Option<PathBuf> },
     /// cross-judge one claim against evidence (§10.3 L2)
-    CheckClaim { claim: String, evidence: String },
+    /// cross-judge one claim against evidence (§10.3 L2)
+    ///
+    /// The Python CLI spells this `checkclaim`. Clap would otherwise rename the
+    /// variant to `check-claim`, silently breaking host scripts ported from it.
+    #[command(name = "checkclaim")]
+    CheckClaim {
+        claim: String,
+        evidence: String,
+    },
     /// retract a block and cascade staleness to citing pages (§8.3)
     Retract {
         block_id: String,
@@ -111,8 +126,10 @@ enum Cmd {
     },
     /// compile entities/ + sources/ from raw (§5.3)
     Compile {
-        #[arg(short = 'p', long = "path", default_value = ".")]
-        path: PathBuf,
+        /// vault directory; positional like index/lint, or -p/--path
+        #[arg(short = 'p', long = "path")]
+        path_flag: Option<PathBuf>,
+        path: Option<PathBuf>,
     },
     /// promote a compiled page's confidence (§5.4)
     Promote {
@@ -124,10 +141,13 @@ enum Cmd {
     },
     /// write an approved answer back to wiki/answers/ (§6.6)
     Answer {
-        question: String,
+        /// question; Python requires -q/--question, positional also accepted
+        #[arg(short = 'q', long = "question")]
+        question_flag: Option<String>,
+        question: Option<String>,
         #[arg(short = 'p', long = "path", default_value = ".")]
         path: PathBuf,
-        #[arg(long, default_value = "")]
+        #[arg(short = 'a', long = "answer", default_value = "")]
         answer: String,
     },
     /// Studio-style export: brief | mindmap (§13)
@@ -461,7 +481,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Init { path } => cmd_init(&path.unwrap_or_else(|| PathBuf::from(".")))?,
-        Cmd::Index { path } => cmd_index(&path.unwrap_or_else(|| PathBuf::from(".")))?,
+        Cmd::Index { path, full } => {
+            if full {
+                // Python's --full does not drop tables either; rebuild already
+                // regenerates every derived row from raw + wiki (P1).
+                eprintln!("[index] --full accepted; rebuild is already complete");
+            }
+            cmd_index(&path.unwrap_or_else(|| PathBuf::from(".")))?
+        }
         Cmd::Search {
             query,
             path,
@@ -483,9 +510,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             path,
             strict,
         } => {
-            let p = path_flag
-                .or(path)
-                .unwrap_or_else(|| PathBuf::from("."));
+            let p = path_flag.or(path).unwrap_or_else(|| PathBuf::from("."));
             cmd_eval(&p, strict)?
         }
         Cmd::Lint { path } => {
@@ -523,8 +548,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-        Cmd::Compile { path } => {
-            let vault = path.canonicalize().unwrap_or(path.clone());
+        Cmd::Compile { path_flag, path } => {
+            let p = path_flag.or(path).unwrap_or_else(|| PathBuf::from("."));
+            let vault = p.canonicalize().unwrap_or(p);
             cmd_compile(&vault)?;
         }
         Cmd::Promote {
@@ -568,16 +594,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             mcp::serve()?;
         }
         Cmd::Answer {
+            question_flag,
             question,
             path,
             answer,
         } => {
+            // Python requires -q/--question; accept the positional form too so
+            // scripts written against either shell work.
+            let q = match question_flag.or(question) {
+                Some(q) => q,
+                None => {
+                    eprintln!("error: --question is required");
+                    std::process::exit(2);
+                }
+            };
             let vault = path.canonicalize().unwrap_or(path.clone());
             let conn = connect(&vault)?;
-            let ev = pipeline::retrieve_channel(&conn, &question, 8, None);
+            let ev = pipeline::retrieve_channel(&conn, &q, 8, None);
             // date-only, matching Python's answer write-back stamp
             let stamp = state::now_date();
-            match compile::write_answer_page(&vault, &question, &answer, &ev, &stamp) {
+            match compile::write_answer_page(&vault, &q, &answer, &ev, &stamp) {
                 Ok(p) => println!("{}", p.display()),
                 Err(e) => {
                     eprintln!("error: {e}");
