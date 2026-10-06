@@ -144,12 +144,51 @@ Rust 的 18 个测试是对着它做 parity 断言的。删掉之后这些测试
 断言「Rust 今天做什么」，而不是「应该是什么」。本轮修的 MCP 通知 bug、
 §8.3 disposition 缺口，**全部是靠跟 Python 比对才发现的**，Rust 自己的测试一个都没报。
 
-**若仍要推进，安全顺序是：**
-1. 先把 `pdf-extract` 换成 MuPDF 系 crate（`mupdf` crate），让两边的提取引擎变成同一个，
-   再重跑 PDF 差分测试。
-2. 把 Rust 测试从 18 补向 Python 的 65 个用例（用 Python 输出做 snapshot 基准），
-   **补完再删**，而不是反过来。
-3. Python 包可以停止加新功能（冻结），Rust 二进制作为默认 `koios` 发布；
-   **删源码是最后一步**。
+## ✅ Python 作为依赖已移除（2026-10-02，commit `b282366`）
 
-在 1、2 完成前不要删。
+上两节的两个 blocker 都已解除，Rust 现在已经自足且测试是超集：
+
+| 指标 | 之前 | 现在 |
+|---|---|---|
+| Rust 测试数 | 18 | **87**（Python 是 65） |
+| PDF 引擎 | pdf-extract（不同引擎） | **MuPDF** —— 与 PyMuPDF 同一个 |
+| CLI 覆盖面 | 缺 3 项 | **21 个子命令**，拼写与 Python 一致 |
+| 运行时依赖 | — | 除 cargo crate 外无；仅 5 个系统库 |
+
+### 构建前置（缺了 bindgen 会失败）
+
+```bash
+sudo apt-get install -y clang libclang-dev pkg-config libc6-dev
+export BINDGEN_EXTRA_CLANG_ARGS="-I/usr/lib/gcc/x86_64-linux-gnu/13/include"
+cd rust-cli && cargo build --release
+```
+
+`src/pdf.rs` 的调用链是 `Document::open()` → `load_page(i)` →
+`page.text(TextExtractOptions::default())` → `normalize_pymupdf_text()`。
+
+### 这次踩过的坑（真金白银的时间）
+
+- **`Page::text()` 不等于 PyMuPDF 的 `get_text()`** —— 它每行后会多出一个空行。
+  必须归一化，否则所有派生索引都会错位，且 `page_to_blocks` 会变成一行一个 block。
+- 换依赖后忘记更新，`Cargo.lock` 里仍留着 pdf-extract —— 用
+  `grep -c pdf-extract Cargo.lock` 确认已清除。
+- MuPDF 首次编译要几分钟，用后台终端跑。
+- **`cargo fmt` 会重写测试文件** —— 跑完不要照着旧文本打补丁，先重读文件或直接用 patch 工具。
+
+### 验证「真的不需要 Python 了」
+
+```bash
+mkdir -p /tmp/emptybin
+for b in python python3; do printf '#!/bin/sh\nexit 127\n' > /tmp/emptybin/$b; chmod +x /tmp/emptybin/$b; done
+export PATH=/tmp/emptybin:/usr/bin:/bin   # 保留 coreutils，只屏蔽 python
+koios init . && koios index . && koios eval .
+```
+
+另外要比对**退出码**，不只是「有没有跑起来」：`lint` 和 `eval` 发现问题时故意返回非 0。
+两边要用完全相同的参数各跑一次再 diff `$?`。
+
+### 许可证提醒（必须随二进制分发）
+
+`mupdf` crate 是 AGPL-3.0-or-later 或 Artifex 商业许可 —— 与原先 PyMuPDF 完全相同的条款。
+义务种类没变，但现在挂在**分发的二进制**上，不再是解释器 import。
+已记录在 `rust-cli/Cargo.toml`。任何人再分发此二进制需注意 AGPL 源码提供义务。
