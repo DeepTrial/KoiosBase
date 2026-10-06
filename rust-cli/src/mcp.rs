@@ -440,6 +440,3 @@ pub fn handle_line(line: &str) -> String {
         .to_string(),
     }
 }
-
-#[allow(dead_code)]
-fn _unused(conn: &Connection) {}

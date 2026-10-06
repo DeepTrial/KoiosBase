@@ -129,12 +129,17 @@ pub fn index_file(
                  conn: &Connection,
                  doc_path: &str|
      -> rusqlite::Result<()> {
+        // Python's split_blocks() joins buf with "\n" then .strip() — it does
+        // NOT collapse interior newlines. Joining with " " here made multi-line
+        // list blocks a single space-separated line, which then sat ONE
+        // unsourced-assertion finding where Python reported three (lint walks
+        // block lines), and made every derived page's raw differ.
         let body: String = pending
             .iter()
             .map(|l| l.trim())
             .filter(|l| !l.is_empty())
             .collect::<Vec<_>>()
-            .join(" ");
+            .join("\n");
         pending.clear();
         if body.is_empty() {
             return Ok(());
@@ -164,6 +169,19 @@ pub fn index_file(
         };
         let kind = if body.contains('|') {
             "table"
+        } else if body.lines().all(|l| {
+            let s = l.trim();
+            s.is_empty()
+                || s.starts_with("- ")
+                || s.starts_with("* ")
+                || s.starts_with("+ ")
+                || (s.chars().next().is_some_and(|c| c.is_ascii_digit())
+                    && s.contains(". "))
+        }) {
+            // Python's split_blocks() tracks a list until the run breaks, so a
+            // list flushes with type "list" regardless of length. Rust only had
+            // paragraph/table, so every "- item" block was typed 'paragraph'.
+            "list"
         } else {
             "paragraph"
         };
@@ -246,10 +264,15 @@ pub fn index_file(
             } else {
                 None
             };
+            // `layer` was hardcoded to 'raw' here, so every derived page's
+            // sections were stored as raw-layer rows. Anything scoped to
+            // layer='wiki' — including the orphan check above — therefore
+            // skipped them entirely, and the two shells disagreed about which
+            // rows were source-of-truth.
             conn.execute(
                 "INSERT OR REPLACE INTO sections(id,doc_path,parent_id,title,summary,\
-                 ordinal,layer) VALUES(?,?,?,?,?,?,'raw')",
-                params![sid, doc_path, parent_id, title, "" as &str, section_no],
+                 ordinal,layer) VALUES(?,?,?,?,?,?,?)",
+                params![sid, doc_path, parent_id, title, "" as &str, section_no, layer],
             )?;
             continue;
         }
@@ -313,8 +336,42 @@ pub fn fm_to_json(fm: &str) -> serde_json::Value {
 }
 
 /// Render frontmatter for storage — JSON, matching koiosbase's column format.
+///
+/// Python writes this column with `json.dumps()`, whose DEFAULT separators are
+/// `", "` and `": "`. serde_json's `to_string` emits `","`/`":"` with no space,
+/// so every stored frontmatter differed from Python's byte-for-byte — enough
+/// for a consumer comparing the column as text (and enough to make a db-diff
+/// between the shells look noisy).
 pub fn fm_for_storage(fm: &str) -> String {
-    serde_json::to_string(&fm_to_json(fm)).unwrap_or_else(|_| "{}".to_string())
+    json_python_dumps(&fm_to_json(fm))
+}
+
+/// Serialize with Python's `json.dumps` default separators (`, ` / `: `).
+///
+/// Key order follows the `Value`; that is insertion order because the crate
+/// enables serde_json's `preserve_order` feature, matching Python dicts.
+pub fn json_python_dumps(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::Null => "null".to_string(),
+        serde_json::Value::Bool(b) => if *b { "true" } else { "false" }.to_string(),
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::String(s) => serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string()),
+        serde_json::Value::Array(a) => format!(
+            "[{}]",
+            a.iter().map(json_python_dumps).collect::<Vec<_>>().join(", ")
+        ),
+        serde_json::Value::Object(o) => format!(
+            "{{{}}}",
+            o.iter()
+                .map(|(k, val)| format!(
+                    "{}: {}",
+                    serde_json::to_string(k).unwrap_or_else(|_| "\"\"".to_string()),
+                    json_python_dumps(val)
+                ))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
 }
 
 pub fn fm_title(fm: &str) -> Option<String> {
@@ -347,18 +404,31 @@ pub fn collect_raw_docs(
         }
     }
     for rel in rels {
-        // Route through the adapter: a PDF in raw/ parsed as Markdown would
-        // produce garbage, so non-Markdown sources are skipped (§5.1).
+        // Route through the ADAPTER, not by reading the file as text. The old
+        // check skipped every non-`md` extension, so a PDF in raw/ contributed
+        // blocks but never got its sources/ navigation page (§4.3) — Python
+        // builds one from `_read_raw_docs`, which runs every raw doc through
+        // `parse_any`. The blocks are already in the DB from the raw pass, so
+        // only the title needs resolving here.
         let p = vault.join("raw").join(&rel);
-        if p.extension().and_then(|x| x.to_str()) != Some("md") {
-            continue;
-        }
-        let text = match fs::read_to_string(&p) {
-            Ok(t) => t,
-            Err(_) => continue,
+        let title: String = if p.extension().and_then(|x| x.to_str()) == Some("md") {
+            match fs::read_to_string(&p) {
+                Ok(t) => {
+                    let (fm, _) = split_frontmatter(&t);
+                    fm_title(&fm).unwrap_or_else(|| rel.clone())
+                }
+                Err(_) => rel.clone(),
+            }
+        } else {
+            // Non-Markdown: the title came out of the adapter's synthesized
+            // frontmatter on the documents row.
+            conn.query_row(
+                "SELECT COALESCE(NULLIF(title,''),?) FROM documents WHERE path=?",
+                params![rel, rel],
+                |r| r.get(0),
+            )
+            .unwrap_or_else(|_| rel.clone())
         };
-        let (fm, _body) = split_frontmatter(&text);
-        let title = fm_title(&fm).unwrap_or_else(|| rel.clone());
         let mut blocks: Vec<pipeline::Ev> = Vec::new();
         {
             let mut stmt = conn.prepare(
@@ -444,10 +514,17 @@ pub fn index_pdf(
     let pages = pdf::extract_pages_cpu(path);
     let scanned = pdf::looks_scanned(&pages, 40);
     let fm = pdf::pdf_frontmatter(path, scanned);
-    let title = fm_title(&fm).unwrap_or_else(|| doc_path.to_string());
+    // `pdf_frontmatter` now emits the finished JSON object (Python builds it as
+    // a dict and json.dumps() it), so it must NOT go through fm_for_storage —
+    // that would re-encode the whole object as one string value.
+    let title = serde_json::from_str::<serde_json::Value>(&fm)
+        .ok()
+        .and_then(|v| v.get("title").and_then(|t| t.as_str()).map(str::to_string))
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| doc_path.to_string());
     conn.execute(
         "INSERT OR REPLACE INTO documents(path,title,frontmatter,hash) VALUES(?,?,?,?)",
-        params![doc_path, title, fm_for_storage(&fm), ""],
+        params![doc_path, title, fm, ""],
     )?;
     let mut count = 0usize;
     let mut ordinal = 0usize;
@@ -635,12 +712,18 @@ pub fn cmd_index(path: &Path) -> rusqlite::Result<()> {
     // Backfill navigational summaries: a section's first block becomes its
     // summary (§4.1). Done after ingest because the body arrives AFTER the
     // heading, so it is not available when the heading line is seen.
-    let mut upd = conn.prepare(
-        "UPDATE sections SET summary = COALESCE((SELECT raw FROM blocks \
+    //
+    // ingest/pipeline.py computes `own[0].replace("\n", " ")[:160]` — newlines
+    // collapse to spaces and the result is CHARACTER-truncated (SQLite's
+    // substr() is character-based on TEXT, matching Python slicing). The raw
+    // multiline form leaked into the column, which is what a §4.1 drill-down
+    // renders, so the same navigation looked different on the two shells.
+    conn.execute(
+        "UPDATE sections SET summary = COALESCE((SELECT \
+         substr(replace(raw, char(10), ' '), 1, 160) FROM blocks \
          WHERE blocks.section_id = sections.id ORDER BY ordinal LIMIT 1), '')",
+        [],
     )?;
-    upd.execute([])?;
-    drop(upd);
     tx.commit()?;
     println!("indexed {total} blocks from {}", path.display());
     Ok(())

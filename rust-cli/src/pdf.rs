@@ -162,15 +162,57 @@ pub fn page_to_blocks(doc_path: &str, page_no: usize, text: &str, start_ord: usi
 }
 
 /// Frontmatter the Python adapter writes for a PDF doc (§5.1 provenance).
+/// Content hash of a file — mirrors koiosbase/parsers/pdf.py file_sha256().
+///
+/// Python hashes the WHOLE file with no cap (its `limit` argument defaults to
+/// None after the 16MB-truncation bug was fixed), so this must too: a capped
+/// hash would disagree with Python's `doc_hash` provenance value and the parse
+/// cache key would silently collide across different files.
+pub fn file_sha256(path: &std::path::Path) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    match std::fs::File::open(path) {
+        Ok(mut f) => {
+            let mut buf = [0u8; 1 << 20];
+            loop {
+                use std::io::Read;
+                match f.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => h.update(&buf[..n]),
+                    Err(_) => break,
+                }
+            }
+        }
+        Err(_) => return String::new(),
+    }
+    format!("{:x}", h.finalize())
+}
+
+/// Frontmatter for a parsed PDF, mirroring parsers/pdf.py's Document(...).
+///
+/// Two details that made the stored column differ from Python:
+///   * `doc_hash` was missing entirely — it is the §4.1 provenance value and
+///     the parse cache key, so it cannot be invented later;
+///   * `ocr` was emitted as the string "false" where Python stores a real bool,
+///     because `fm_to_json` stringifies every scalar. It is built as a JSON
+///     object directly here so the types survive.
 pub fn pdf_frontmatter(path: &Path, scanned: bool) -> String {
     let parser = if scanned { "pdf-vlm" } else { "pdf-cpu" };
-    format!(
-        "title: {}\nsource: {}\nparser: {}\nocr: {}",
-        path.file_stem()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_default(),
-        path.display(),
-        parser,
-        scanned
-    )
+    let mut map = serde_json::Map::new();
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    map.insert("title".into(), serde_json::Value::String(stem));
+    map.insert(
+        "source".into(),
+        serde_json::Value::String(path.display().to_string()),
+    );
+    map.insert("parser".into(), serde_json::Value::String(parser.to_string()));
+    map.insert(
+        "doc_hash".into(),
+        serde_json::Value::String(format!("sha256:{}", file_sha256(path))),
+    );
+    map.insert("ocr".into(), serde_json::Value::Bool(scanned));
+    crate::json_python_dumps(&serde_json::Value::Object(map))
 }

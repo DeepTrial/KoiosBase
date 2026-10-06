@@ -4,7 +4,7 @@
 格式 —— 索引是派生的，但两个 shell 必须对"派生"的语义完全一致，否则一个写的库
 另一个读不懂。
 
-**最后同步/核对时间：2026-10-01，基于 commit `c89b37e` + 本次会话的补充。**
+**最后同步/核对时间：2026-10-06，基于 commit `a8195be`。**
 
 ## 命名/位置映射表
 
@@ -52,30 +52,102 @@
 
 ## ⚠️ 已知不对等（未移植 / 差异）
 
-1. **`init` 写的 AGENTS.md 内容不同**。Python（`ingest/pipeline.py cmd_init`）
-   写完整四行维护契约；Rust `main.rs cmd_init` 只写一行
-   `"# AGENTS.md\n\nKoiosBase maintenance contract.\n"`。
-   [事实] 实测：同一空 vault 两壳 init 后 `wc -c AGENTS.md` 不同。
-   影响：AGENTS.md 是 §4.4 写进 vault 的契约，短版丢失了三条规则。
-   尚未修（低优先级，不影响索引/检索语义）。
+1. ~~**`init` 写的 AGENTS.md 内容不同**~~ ✅ **已于 2026-10-06 修**。
+   [实验] 同一空 vault 两壳 init 后 `diff AGENTS.md` 无输出（逐字节相同）。
+   加锁：`tests/parity.rs::init_writes_the_full_maintenance_contract`。
 
-2. **Python `--strict` eval 标志**：Python `koios eval --strict` 会把 needs-llm
-   也算作失败；Rust `Cmd::Eval` 没有 `--strict`，固定宽松模式。
-   两者都打印同样的 `total=/recall@1=/refusal_acc=/citation_cov=/needs_llm=` 行，
-   但退出码语义不同（Python strict 下可能非 0）。
+2. ~~**Python `--strict` eval 标志**~~ ✅ **已补齐**。Rust `Cmd::Eval` 现支持
+   `--strict`。[实验] 同一 vault 上
+   `koios eval --strict` 与 `python -m koiosbase.cli eval -p V --strict`
+   均输出 `total=5 recall@1=0.600 refusal_acc=1.000 citation_cov=0.348 needs_llm=0`
+   且退出码同为 0。
 
 3. **`studio` 的 faq 模板**：Python `studio/exports.py` 有 `render_faq` +
    `type: faq` frontmatter，但 **两侧 CLI 都没有暴露 faq 子命令**（`choices=
    ["brief","mindmap"]`）。这是 Python 侧的死代码，Rust 没有移植它，
    不构成功能缺失。
 
-4. **`--full`（index 强制全量重建）**：Python 有该 flag（当前实现里未实际改变
-   行为），Rust `Cmd::Index` 无此参数。
+4. ~~**`--full`（index 强制全量重建）**~~ ✅ **已补齐**。Rust `Cmd::Index` 现接受
+   `--full` 且与 Python 同为 no-op（content hash 已让每次重建都正确）。
+   [实验] `koios index --full` 输出 `[index] --full accepted; rebuild is
+   already complete` 后正常索引。保留该 flag 只为脚本可移植。
 
-5. **`cmd search` 输出格式不同**：Python 打印 `[i] id\nbreadcrumb\nsnippet`
-   三行；Rust 打印 `[doc_path] id\nsnippet` 两行。**stdout 文本不完全逐字节相同**
-   （已确认），但 id 集合和顺序一致。Python 的 test suite 不比对 stdout 格式，
-   所以不影响 CI。
+5. ~~**`cmd search` 输出格式不同**~~ ✅ **已于 2026-10-06 修**。
+   Rust 原先打印 `[doc_path] id\n  snippet` 两行，丢掉了 breadcrumb；
+   现改为与 Python 逐字节相同的三行：
+   `[i] id` / 缩进 breadcrumb / 缩进 snippet（snippet 内换行也同 Python 一样
+   折成空格）。
+   [实验] `diff` 两壳 stdout 无差异。
+   加锁：`tests/search_stdout.rs`（两个用例：三行结构 + `(no hits)` 哨兵）。
+
+## 本轮（2026-10-06）由 stdout 差分挖出的根因式缺口
+
+上面第 5 条只是表象。修完后对 `lint` 做差分，又暴露出两个躲在索引层的真差异 ——
+它们只影响写盘后由下游命令读取的形状，单元测试（测 helper 本身）全是绿的：
+
+6. **`blocks.raw` 丢掉了块内换行**。Rust `lib::index_file` 的 `flush()` 用
+   `" "` join 行，Python `parsers/markdown.py split_blocks()` 用 `"\n"`。
+   多行列表被压成一行 → lint 按行走的 `unsourced_assertions` 报 1 条而 Python
+   报 3 条，所有派生页的 raw 也不同。
+   [实验] 修后同一 vault 两壳 `lint` stdout `diff` 无差异（10 finding 全同）。
+   加锁：`tests/lint_parity.rs::indexed_blocks_keep_their_interior_newlines`。
+
+7. **`check_orphan_pages` 只看出边**。Rust 原先仅检查块内有没有 `[[`，于是
+   **每个 Hub 页都被当成垃圾报出来**——最值得留的页恰恰是"被很多人引用、
+   自己不引用任何人"。Python 早年为这个理由修过，Rust 一直没跟上。
+   [实验] 现同 Python 一致：无引用时报 `orphan page (no links in or out)`，
+   有一条入边后即不再报。
+   加锁：`tests/lint_parity.rs::orphan_check_honours_inbound_citations`。
+
+> 教训（同 eval 差分法）：**永远 diff 两壳的 stdout，而不是只读代码找差异。**
+> 这两个缺口都藏在索引写盘的形状里，`cargo test` 全绿也照样不对等。
+
+> Rust 编译现为 **零警告**（清理了 3 个 unused import 与 `mcp::_unused` 死代码）。
+> `cargo test` **18 组全通过**（Python 侧 65 个 pytest 亦全通过）。
+
+## 全表 DB 差分法（2026-10-06 新增，比 stdout 差分更狠）
+
+stdout 差分受 CLI 命令覆盖面限制。更强的做法：同一 vault 分别用两壳 `index`，
+然后逐表逐行比对：
+
+```bash
+V=$(mktemp -d); V2=$(mktemp -d)
+for v in "$V" "$V2"; do koios init "$v"; # 放同样的 raw/ 内容
+done
+rust-cli/target/release/koios index "$V"
+PYTHONPATH=. .venv/bin/python -c "from koiosbase.cli import main; main(['index','$V2'])"
+# 然后 SELECT 每张表 ORDER BY id，逐元组比对
+```
+
+[实验] 现对 blocks / sections / documents / links 四张表达成 **全行相同**，
+语料覆盖 Markdown、受限 ACL 文档、PDF，以及混合 PDF+MD。
+
+这一路又挖出四个只有 DB 比对才能看见的缺口（均已修）：
+
+8. **`sections.layer` 恒为 `'raw'`**。`index_file` 的 INSERT 把 layer 硬编码，
+   丢了入参，于是派生页的 sections 全被写成 raw 层 —— 所有 `layer='wiki'`
+   的检查（含上面的孤儿检查）直接跳过它们。
+9. **缺少 `list` 块类型**。Python `split_blocks` 会跟踪到 run 结束给出
+   `type='list'`；Rust 只分 paragraph/table，每个 `- item` 块都被标成
+   `'paragraph'`。
+10. **`sections.summary` 保留了多行原始形态**。Python 回填算的是
+    `own[0].replace("\n"," ")[:160]`；Rust 直接塞 raw。
+11. **`documents.frontmatter` 的 JSON 格式不同**。Python 用 `json.dumps()`
+    默认分隔符（`", "` / `": "`），serde_json 默认无空格。新增
+    `lib::json_python_dumps` 复现该格式（键序靠 serde_json 的 `preserve_order`
+    feature 保持，与 Python dict 一致）。
+
+以及 PDF-only 的两个：
+
+12. **`collect_raw_docs` 只收 `.md`** → raw/ 里的 PDF 有 blocks 却没有
+    sources/ 导航页（§4.3）。Python 走 `_read_raw_docs` → `parse_any`，收所有格式。
+    [实验] 修前同一 PDF vault：Rust 1 block vs Python 5；修后全表相同。
+    新增依赖 `sha2`（用于 doc_hash）。
+13. **PDF frontmatter 缺 `doc_hash`、且 `ocr` 是字符串不是布尔**。
+    [实验] 修后 `{"title":..., "parser":"pdf-cpu", "doc_hash":"sha256:...",
+    "ocr": false}` 与 Python 逐字节一致。
+    加锁：`tests/pdf_source_parity.rs`（3 个用例）。
+
 
 ## eval 指标差分法（2026-10-02 新增）
 

@@ -13,15 +13,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use koios::acl;
-use koios::cjk_pad;
 use koios::cmd_index;
 use koios::compile;
 use koios::connect;
 use koios::fm_title;
-use koios::ingest;
 use koios::lint;
 use koios::mcp;
-use koios::pdf;
 use koios::pipeline;
 use koios::retrieval;
 use koios::split_frontmatter;
@@ -268,11 +265,14 @@ fn cmd_search(
     } else {
         pipeline::retrieve_channel(&conn, query, top, groups.as_deref())
     };
-    for b in &ev {
-        println!("[{}] {}\n    {}", b.doc_path, b.id, {
-            let s: String = b.raw.chars().take(110).collect();
-            s
-        });
+    // Byte-identical to koiosbase/cli.py cmd_search()'s three-line form:
+    //   [i] id / breadcrumb / snippet
+    // Rust used to print `[doc_path] id` and drop the breadcrumb, so a hit
+    // could not be turned into a [[wikilink]] without re-resolving it — and
+    // the two shells' stdout could not be diffed directly.
+    for (i, b) in ev.iter().enumerate() {
+        let snippet: String = b.raw.replace('\n', " ").chars().take(110).collect();
+        println!("[{}] {}\n    {}\n    {}", i, b.id, b.breadcrumb, snippet);
     }
     if ev.is_empty() {
         println!("(no hits)");

@@ -31,3 +31,4 @@ serde_json = { version = "1", features = ["preserve_order"] }
 # tesseract/brotli — none of which §5.1 needs, and each adds build minutes plus
 # more copyleft surface. Strip to the PDF core.
 mupdf = { version = "0.8", default-features = false, features = ["base14-fonts"] }
+sha2 = "0.10.9"

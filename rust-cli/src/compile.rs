@@ -358,7 +358,10 @@ pub fn write_source_pages(
                 .take(5)
                 .map(|b| {
                     let last = b.breadcrumb.split(" > ").last().unwrap_or("").to_string();
-                    format!("- 关于「{last}」，有哪些内容？")
+                    // Python appends the block id — a question with no address
+                    // cannot be traced back to the evidence it came from, which
+                    // is the whole point of §4.3 navigation pages.
+                    format!("- 关于「{last}」，有哪些内容？ ({})", b.id)
                 })
                 .collect::<Vec<_>>()
                 .join("\n")

@@ -187,6 +187,12 @@ pub fn check_conflict_markers(conn: &Connection) -> Vec<String> {
 }
 
 /// wiki pages that nothing links to and that cite nothing (§9.3).
+///
+/// Both directions must be checked. The previous version looked only for an
+/// outbound `[[` in the block's own text, so **every hub page was reported as
+/// garbage** — the pages most worth keeping are exactly the ones that cite
+/// nothing but are cited by many. Python's version was fixed for this reason
+/// (see the check_orphan_pages docstring there) and Rust never followed.
 pub fn check_orphan_pages(conn: &Connection) -> Vec<String> {
     let mut out = Vec::new();
     let mut stmt = match conn.prepare("SELECT id,raw,doc_path FROM blocks WHERE layer='wiki'") {
@@ -198,9 +204,39 @@ pub fn check_orphan_pages(conn: &Connection) -> Vec<String> {
             Ok(m) => m.filter_map(Result::ok).collect(),
             Err(_) => return out,
         };
-    for (_id, raw, doc_path) in rows {
-        if !raw.contains("[[") {
-            out.push(format!("orphan page (no links at all): {doc_path}"));
+    if rows.is_empty() {
+        return out;
+    }
+    // Every target any wikilink resolves to, including the alternate forms a
+    // written link can take (`[[raw/b.md#Sec]]` vs stored `b.md`). Without the
+    // prefix-stripped variants, inbound citations never match their target and
+    // every page looks orphaned.
+    let mut cited: Vec<String> = Vec::new();
+    if let Ok(mut s) = conn.prepare("SELECT dst FROM links WHERE kind='wikilink'") {
+        if let Ok(m) = s.query_map([], |r| r.get::<_, String>(0)) {
+            for dst in m.flatten() {
+                let d = dst.trim().trim_matches('[').trim_matches(']');
+                for cand in [d.to_string(), d.split('#').next().unwrap_or(d).to_string()] {
+                    for v in [
+                        cand.clone(),
+                        cand.strip_prefix("raw/").unwrap_or(&cand).to_string(),
+                    ] {
+                        if !v.is_empty() && !cited.contains(&v) {
+                            cited.push(v);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for (id, raw, doc_path) in rows {
+        let base = doc_path.split('#').next().unwrap_or(&doc_path);
+        let outbound = raw.contains("[[");
+        let inbound = cited.iter().any(|t| {
+            t == &id || t == base || t.starts_with(&format!("{base}#")) || t.starts_with(base)
+        });
+        if !outbound && !inbound {
+            out.push(format!("orphan page (no links in or out): {doc_path}"));
         }
     }
     out
