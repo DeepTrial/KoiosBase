@@ -112,7 +112,11 @@ enum Cmd {
     },
     /// retract a block and cascade staleness to citing pages (§8.3)
     Retract {
-        block_id: String,
+        /// Python spells this `-b/--block`; accept that flag as well as the
+        /// bare positional so scripts ported from the Python CLI keep running.
+        #[arg(short = 'b', long = "block")]
+        block_flag: Option<String>,
+        block_id: Option<String>,
         #[arg(short = 'p', long = "path", default_value = ".")]
         path: PathBuf,
         #[arg(long, default_value = "")]
@@ -151,8 +155,10 @@ enum Cmd {
     Studio {
         /// brief | mindmap
         kind: String,
-        /// topic (brief) or root (mindmap)
-        topic: String,
+        /// topic (brief) or root (mindmap); Python requires -t/--topic
+        #[arg(short = 't', long = "topic")]
+        topic_flag: Option<String>,
+        topic: Option<String>,
         #[arg(short = 'p', long = "path", default_value = ".")]
         path: PathBuf,
         #[arg(short = 'k', long, default_value_t = 8)]
@@ -550,19 +556,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Cmd::Retract {
+            block_flag,
             block_id,
             path,
             reason,
             groups,
         } => {
             let _ = parse_groups(groups.as_deref());
+            let block_id = match block_flag.or(block_id) {
+                Some(b) => b,
+                None => {
+                    eprintln!("error: -b/--block is required");
+                    std::process::exit(2);
+                }
+            };
             let vault = path.canonicalize().unwrap_or(path.clone());
             let conn = connect(&vault)?;
             match state::cascade_retraction(&conn, &block_id, &reason, Some(&vault)) {
                 Ok(pages) => {
+                    // koiosbase/cli.py prints a sentence, not JSON — Rust emitted
+                    // a JSON object, so every script parsing retract output had
+                    // to special-case the Rust shell.
                     println!(
-                        "{{\"block\": \"{}\", \"state\": \"retracted\", \"affected_pages\": {:?}}}",
-                        block_id, pages
+                        "retracted {block_id}; affected pages: {} {:?}",
+                        pages.len(),
+                        pages
                     );
                 }
                 Err(e) => {
@@ -589,11 +607,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         Cmd::Studio {
             kind,
+            topic_flag,
             topic,
             path,
             top,
             groups,
         } => {
+            let topic = match topic_flag.or(topic) {
+                Some(t) => t,
+                None => {
+                    eprintln!("error: -t/--topic is required");
+                    std::process::exit(2);
+                }
+            };
             let vault = path.canonicalize().unwrap_or(path.clone());
             let conn = connect(&vault)?;
             let parsed = parse_groups(groups.as_deref());
@@ -606,7 +632,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             };
             match out {
-                Ok(p) => println!("{}", p.display()),
+                // koiosbase/cli.py prints `wrote {path}`; Rust printed the bare
+                // path, so the two shells' stdout differed on every export.
+                Ok(p) => println!("wrote {}", p.display()),
                 Err(e) => {
                     eprintln!("error: {e}");
                     std::process::exit(1);
@@ -633,11 +661,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
             let vault = path.canonicalize().unwrap_or(path.clone());
             let conn = connect(&vault)?;
-            let ev = pipeline::retrieve_channel(&conn, &q, 8, None);
+            // Python's cmd_answer retrieves with top=5 and reports the evidence
+            // count; Rust used top=8 and printed only the path, so the same
+            // command produced a different page AND a different line.
+            let ev = pipeline::retrieve_channel(&conn, &q, 5, None);
             // date-only, matching Python's answer write-back stamp
             let stamp = state::now_date();
             match compile::write_answer_page(&vault, &q, &answer, &ev, &stamp) {
-                Ok(p) => println!("{}", p.display()),
+                Ok(p) => println!(
+                    "wrote {} (confidence: draft, {} evidence links)",
+                    p.display(),
+                    ev.len()
+                ),
                 Err(e) => {
                     eprintln!("error: {e}");
                     std::process::exit(1);

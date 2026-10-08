@@ -128,7 +128,7 @@ fn channels_are_not_mutually_exclusive() {
 /// test_grader_reports_evidence_absent
 #[test]
 fn grader_reports_evidence_absent() {
-    let (_v, conn) = seeded("grade");
+    // no vault needed: grading an empty block set does not touch the db
     let empty: Vec<koios::pipeline::Ev> = Vec::new();
     assert_eq!(
         koios::pipeline::grade("慰问金星 Exploration", &empty),
