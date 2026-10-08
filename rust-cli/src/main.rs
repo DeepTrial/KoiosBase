@@ -391,8 +391,11 @@ fn cmd_eval(path: &Path, strict: bool) -> rusqlite::Result<()> {
     let mut refusal_total = 0usize;
     let mut needs_llm_skipped = 0usize;
     let mut citation_cov_sum = 0.0f64;
-    // Python's cmd_eval treats a needs-llm failure as blocking ONLY under
-    // --strict; without the flag those are known v0.1 gaps, not regressions.
+    // Python's harness accumulates failures in `rep.failures` and cmd_eval
+    // prints them AFTER the `total=` line. Rust printed them inline as each
+    // case ran, so the two shells' stdout interleaved differently and any diff
+    // looked like a behavioural change when only the ordering moved.
+    let mut failures: Vec<(String, bool)> = Vec::new(); // (detail, is_needs_llm)
     let mut blocking = 0usize;
     for (q, want, needs_llm) in cases {
         total += 1;
@@ -432,9 +435,9 @@ fn cmd_eval(path: &Path, strict: bool) -> rusqlite::Result<()> {
             };
             if strict || !needs_llm {
                 blocking += 1;
-                println!("  FAIL {detail}");
+                failures.push((detail, false));
             } else {
-                println!("  SKIP {detail}");
+                failures.push((detail, true));
             }
             continue;
         }
@@ -446,10 +449,18 @@ fn cmd_eval(path: &Path, strict: bool) -> rusqlite::Result<()> {
             recall_ok += 1;
         } else {
             blocking += 1;
-            println!(
-                "  FAIL [factual] {q} -> got {:?}, want {want}",
-                &ids[..ids.len().min(2)]
-            );
+            // Python formats this with a list repr (['a', 'b']); Rust's {:?} on
+            // a slice prints ["a", "b"] with double quotes, which is enough to
+            // make an otherwise-identical failure line differ byte-for-byte.
+            let got = ids[..ids.len().min(2)]
+                .iter()
+                .map(|s| format!("'{s}'"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            failures.push((
+                format!("[factual] {q} -> got [{got}], want {want}"),
+                false,
+            ));
         }
         // §10.2: coverage is measured on the ANSWER, not the assembled context.
         // Python made this change deliberately (harness comment) because
@@ -470,6 +481,18 @@ fn cmd_eval(path: &Path, strict: bool) -> rusqlite::Result<()> {
         if refusal_total == 0 { 1.0 } else { refusal_ok as f64 / refusal_total as f64 },
         citation_cov_sum / total as f64
     );
+    // Same two passes Python makes over rep.failures: blocking (strict-filtered)
+    // FAIL lines first, then the SKIP lines for needs-llm cases.
+    for (detail, is_needs_llm) in &failures {
+        if !is_needs_llm {
+            println!("  FAIL {detail}");
+        }
+    }
+    for (detail, is_needs_llm) in &failures {
+        if *is_needs_llm {
+            println!("  SKIP {detail}");
+        }
+    }
     // Mirrors Python's cmd_eval exit code: non-zero iff anything blocked.
     if blocking > 0 {
         std::process::exit(1);

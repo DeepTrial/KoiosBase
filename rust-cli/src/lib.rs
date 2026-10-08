@@ -69,7 +69,48 @@ pub fn connect(vault: &Path) -> rusqlite::Result<Connection> {
     std::fs::create_dir_all(&dir).ok();
     let conn = Connection::open(dir.join("tree.db"))?;
     conn.execute_batch(SCHEMA)?;
+    migrate(&conn)?;
     Ok(conn)
+}
+
+/// Add columns introduced after the first release — mirrors index/schema.py
+/// `_migrate()`.
+///
+/// `CREATE TABLE IF NOT EXISTS` is a no-op on an existing table, so a vault
+/// built by an older version keeps its old column set and every later query
+/// against a new column fails with "no such column". These ALTERs make old
+/// vaults usable without requiring a rebuild (rebuild stays available, not
+/// mandatory). Rust shipped without this, so any vault indexed before the
+/// layer/ordinal columns landed was simply unreadable from the Rust shell.
+pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
+    for (table, col, ddl) in [
+        (
+            "blocks",
+            "layer",
+            "ALTER TABLE blocks ADD COLUMN layer TEXT NOT NULL DEFAULT 'raw'",
+        ),
+        (
+            "blocks",
+            "ordinal",
+            "ALTER TABLE blocks ADD COLUMN ordinal INTEGER NOT NULL DEFAULT 0",
+        ),
+        (
+            "sections",
+            "layer",
+            "ALTER TABLE sections ADD COLUMN layer TEXT NOT NULL DEFAULT 'raw'",
+        ),
+    ] {
+        let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+        let cols: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(1))?
+            .filter_map(Result::ok)
+            .collect();
+        // Empty means the table does not exist yet (fresh db) — nothing to add.
+        if !cols.is_empty() && !cols.iter().any(|c| c == col) {
+            conn.execute(ddl, [])?;
+        }
+    }
+    Ok(())
 }
 
 use rusqlite::params;
@@ -79,6 +120,33 @@ use std::path::PathBuf;
 
 fn is_cjk(c: char) -> bool {
     ('\u{4e00}'..='\u{9fff}').contains(&c)
+}
+
+/// Stable hash of normalized text — mirrors koiosbase/core/block.py.
+///
+/// Whitespace runs collapse to a single space and the result is trimmed before
+/// hashing, then truncated to 16 hex chars. This value drives incremental
+/// re-indexing (§4.1), so a mismatch means every rebuild looks like every block
+/// changed — or worse, a real edit looks like a no-op.
+pub fn content_hash(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut norm = String::with_capacity(text.len());
+    let mut prev_space = false;
+    for c in text.chars() {
+        if c.is_whitespace() {
+            prev_space = true;
+            continue;
+        }
+        if prev_space && !norm.is_empty() {
+            norm.push(' ');
+        }
+        prev_space = false;
+        norm.push(c);
+    }
+    let norm = norm.trim().to_string();
+    let mut h = Sha256::new();
+    h.update(norm.as_bytes());
+    format!("{:x}", h.finalize())[..16].to_string()
 }
 
 pub fn cjk_pad(text: &str) -> String {
@@ -185,6 +253,13 @@ pub fn index_file(
         } else {
             "paragraph"
         };
+        // `hash` drives incremental re-indexing (§4.1): content_hash() is the
+        // sha256 of whitespace-normalized text, first 16 hex chars. Rust wrote
+        // "" here, so every rebuild looked like every block had changed and a
+        // caller diffing block hashes could not tell an edit from a no-op.
+        // The underscore bodies below mirror core/block.py exactly.
+        let haystack = format!("{}\n{}", crumb, body);
+        let hash = content_hash(&haystack);
         conn.execute(
             "INSERT OR REPLACE INTO blocks(id,doc_path,section_id,type,breadcrumb,raw,\
              hash,page_range,meta,ordinal,layer) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
@@ -195,7 +270,7 @@ pub fn index_file(
                 kind,
                 crumb,
                 body,
-                "",
+                hash,
                 None::<String>,
                 "{}",
                 *ordinal,
@@ -568,7 +643,11 @@ pub fn index_pdf(
                     kind,
                     b.breadcrumb,
                     b.raw,
-                    "",
+                    // Same stable hash as the Markdown path — breadcrumb + "\n"
+                    // + raw, whitespace-normalized. Without it every PDF block
+                    // stored "" and incremental re-indexing could not tell an
+                    // edited PDF from an unchanged one.
+                    content_hash(&format!("{}\n{}", b.breadcrumb, b.raw)),
                     page_range,
                     meta,
                     ordinal as i64

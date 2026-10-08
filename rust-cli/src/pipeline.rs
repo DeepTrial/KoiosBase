@@ -280,7 +280,13 @@ pub fn assemble(blocks: &[Ev], budget_chars: usize) -> String {
 ///   * stale pages get （待更新） appended, the *disclosure* half of §8.3 —
 ///     apply_disposition only reorders, so without this a reader receives a
 ///     stale page's answer with no hint its sources moved on.
-fn generate(conn: &Connection, question: &str, _context: &str, blocks: &[Ev]) -> String {
+fn generate(
+    conn: &Connection,
+    question: &str,
+    _context: &str,
+    blocks: &[Ev],
+    stale_paths: &std::collections::BTreeSet<String>,
+) -> String {
     if blocks.is_empty() {
         return format!("{REFUSAL}：当前知识库中没有任何相关证据。");
     }
@@ -288,18 +294,28 @@ fn generate(conn: &Connection, question: &str, _context: &str, blocks: &[Ev]) ->
     for b in blocks.iter().take(3) {
         let snippet: String = b.raw.replace('\n', " ").chars().take(180).collect();
         let mut line = format!("- {snippet} [[raw/{}]]", b.id);
-        if crate::state::is_stale(conn, &b.doc_path) {
+        // Python decides this from the same page_dispositions map the caller's
+        // `stale_paths` comes from; reusing is_stale() here would double-count
+        // pages marked by a different mechanism.
+        if stale_paths.contains(&b.doc_path) {
             line.push_str(" （待更新）");
         }
         lines.push(line);
     }
     let _ = question;
+    let _ = conn;
     lines.join("\n")
 }
 
 pub struct QueryResult {
     pub answer: String,
     pub evidence: Vec<Ev>,
+    /// §6.5 contract violations, keyed like Python's dict
+    /// (`{"citation": "0/1 sentences cited"}`). Empty means the contracts held.
+    pub violations: HashMap<String, String>,
+    /// Self-Route breadcrumb (§6.2): which channel ran, what the Grader said,
+    /// whether the §4 escalation fired, and which cited pages are stale.
+    pub trace: serde_json::Value,
 }
 
 /// Full pipeline with Grader-driven escalation (Self-Route, §6.2).
@@ -309,8 +325,33 @@ pub fn full_query(
     top: usize,
     groups: Option<&[String]>,
 ) -> QueryResult {
+    full_query_with(conn, question, top, groups, None)
+}
+
+/// Same pipeline, but letting the caller supply the generator.
+///
+/// Python exposes this as `query(..., llm=callable)` and README documents it as
+/// the way to plug a real model in. Rust had no equivalent, so "bring your own
+/// LLM" was a Python-only capability. The callable receives
+/// `(question, assembled_context)` and its output goes through the SAME
+/// `check_contracts` gate — handing KoiosBase a model must not let it invent
+/// (§6.5). Returns `Err` when the callable fails, which Python surfaces as a
+/// raised exception.
+pub fn full_query_with(
+    conn: &Connection,
+    question: &str,
+    top: usize,
+    groups: Option<&[String]>,
+    llm: Option<&dyn Fn(&str, &str) -> Result<String, String>>,
+) -> QueryResult {
     let mut blocks = retrieve_channel(conn, question, top, groups);
-    let verdict = grade(question, &blocks);
+    let mut verdict = grade(question, &blocks);
+    let mut trace = serde_json::json!({
+        "question": question,
+        "hits": blocks.len(),
+        "channel": "hybrid+ppr",
+        "verdict": verdict,
+    });
     if verdict == "evidence_absent" {
         let cand_ids = full_corpus(conn, 200_000).unwrap_or_default();
         let cand: Vec<Ev> = cand_ids
@@ -320,13 +361,64 @@ pub fn full_query(
             .collect();
         if !cand.is_empty() && has_terms(question, &cand) {
             blocks = cand;
+            trace["escalated"] = serde_json::json!("full");
+            verdict = grade(question, &blocks);
+            trace["verdict"] = serde_json::json!(verdict);
+            trace["hits"] = serde_json::json!(blocks.len());
         }
     }
     let context = assemble(&blocks, 6000);
-    let answer = generate(conn, question, &context, &blocks);
+    // §8.3 disclosure: which cited pages are behind their sources. Python feeds
+    // this to generate() as `stale_paths`; apply_disposition only re-orders, so
+    // without this a reader gets a stale answer with no hint.
+    let stale_paths = {
+        use std::collections::BTreeSet;
+        let mut paths = Vec::new();
+        for b in &blocks {
+            if !paths.contains(&b.doc_path) {
+                paths.push(b.doc_path.clone());
+            }
+        }
+        let disp = crate::state::page_dispositions(conn, &paths);
+        let mut s = BTreeSet::new();
+        for doc in &paths {
+            if matches!(
+                disp.get(doc).map(|x| &**x as &str),
+                Some("downrank_and_async_recompile") | Some("refuse_or_recompile")
+            ) {
+                s.insert(doc.clone());
+            }
+        }
+        if !s.is_empty() {
+            let arr: Vec<serde_json::Value> =
+                s.iter().map(|p| serde_json::json!(p)).collect();
+            trace["stale_pages"] = serde_json::json!(arr);
+        }
+        s
+    };
+    let answer = match llm {
+        Some(f) => match f(question, &context) {
+            Ok(a) => a,
+            Err(e) => {
+                // Python propagates the callable's exception to the same place.
+                return QueryResult {
+                    answer: e,
+                    evidence: blocks,
+                    violations: HashMap::new(),
+                    trace,
+                };
+            }
+        },
+        None => generate(conn, question, &context, &blocks, &stale_paths),
+    };
+    // §6.5: the contracts gate the CALLER's model too, not just the built-in
+    // generator. This is the whole reason `llm` is safe to accept.
+    let violations = check_contracts(&answer, &blocks);
     QueryResult {
         answer,
         evidence: blocks,
+        violations,
+        trace,
     }
 }
 

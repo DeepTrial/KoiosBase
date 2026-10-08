@@ -75,6 +75,38 @@ fn sentences(text: &str, limit: usize) -> Vec<String> {
     out
 }
 
+/// §13 FAQ export — mirrors koiosbase/studio/exports.py render_faq().
+///
+/// Python has this template and exposes it from `studio/__init__.py`, so the
+/// Rust shell was missing half of the export surface even though neither CLI
+/// wires a `faq` subcommand yet. Porting it keeps the library API complete.
+pub fn render_faq(title: &str, qa: &[(String, String, Vec<Ev>)], stamp: &str) -> String {
+    let mut items: Vec<String> = Vec::new();
+    for (q, ans, ev) in qa {
+        let cites = ev
+            .iter()
+            .take(3)
+            .map(|b| format!("[[raw/{}]]", b.id))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let cites = if cites.is_empty() {
+            "（无）".to_string()
+        } else {
+            cites
+        };
+        items.push(format!("## {q}\n\n{ans}\n\n依据：{cites}\n"));
+    }
+    let joined = items.join("\n");
+    let body = if joined.is_empty() {
+        "（无问答）".to_string()
+    } else {
+        joined
+    };
+    format!(
+        "---\ntype: faq\ngenerated: true\ncreated: {stamp}\n---\n\n# {title}\n\n{body}\n"
+    )
+}
+
 pub fn render_brief(title: &str, blocks: &[Ev], stamp: &str) -> String {
     let mut bullets: Vec<String> = Vec::new();
     let mut seen: Vec<String> = Vec::new();

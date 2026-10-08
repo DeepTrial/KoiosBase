@@ -445,6 +445,177 @@ pub fn promote(path: &Path, verified: bool, human_confirmed: bool) -> std::io::R
     Ok(nxt.to_string())
 }
 
+// --------------------------------------------------------------- synthesis --
+
+/// synthesis/ pages with lazy update (design doc §4.3, §8.3) — mirrors
+/// koiosbase/compile/synthesis.py.
+///
+/// Synthesis pages are the most expensive to compile and depend on entity pages
+/// being mature, so they are NOT rebuilt eagerly: a source change marks them
+/// `stale`, and the actual recompilation is deferred until a query touches them.
+/// Recompiling on every ingest would spend the cost whether or not anyone reads
+/// the page; deferring also keeps ingest fast (§5.3: compile never blocks
+/// availability).
+///
+/// Must stay character-for-character in lockstep with the Python template — a
+/// stray space here becomes a permanent diff in every generated page.
+const SYNTHESIS_TEMPLATE: &str = r#"---
+type: synthesis
+confidence: draft
+generated: true
+last_compiled: {stamp}
+stale: {stale}
+sources: [{sources}]
+---
+
+# {title}
+
+## 综合结论
+{body}
+
+## 覆盖实体
+{entities}
+"#;
+
+/// `datetime.now(timezone.utc).date().isoformat()` — the date-only shape the
+/// compiled pages use. Shares its implementation with compile_vault(), exactly
+/// as the Python side does via `state.now_date()`.
+pub fn stamp_now() -> String {
+    crate::state::now_date()
+}
+
+pub fn render_synthesis(
+    title: &str,
+    entities: &[String],
+    facts: &[(String, String)], // (text, block_id)
+    stamp: &str,
+    stale: bool,
+) -> String {
+    let body = if facts.is_empty() {
+        "- (暂无)".to_string()
+    } else {
+        facts
+            .iter()
+            .take(8)
+            .map(|(t, b)| format!("- {t} [[raw/{b}]]"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let sources = facts
+        .iter()
+        .take(3)
+        .map(|(_t, b)| format!("raw/{b}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let entities_list = if entities.is_empty() {
+        "- (暂无)".to_string()
+    } else {
+        entities
+            .iter()
+            .take(10)
+            .map(|e| format!("- [[entities/{e}]]"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    SYNTHESIS_TEMPLATE
+        .replace("{stamp}", stamp)
+        .replace("{stale}", if stale { "true" } else { "false" })
+        .replace("{title}", title)
+        .replace("{sources}", &sources)
+        .replace("{body}", &body)
+        .replace("{entities}", &entities_list)
+}
+
+/// Flag synthesis pages stale (called when sources change).
+///
+/// `topics` narrows the blast radius to the pages that actually depend on the
+/// changed source. Without it every synthesis page is flagged, so touching one
+/// raw doc forced a full recompile of the most expensive layer on next read —
+/// which is exactly what lazy update (§8.3) exists to avoid. Callers that pass
+/// nothing keep the previous behaviour.
+///
+/// Python called `ensure_tables(conn)` here; the Rust `connect()` already runs
+/// the unified SCHEMA (which contains block_state/page_state), so there is
+/// nothing extra to create.
+pub fn mark_syntheses_stale(
+    conn: &Connection,
+    vault: &Path,
+    topics: Option<&[String]>,
+) -> rusqlite::Result<Vec<String>> {
+    let sdir = vault.join("wiki").join("synthesis");
+    if !sdir.exists() {
+        return Ok(Vec::new());
+    }
+    // Python builds `{t.strip() for t in topics if t and t.strip()}` — an empty
+    //-but-Some set therefore matches nothing, unlike None which matches all.
+    let wanted: Option<Vec<String>> = topics.map(|ts| {
+        ts.iter()
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+            .collect()
+    });
+    let mut touched = Vec::new();
+    let mut names: Vec<String> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(&sdir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.extension().and_then(|x| x.to_str()) != Some("md") {
+                continue;
+            }
+            if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
+                names.push(name.to_string());
+            }
+        }
+    }
+    // sorted, mirroring `sorted(sdir.glob("*.md"))` so both shells touch the
+    // same pages in the same order.
+    names.sort();
+    for name in names {
+        let stem = name.trim_end_matches(".md").to_string();
+        if let Some(w) = &wanted {
+            if !w.contains(&stem) {
+                continue;
+            }
+        }
+        let rel = format!("wiki/synthesis/{name}");
+        crate::state::mark_stale(conn, &rel, "source changed")?;
+        touched.push(rel);
+    }
+    Ok(touched)
+}
+
+/// True if the topic's synthesis page is stale or missing (§8.3 lazy).
+pub fn needs_recompile(conn: &Connection, vault: &Path, topic: &str) -> bool {
+    let target = vault.join("wiki").join("synthesis").join(format!("{topic}.md"));
+    if !target.exists() {
+        return true;
+    }
+    crate::state::is_stale(conn, &format!("wiki/synthesis/{topic}.md"))
+}
+
+/// (Re)build one synthesis page and clear its stale flag.
+pub fn recompile_synthesis(
+    conn: &Connection,
+    vault: &Path,
+    topic: &str,
+    entities: &[String],
+    facts: &[(String, String)],
+) -> std::io::Result<std::path::PathBuf> {
+    let sdir = vault.join("wiki").join("synthesis");
+    std::fs::create_dir_all(&sdir)?;
+    let target = sdir.join(format!("{topic}.md"));
+    std::fs::write(&target, render_synthesis(topic, entities, facts, &stamp_now(), false))?;
+    // Clearing the flag is what makes the lazy scheme terminate: without it
+    // every read of the page would schedule another recompile.
+    conn.execute(
+        "INSERT OR REPLACE INTO page_state(page_path,stale,state,reason,updated) \
+         VALUES(?,0,'active','recompiled',?)",
+        rusqlite::params![format!("wiki/synthesis/{topic}.md"), crate::state::now()],
+    )
+    .map_err(|e| std::io::Error::other(e.to_string()))?;
+    Ok(target)
+}
+
 const ANSWER_TEMPLATE: &str = r#"---
 type: answer
 confidence: draft

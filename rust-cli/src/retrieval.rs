@@ -140,6 +140,105 @@ pub fn rrf_fuse(lists: &[Vec<(String, f64)>], weights: &[f64], k: f64) -> Vec<(S
     out
 }
 
+/// §6.6 authority map: link-source -> the confidence of the page that owns it.
+///
+/// `links.src` holds a BLOCK id, not a document path, so keying by path misses
+/// every lookup and silently falls through to the "draft" default — that is
+/// exactly how the §6.6 gate became dead code, letting a draft page's citations
+/// confer as much authority as a verified one's. Raw documents are `high`: they
+/// are human-authored source of truth (P1), not machine drafts.
+pub fn build_page_confidence(conn: &Connection) -> HashMap<String, String> {
+    let mut out: HashMap<String, String> = HashMap::new();
+    let rows: Vec<(String, String, Option<String>)> = {
+        let mut stmt = match conn.prepare(
+            "SELECT DISTINCT l.src AS src, COALESCE(b.layer,'raw') AS layer, \
+             b.doc_path AS doc_path FROM links l LEFT JOIN blocks b ON b.id = l.src",
+        ) {
+            Ok(s) => s,
+            Err(_) => return out,
+        };
+        let m = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
+            ))
+        });
+        match m {
+            Ok(m) => m.filter_map(Result::ok).collect(),
+            Err(_) => return out,
+        }
+    };
+    let mut cache: HashMap<String, String> = HashMap::new();
+    for (src, layer, doc_path) in rows {
+        if layer == "raw" {
+            out.insert(src, "high".to_string());
+            continue;
+        }
+        let doc = doc_path.unwrap_or_default();
+        if let Some(c) = cache.get(&doc) {
+            out.insert(src, c.clone());
+            continue;
+        }
+        // Frontmatter confidence comes from adaptation layer; the indexed
+        // documents.frontmatter is the quick path Python falls back to.
+        let conf: String = conn
+            .query_row(
+                "SELECT frontmatter FROM documents WHERE path=?",
+                rusqlite::params![&doc],
+                |r| r.get::<_, String>(0),
+            )
+            .ok()
+            .and_then(|fm| {
+                serde_json::from_str::<serde_json::Value>(&fm)
+                    .ok()
+                    .and_then(|v| v.get("confidence").and_then(|x| x.as_str()).map(str::to_string))
+                    .or_else(|| frontmatter_confidence(&fm))
+            })
+            .unwrap_or_else(|| "draft".to_string());
+        cache.insert(doc.clone(), conf.clone());
+        out.insert(src, conf);
+    }
+    out
+}
+
+/// Read `confidence:` out of YAML frontmatter text (the non-JSON path).
+fn frontmatter_confidence(fm_text: &str) -> Option<String> {
+    for line in fm_text.lines() {
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix("confidence:") {
+            let v = rest.trim();
+            if !v.is_empty() {
+                return Some(v.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Confidence-weighted adjacency (§6.6): an edge from an unverified page
+/// confers less authority, so `edge_weight` discounts it.
+pub fn load_graph_weighted(
+    conn: &Connection,
+    page_confidence: &HashMap<String, String>,
+) -> rusqlite::Result<HashMap<String, Vec<(String, f64)>>> {
+    let mut stmt = conn.prepare("SELECT src,dst,weight FROM links")?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, f64>(2)?,
+        ))
+    })?;
+    let mut adj: HashMap<String, Vec<(String, f64)>> = HashMap::new();
+    for (src, dst, w) in rows.flatten() {
+        let conf = page_confidence.get(&src).map(|s| s.as_str()).unwrap_or("draft");
+        let w = w * crate::compile::edge_weight(conf);
+        adj.entry(src).or_default().push((dst, w));
+    }
+    Ok(adj)
+}
+
 pub fn load_graph(conn: &Connection) -> rusqlite::Result<HashMap<String, Vec<(String, f64)>>> {
     let mut stmt = conn.prepare("SELECT src,dst,weight FROM links")?;
     let rows = stmt.query_map([], |r| {
@@ -262,7 +361,12 @@ pub fn hybrid_search(
 ) -> rusqlite::Result<Vec<(String, f64)>> {
     let mut fused = rrf_fuse(&[fts_search(conn, query, limit * 3)?], &[BETA], RRF_K);
     if use_graph {
-        let adj = load_graph(conn)?;
+        // Build the authority map by DEFAULT, exactly like Python's
+        // `if page_confidence is None: build_page_confidence(conn)`. Leaving it
+        // unweighted is what made §6.6 dead: a draft page's citations scored
+        // the same as a human-verified one's.
+        let pc = build_page_confidence(conn);
+        let adj = load_graph_weighted(conn, &pc)?;
         if !adj.is_empty() {
             let seeds: Vec<String> = fused.iter().take(50).map(|(id, _)| id.clone()).collect();
             let pr = personalized_pagerank(&seeds, &adj, 0.85, 20);
@@ -347,7 +451,48 @@ pub fn full_corpus(conn: &Connection, max_chars: usize) -> rusqlite::Result<Vec<
     Ok(ids)
 }
 
-/// Grader verdict (§6.2): enough | missing | evidence_absent.
+/// Total characters across every block — the channel ④ threshold input
+/// (exposed so callers can check the budget without requesting the ids).
+pub fn corpus_size(conn: &Connection) -> rusqlite::Result<usize> {
+    let n: i64 = conn.query_row(
+        "SELECT COALESCE(SUM(LENGTH(raw)),0) FROM blocks",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n as usize)
+}
+
+/// Navigational relevance of a section (title + navigational summary).
+///
+/// Both sides are CJK-padded so comparison is per-character, matching how the
+/// §6.1 drill-down actually behaves on Chinese text.
+pub fn score_section(summary: &str, title: &str, qterms: &[String]) -> f64 {
+    if qterms.is_empty() {
+        return 0.0;
+    }
+    let padded_q: std::collections::HashSet<String> = cjk_pad(&qterms.join(" "))
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
+    let hay: std::collections::HashSet<String> =
+        cjk_pad(&format!("{title} {summary}"))
+            .split_whitespace()
+            .map(str::to_string)
+            .collect();
+    if hay.is_empty() || padded_q.is_empty() {
+        return 0.0;
+    }
+    (hay.intersection(&padded_q).count() as f64) / (padded_q.len() as f64)
+}
+
+/// Weighted Reciprocal Rank Fusion across any number of ranked lists.
+///
+/// Python's helper takes a list of lists; Rust's rrf_fuse already does this,
+/// so this is the named alias a caller ported from `fuse_channels` expects.
+pub fn fuse_channels(lists: &[Vec<(String, f64)>], weights: &[f64]) -> Vec<(String, f64)> {
+    rrf_fuse(lists, weights, RRF_K)
+}
+
 pub fn grade(question: &str, joined: &str) -> &'static str {
     if joined.is_empty() {
         return "evidence_absent";

@@ -35,7 +35,78 @@ fn normalize_pymupdf_text(s: &str) -> String {
 
 /// Default CPU tier: text per page. Returns [] on any failure — a corrupt or
 /// unreadable PDF must degrade to "no pages", never abort the whole ingest.
+///
+/// When the CPU tier shows no usable text and a VLM hook is supplied, escalate
+/// to the precision tier (§5.1 "two-tier"), mirroring
+/// koiosbase/parsers/pdf.py parse_pdf(). Python reached for PyMuPDF to render
+/// page PNGs; here we stay on the same MuPDF engine the CPU tier uses, so the
+/// two tiers cannot disagree about page boundaries.
 pub fn extract_pages_cpu(path: &Path) -> Vec<String> {
+    extract_pages(path, None)
+}
+
+/// The two-tier extraction itself. `vlm` receives `(path, PNG bytes)` per page
+/// and returns transcribed text, exactly the callable contract Python exposes
+/// as `parse_pdf(..., vlm=...)` — README documents this as the way to handle
+/// scanned PDFs, and Rust had no equivalent until now.
+pub fn extract_pages(
+    path: &Path,
+    vlm: Option<&dyn Fn(&str, &[u8]) -> Result<String, String>>,
+) -> Vec<String> {
+    let cpu_pages = extract_pages_cpu_inner(path);
+    let scanned = looks_scanned(&cpu_pages, 40);
+    if (scanned || cpu_pages.is_empty()) && vlm.is_some() {
+        let f = vlm.unwrap();
+        return render_pages_png(path)
+            .into_iter()
+            .enumerate()
+            .map(|(i, png)| match f(&path.display().to_string(), &png) {
+                Ok(t) => t,
+                Err(e) => {
+                    // Python lets the callable's exception abort the parse; here
+                    // we degrade to no text for that page but keep going, since
+                    // one bad page must not lose the rest of the document.
+                    log_skip(&format!("vlm failed on page {}: {e}", i + 1));
+                    String::new()
+                }
+            })
+            .collect();
+    }
+    cpu_pages
+}
+
+/// Render each page to PNG bytes with MuPDF
+fn render_pages_png(path: &Path) -> Vec<Vec<u8>> {
+    let doc = match mupdf::Document::open(path) {
+        Ok(d) => d,
+        Err(e) => {
+            log_skip(&e.to_string());
+            return Vec::new();
+        }
+    };
+    let n = doc.page_count().unwrap_or(0);
+    let mut out = Vec::with_capacity(n as usize);
+    for i in 0..n {
+        match doc
+            .load_page(i)
+            .and_then(|p| p.to_pixmap(&mupdf::Matrix::IDENTITY, &mupdf::Colorspace::device_rgb(), false, true))
+            .and_then(|pix| {
+                let mut buf: Vec<u8> = Vec::new();
+                pix.write_to(&mut buf, mupdf::ImageFormat::PNG)
+                    .map(|_| buf)
+            })
+        {
+            Ok(bytes) => out.push(bytes),
+            Err(e) => {
+                log_skip(&e.to_string());
+                out.push(Vec::new());
+            }
+        }
+    }
+    out
+}
+
+fn extract_pages_cpu_inner(path: &Path) -> Vec<String> {
     // MuPDF via mupdf-rs — the SAME engine PyMuPDF binds, rather than a second
     // independent parser. Page numbers are the provenance unit (§4.1), so this
     // walks pages individually exactly like PyMuPDF's
@@ -168,7 +239,28 @@ pub fn page_to_blocks(doc_path: &str, page_no: usize, text: &str, start_ord: usi
 /// None after the 16MB-truncation bug was fixed), so this must too: a capped
 /// hash would disagree with Python's `doc_hash` provenance value and the parse
 /// cache key would silently collide across different files.
-pub fn file_sha256(path: &std::path::Path) -> String {
+/// Parse-cache read — mirrors koiosbase/parsers/pdf.py load_cache().
+///
+/// Keyed by the FULL content hash, so a stale entry can never masquerade as the
+/// current file. Corrupt JSON degrades to None rather than poisoning ingest.
+pub fn load_cache(path: &Path, cache_dir: &Path) -> Option<serde_json::Value> {
+    let f = cache_dir.join(format!("{}.json", file_sha256(path)));
+    let text = std::fs::read_to_string(&f).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// Parse-cache write — mirrors koiosbase/parsers/pdf.py save_cache().
+pub fn save_cache(
+    path: &Path,
+    cache_dir: &Path,
+    data: &serde_json::Value,
+) -> std::io::Result<()> {
+    std::fs::create_dir_all(cache_dir)?;
+    let f = cache_dir.join(format!("{}.json", file_sha256(path)));
+    std::fs::write(f, crate::json_python_dumps(data))
+}
+
+pub fn file_sha256(path: &Path) -> String {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
     match std::fs::File::open(path) {
