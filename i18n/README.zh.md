@@ -234,7 +234,67 @@ koios mcp
 默认开箱状态下，KoiosBase 只依据检索到的块作答——内置生成器返回带引用的前三块，
 绝不编造。这是刻意为之：默认模式在零配置下也必须是可信赖的。
 
-若要改为生成散文式回答，请传入一个可调用对象。它接收已组装好的上下文并返回文本：
+若要改为生成散文式回答，把 `koios query` 指向任意一条命令即可。它从 stdin 收到
+已组装好的上下文，答案写到 stdout，`$KOIOS_QUESTION` 携带问题。
+
+```bash
+koios query "revenue" -p myvault --llm-cmd 'my-model-wrapper'
+KOIOS_LLM_CMD='my-model-wrapper' koios query "revenue" -p myvault
+```
+
+任何命令都行——`curl` 打供应商、本地 llama.cpp、一行 Python。KoiosBase 永远看不到
+你的 API key：命令自己读你自己的环境，vault 里不写任何东西。
+
+```console
+$ koios query "revenue" -p myvault \
+    --llm-cmd 'printf "%s" "Revenue was 3.2 billion yuan [[raw/report.md#Financials/Revenue/1]]"'
+verdict: enough  hits: 4  escalated: false
+Revenue was 3.2 billion yuan [[raw/report.md#Financials/Revenue/1]]
+```
+
+代价只有 CPU 加你自己给的模型。代码库里没有 provider 适配器、没有 API-key
+配置、没有 HTTP 客户端——总共六个 crate。
+
+### 护栏依然生效
+
+**契约同样作用于你模型的输出**——给 KoiosBase 接上模型不等于放它编造。漏了
+引用的答案会被报告，而不是被悄悄接受：
+
+```console
+$ koios query "revenue" -p myvault --llm-cmd 'printf "%s" "Revenue was 3.2 billion yuan."'
+verdict: enough  hits: 4  escalated: false
+Revenue was 3.2 billion yuan.
+[contracts] citation=0/1 sentences cited
+```
+
+命令失败是错误，不是编造的答案：
+
+```console
+$ koios query "revenue" -p myvault --llm-cmd 'exit 1'
+verdict: enough  hits: 4  escalated: false
+model command exited with exit status: 1
+```
+
+### 通过 MCP
+
+`koios mcp` 读同一个环境变量，启动它的 agent 通过环境控制模型：
+
+```bash
+KOIOS_LLM_CMD='my-model-wrapper' koios mcp
+```
+
+### 视觉档（扫描件 PDF）
+
+同一套机制，用于抽不出文本的页面。命令从 stdin 收到 **PNG 字节**，写出转写文本：
+
+```bash
+KOIOS_VLM_CMD='my-vision-wrapper' koios index myvault
+```
+
+不给它，扫描页就什么都不贡献——静默地，这是设计如此。为一张没人读过的页面编造
+文本，比不索引它更糟。`rust-cli/tests/vlm_tier.rs` 把这两半行为都钉住了。
+
+### 作为库使用
 
 ```rust
 // Rust 库 API —— 可调用对象就是普通闭包。
@@ -253,33 +313,9 @@ println!("{:?}", result.violations);   // 契约成立时为空
 
 可调用对象的契约是 `Fn(&str, &str) -> Result<String, String>`（别名为
 `koios::pipeline::LlmFn`），代码库中没有任何 provider 适配器或 API-key
-配置——可调用对象由你提供，因此不会把任何厂商写死进去。
-
-### 护栏依然生效
-
-这一点值得了解：**契约同样作用于你模型的输出**，而不只作用于内置生成器。给
-KoiosBase 接上一个 LLM 并不意味着它可以凭空编造。
-
-```rust
-result.violations
-// 空 HashMap            cited its sources
-// {"citation": "0/5 sentences cited"}   可调用对象漏了引用
-// {"refusal": "answered without evidence"}   零证据却作答
-```
-
-真实输出，来自 `examples/readme_llm_snippet.rs`（单文档 vault）：
-
-```console
-$ cargo run --release --manifest-path rust-cli/Cargo.toml \
-    --example readme_llm_snippet -- myvault
-[sources/report.md#Report/导读摘要/1] (Report > Report > 导读摘要)
-revenue in 2024 was 3. 2 billion.
-
-{"citation": "0/5 sentences cited"}
-```
-
-检索保持权威地位——受限文档在模型看到任何东西之前就已经被剔除，所以 `my_llm`
-无法泄漏它从未获得的内容。
+配置——可调用对象由你提供，因此不会把任何厂商写死进去。`koios::llm` 就是 CLI 自己
+对这份契约的实现：`generate_with(cmd, question, context)` 起外部进程并返回同样的
+`Result`。
 
 ### 升级要解决的问题
 
@@ -375,7 +411,8 @@ VLM tier 之所以重要，是因为不做 OCR 的流水线会静默丢失扫描
 的合同对关键词搜索和每一个答案来说都是隐形的，而且没有任何错误提示。把页面图像
 交给视觉模型可以把它找回来，而找回的文本带有与 CPU 层相同的页级引用。
 
-以接收 **PNG 字节**（而非路径）的可调用对象形式提供：
+命令行上是 `KOIOS_VLM_CMD`（见「接入 LLM」一节）。作为库的可调用对象提供时，
+它接收 **PNG 字节**（而非路径）：
 
 ```rust
 // Rust 库 API —— 可调用对象接收 PNG 字节，而非路径。
@@ -398,11 +435,14 @@ $ cargo run --release --manifest-path rust-cli/Cargo.toml \
 
 两个诚实的提醒，因为这一层很容易被过度承诺：
 
-- **VLM tier 目前仅限库内使用。** `extract_pages(path, vlm)` 只是一个可调用
-  对象参数，没有 CLI 标志，在 `ingest/` 里也没有调用点——把它接入 `koios index`
-  需要写代码，而不是改配置。它是一个钩子，不是一个可以打开的特性。
+- **扫描页在未配置视觉命令时什么都不贡献**——静默地。这是预期默认：为一张没人
+  读过的页面编造文本，比不索引它更糟。这一档没有 CLI 标志，`koios index` 从环境
+  读取 `KOIOS_VLM_CMD`。
 - **光栅化由内置的 MuPDF 提供**，与每次读取 PDF 所用的依赖相同，因此无需额外
   安装任何东西。
+
+`rust-cli/tests/vlm_tier.rs` 端到端钉住了三条行为：无命令时静默、有命令时找回、
+视觉命令失败不能连累文档其余部分。
 
 PDF 之外的多模态输入——图像、图表、截图作为一等来源——尚未实现。KoiosBase 是
 Markdown 原生的（P1）；视觉只作为文本抽取失败时的恢复路径参与进来。

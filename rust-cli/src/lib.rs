@@ -12,6 +12,7 @@ pub mod acl;
 pub mod compile;
 pub mod ingest;
 pub mod lint;
+pub mod llm;
 pub mod mcp;
 pub mod pdf;
 pub mod pipeline;
@@ -592,7 +593,19 @@ pub fn index_pdf(
     doc_path: &str,
     path: &std::path::Path,
 ) -> rusqlite::Result<usize> {
-    let pages = pdf::extract_pages_cpu(path);
+    // Two-tier (§5.1): the CPU tier takes every page it can read; only when a
+    // page has no extractable text does the vision tier run, and only if one is
+    // configured. No VLM configured means scanned pages stay invisible rather
+    // than being fabricated — which is the honest default, and the reason the
+    // tier is opt-in.
+    let pages = if let Some(cmd) = crate::llm::vlm_cmd(None) {
+        let f = move |p: &str, png: &[u8]| -> Result<String, String> {
+            crate::llm::transcribe_with(&cmd, p, png)
+        };
+        pdf::extract_pages(path, Some(&f))
+    } else {
+        pdf::extract_pages_cpu(path)
+    };
     let scanned = pdf::looks_scanned(&pages, 40);
     let fm = pdf::pdf_frontmatter(path, scanned);
     // `pdf_frontmatter` now emits the finished JSON object (Python builds it as

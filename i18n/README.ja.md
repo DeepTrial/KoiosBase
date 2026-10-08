@@ -245,8 +245,73 @@ stdio 経由で JSON-RPC 2.0 を話し、`koios_search`、`koios_ask`、
 引用付きの上位 3 ブロックを返し、決して捏造しません。これは意図的なものです。
 既定の動作は設定なしでも信頼できなければなりません。
 
-散文を生成させたい場合は、呼び出し可能オブジェクトを渡します。これは組み立て済みの
-コンテキストを受け取り、テキストを返します：
+散文を生成させたい場合は、`koios query` を任意のコマンドに向けてください。
+組み立て済みのコンテキストを stdin から受け取り、答えを stdout に書きます。
+質問は `$KOIOS_QUESTION` で渡されます。
+
+```bash
+koios query "revenue" -p myvault --llm-cmd 'my-model-wrapper'
+KOIOS_LLM_CMD='my-model-wrapper' koios query "revenue" -p myvault
+```
+
+どんなコマンドでも構いません——プロバイダへの `curl`、ローカルの llama.cpp、
+Python のワンライナー。KoiosBase は API キーを**一切見ません**：コマンドが自分で
+環境を読み、vault には何も書き込みません。
+
+```console
+$ koios query "revenue" -p myvault \
+    --llm-cmd 'printf "%s" "Revenue was 3.2 billion yuan [[raw/report.md#Financials/Revenue/1]]"'
+verdict: enough  hits: 4  escalated: false
+Revenue was 3.2 billion yuan [[raw/report.md#Financials/Revenue/1]]
+```
+
+コストは CPU と、あなたが渡したモデルだけです。コードベースにはプロバイダ
+アダプターも API キー設定も HTTP クライアントもありません——crate は合計 6 個。
+
+### ガードレールは依然として働く
+
+**契約はあなたのモデルの出力にも適用されます**——KoiosBase にモデルを渡しても、
+捏造できるようにはなりません。引用を省いた回答は、黙って受け入れられるのでは
+なく報告されます：
+
+```console
+$ koios query "revenue" -p myvault --llm-cmd 'printf "%s" "Revenue was 3.2 billion yuan."'
+verdict: enough  hits: 4  escalated: false
+Revenue was 3.2 billion yuan.
+[contracts] citation=0/1 sentences cited
+```
+
+コマンドの失敗は捏造された回答ではなくエラーになります：
+
+```console
+$ koios query "revenue" -p myvault --llm-cmd 'exit 1'
+verdict: enough  hits: 4  escalated: false
+model command exited with exit status: 1
+```
+
+### MCP 経由
+
+`koios mcp` は同じ環境変数を読むので、サーバーを起動したエージェントが環境経由で
+モデルを制御できます：
+
+```bash
+KOIOS_LLM_CMD='my-model-wrapper' koios mcp
+```
+
+### 視覚層（スキャンされた PDF）
+
+テキストを抽出できないページのための、同じ仕組みです。コマンドは stdin から
+**PNG バイト**を受け取り、文字起こしを書き出します：
+
+```bash
+KOIOS_VLM_CMD='my-vision-wrapper' koios index myvault
+```
+
+設定しなければ、スキャンされたページは何も貢献しません——黙って。それが意図された
+既定動作です。誰も読んでいないページのテキストを捏造するほうが、索引しないより
+悪い。`rust-cli/tests/vlm_tier.rs` がこの両面を固定しています。
+
+### ライブラリとして
 
 ```rust
 // Rust ライブラリ API —— 呼び出し可能オブジェクトは普通のクロージャ。
@@ -266,34 +331,9 @@ println!("{:?}", result.violations);   // 契約が守られていれば空
 呼び出し可能オブジェクトの契約は `Fn(&str, &str) -> Result<String, String>`
 （`koios::pipeline::LlmFn` の別名）で、コードベースのどこにもプロバイダー
 アダプターや API キー設定はありません——呼び出し可能オブジェクトはあなたが
-渡すので、特定のベンダーが埋め込まれることはありません。
-
-### ガードレールは依然として働く
-
-ここが知っておく価値のある点です：**契約は組み込みの生成器だけでなく、あなたの
-モデルの出力にも適用されます**。KoiosBase に LLM を渡しても、それが捏造できる
-ようにはなりません。
-
-```rust
-result.violations
-// 空の HashMap            cited its sources
-// {"citation": "0/5 sentences cited"}   呼び出し可能オブジェクトが引用を省略
-// {"refusal": "answered without evidence"}   証拠ゼロで回答した
-```
-
-`examples/readme_llm_snippet.rs` の実出力（単一文書の vault）：
-
-```console
-$ cargo run --release --manifest-path rust-cli/Cargo.toml \
-    --example readme_llm_snippet -- myvault
-[sources/report.md#Report/导读摘要/1] (Report > Report > 导读摘要)
-revenue in 2024 was 3. 2 billion.
-
-{"citation": "0/5 sentences cited"}
-```
-
-検索は権威であり続けます——制限付き文書はモデルが何を見る前に既に除外されている
-ため、`my_llm` は与えられていないものを漏らすことができません。
+渡すので、特定のベンダーが埋め込まれることはありません。`koios::llm` は CLI 自身に
+よるこの契約の実装です：`generate_with(cmd, question, context)` は外部プロセスを
+起動し、同じ `Result` を返します。
 
 ### アップグレードが解決するもの
 
@@ -399,7 +439,8 @@ VLM tier が重要なのは、OCR を使わないパイプラインがスキャ�
 見えなくなり、しかもエラーは出ません。ページ画像を視覚モデルに渡せばそれを
 回復でき、回復されたテキストは CPU 層と同じページ単位の引用を伴います。
 
-**PNG バイト**（パスではなく）を受け取る呼び出し可能オブジェクトとして渡します：
+コマンドラインでは `KOIOS_VLM_CMD` です（「LLM を接続する」を参照）。ライブラリの
+呼び出し可能オブジェクトとして渡す場合は、**PNG バイト**（パスではなく）を受け取ります：
 
 ```rust
 // Rust ライブラリ API —— 呼び出し可能オブジェクトはパスではなく PNG バイトを受け取る。
@@ -422,12 +463,15 @@ $ cargo run --release --manifest-path rust-cli/Cargo.toml \
 
 この層は誇張しやすいため、正直な注意点を 2 つ挙げます：
 
-- **VLM tier は現時点ではライブラリ専用です。** `extract_pages(path, vlm)` は
-  呼び出し可能オブジェクトの引数にすぎず、CLI フラグはなく `ingest/` 内にも
-  呼び出し箇所はありません——`koios index` に組み込むには設定ではなくコードが
-  必要です。これはオンにできる機能ではなく、フックです。
+- **視覚コマンド未設定のスキャンページは何も貢献しません**——黙って。これが意図
+  された既定動作です。誰も読んでいないページのテキストを捏造するほうが、索引
+  しないより悪い。この層に CLI フラグはなく、`koios index` は環境から
+  `KOIOS_VLM_CMD` を読みます。
 - **ラスタライズは同梱の MuPDF が行います。** PDF 読み取りが既に使っている
   依存と同じなので、追加のインストールは不要です。
+
+`rust-cli/tests/vlm_tier.rs` が三つの挙動を端到端で固定しています：コマンドなし
+では黙る、あれば回復する、視覚コマンドが失敗しても文書の残りを失わない。
 
 PDF 以外のマルチモーダル入力——画像、グラフ、スクリーンショットをファーストクラスの
 ソースとして扱うこと——は未実装です。KoiosBase は Markdown ネイティブであり（P1）、

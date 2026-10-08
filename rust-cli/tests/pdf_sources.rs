@@ -119,6 +119,14 @@ fn pdf_blocks_carry_page_provenance() {
 ///
 /// Regression guard for the shared heuristics in BOTH shells: body that looks
 /// like a heading must still be indexed, not swallowed into `heading`.
+///
+/// This used to assert the opposite — that a page consisting of nothing but one
+/// short line yields zero blocks — because that was the behaviour, and pinning
+/// it kept the gap visible. The gap is now fixed rather than documented: the
+/// line is treated as body when nothing follows it to serve as its body. It
+/// stopped being theoretical the moment the vision tier shipped, because a VLM
+/// routinely transcribes a sparse page as exactly one short sentence, and the
+/// recovered text was being discarded.
 #[test]
 fn body_text_is_not_mistaken_for_heading() {
     // short, no trailing punctuation — exactly the shape that trips _is_heading
@@ -126,24 +134,54 @@ fn body_text_is_not_mistaken_for_heading() {
     let pages = koios::pdf::extract_pages_cpu(&p);
     assert!(!pages.is_empty());
     let blocks = koios::pdf::page_to_blocks("fin.pdf", 1, &pages[0], 0);
-    // This is the documented latent bug: a lone short line yields no block.
-    // Asserting the CURRENT behaviour keeps the gap visible rather than hidden.
-    let is_lone_short = pages[0]
-        .trim()
-        .split('\n')
-        .filter(|l| !l.trim().is_empty())
-        .count()
-        <= 1;
-    if is_lone_short {
-        assert!(
-            blocks.is_empty(),
-            "known limitation (shared with Python): a page that is nothing but a \
-             short heading line yields no body block; if this now passes, fix \
-             the heuristic in both shells and delete this guard"
-        );
-    } else {
-        assert!(!blocks.is_empty(), "body text must be indexed");
-    }
+    // A heading needs body under it. With none, the line IS the body — dropping
+    // it would silently lose the page.
+    assert_eq!(
+        blocks.len(),
+        1,
+        "a lone short line must be indexed as body, not swallowed as a heading: {}",
+        blocks
+            .iter()
+            .map(|b| b.raw.clone())
+            .collect::<Vec<_>>()
+            .join(" | ")
+    );
+    assert!(
+        blocks[0].raw.contains("Quarterly Report"),
+        "the page's only text must survive: {:?}",
+        blocks[0].raw
+    );
+}
+
+/// A heading followed by real body keeps its role: the body is indexed under it.
+///
+/// Driven through `page_to_blocks` directly rather than a PDF fixture, because
+/// a minimal PDF content stream collapses the text to a single line and cannot
+/// express "heading, then body".
+#[test]
+fn heading_with_body_below_still_becomes_the_breadcrumb() {
+    let text = "Quarterly Report\nRevenue was 3.2 billion yuan in 2024.";
+    let blocks = koios::pdf::page_to_blocks("fin.pdf", 1, text, 0);
+    assert_eq!(
+        blocks.len(),
+        1,
+        "heading + body = one block: {}",
+        blocks
+            .iter()
+            .map(|b| b.raw.clone())
+            .collect::<Vec<_>>()
+            .join(" | ")
+    );
+    assert!(
+        blocks[0].breadcrumb.contains("Quarterly Report"),
+        "the heading must become the breadcrumb: {:?}",
+        blocks[0].breadcrumb
+    );
+    assert!(
+        blocks[0].raw.contains("3.2 billion"),
+        "the body must be what is indexed: {:?}",
+        blocks[0].raw
+    );
 }
 
 /// test_frontmatter_marks_parser_and_hash

@@ -245,8 +245,77 @@ Out of the box KoiosBase answers from retrieved blocks alone — the built-in
 generator returns the top three blocks with citations and never fabricates. That
 is deliberate: the default must be trustworthy with zero configuration.
 
-To generate prose instead, pass a callable. It receives the assembled context
-and returns text:
+### From the CLI — a command, not a config file
+
+Point `koios query` at any command. It receives the assembled context on stdin
+and prints the answer; `$KOIOS_QUESTION` carries the question.
+
+```bash
+koios query "revenue" -p myvault --llm-cmd 'my-model-wrapper'
+KOIOS_LLM_CMD='my-model-wrapper' koios query "revenue" -p myvault
+```
+
+Any command works — `curl` against a provider, a local llama.cpp, a Python
+one-liner. KoiosBase never sees your API key: the command reads your
+environment, and nothing is written to the vault.
+
+```console
+$ koios query "revenue" -p myvault \
+    --llm-cmd 'printf "%s" "Revenue was 3.2 billion yuan [[raw/report.md#Financials/Revenue/1]]"'
+verdict: enough  hits: 4  escalated: false
+Revenue was 3.2 billion yuan [[raw/report.md#Financials/Revenue/1]]
+```
+
+Only the CPU and the model you supply. There is no provider adapter, no API-key
+configuration and no HTTP client anywhere in the codebase — six crates total.
+
+### The guardrails still apply
+
+**Contracts are enforced on your model's output too** — handing KoiosBase a
+model does not let it invent. An answer that omits citations is reported, not
+silently accepted:
+
+```console
+$ koios query "revenue" -p myvault --llm-cmd 'printf "%s" "Revenue was 3.2 billion yuan."'
+verdict: enough  hits: 4  escalated: false
+Revenue was 3.2 billion yuan.
+[contracts] citation=0/1 sentences cited
+```
+
+A command that fails is an error, not a fabricated answer:
+
+```console
+$ koios query "revenue" -p myvault --llm-cmd 'exit 1'
+verdict: enough  hits: 4  escalated: false
+model command exited with exit status: 1
+```
+
+Retrieval stays authoritative — restricted documents are already gone before the
+model sees anything, so it cannot leak what it was never given.
+
+### From MCP
+
+`koios mcp` reads the same variable, so an agent launching the server controls
+the model through the environment:
+
+```bash
+KOIOS_LLM_CMD='my-model-wrapper' koios mcp
+```
+
+### Vision tier (scanned PDFs)
+
+The same mechanism, for pages with no extractable text. The command receives
+**PNG bytes** on stdin and prints the transcription:
+
+```bash
+KOIOS_VLM_CMD='my-vision-wrapper' koios index myvault
+```
+
+Without it a scanned page contributes nothing — silently, by design. Inventing
+text for a page nobody read is worse than not indexing it. `rust-cli/tests/vlm_tier.rs`
+pins both halves of that behaviour.
+
+### As a library
 
 ```rust
 // Rust library API — the callable is an ordinary closure.
@@ -266,34 +335,9 @@ println!("{:?}", result.violations);   // empty when the contracts hold
 The callable contract is `Fn(&str, &str) -> Result<String, String>` (aliased as
 `koios::pipeline::LlmFn`), and there is no provider adapter or API-key
 configuration anywhere in the codebase — you supply the callable, so no vendor
-is baked in.
-
-### The guardrails still apply
-
-This is the part worth knowing: **contracts are enforced on your model's output
-too**, not only on the built-in generator. Handing KoiosBase an LLM does not let
-it invent.
-
-```rust
-result.violations
-// empty HashMap            cited its sources
-// {"citation": "0/5 sentences cited"}   callable omitted citations
-// {"refusal": "answered without evidence"}   answered with zero blocks
-```
-
-Real output from `examples/readme_llm_snippet.rs` against a one-document vault:
-
-```console
-$ cargo run --release --manifest-path rust-cli/Cargo.toml \
-    --example readme_llm_snippet -- myvault
-[sources/report.md#Report/导读摘要/1] (Report > Report > 导读摘要)
-revenue in 2024 was 3. 2 billion.
-
-{"citation": "0/5 sentences cited"}
-```
-
-Retrieval stays authoritative — restricted documents are already gone before the
-model sees anything, so `llm()` cannot leak what it was never given.
+is baked in. `koios::llm` is the CLI's own implementation of that contract:
+`generate_with(cmd, question, context)` shells out and hands back the same
+`Result`.
 
 ### What upgrading is meant to fix
 
@@ -397,7 +441,8 @@ contract scanned to PDF becomes invisible to keyword search and to every answer,
 with no error to tell you. Handing the page image to a vision model recovers it,
 and the recovered text carries the same page-level citations as the CPU tier.
 
-Supply it as a callable receiving **PNG bytes**, not a path:
+Configured on the command line, it is `KOIOS_VLM_CMD` (see Connect an LLM).
+Supplied as a library callable, it receives **PNG bytes**, not a path:
 
 ```rust
 // Rust library API — the callable receives PNG bytes, not a path.
@@ -420,12 +465,16 @@ $ cargo run --release --manifest-path rust-cli/Cargo.toml \
 
 Two honest caveats, because this tier is easy to over-promise:
 
-- **The VLM tier is library-only today.** `extract_pages(path, vlm)` is a
-  callable parameter with no CLI flag and no call site inside `ingest/` — wiring
-  it into `koios index` requires code, not configuration. It is a hook, not a
-  feature you can switch on.
+- **A scanned page with no vision command configured contributes nothing** —
+  silently. That is the intended default: inventing text for a page nobody read
+  is worse than not indexing it. There is no CLI flag for this tier; `koios index`
+  picks up `KOIOS_VLM_CMD` from the environment.
 - **Rasterization comes from the bundled MuPDF**, the same dependency every PDF
   read already uses, so there is nothing extra to install.
+
+`rust-cli/tests/vlm_tier.rs` pins all three behaviours end to end: silent
+without a command, recovered with one, and a failing vision command must not
+lose the rest of the document.
 
 Multimodal input beyond PDF — images, charts, screenshots as first-class sources
 — is not implemented. KoiosBase is Markdown-native (P1); vision enters only as

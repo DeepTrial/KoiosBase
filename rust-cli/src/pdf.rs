@@ -171,6 +171,12 @@ pub fn looks_scanned(page_texts: &[String], min_chars: usize) -> bool {
 /// a short line with no sentence-ending punctuation. Deliberately conservative
 /// — calling body text a heading DROPS the block entirely (this exact bug made
 /// PDF pages index as empty on the Python side).
+/// True when `line` is the final non-empty line of `text` — i.e. nothing can
+/// possibly follow it to serve as its body.
+fn is_last_non_empty_line(text: &str, line: &str) -> bool {
+    text.split('\n').map(str::trim).rfind(|l| !l.is_empty()) == Some(line)
+}
+
 fn is_heading(line: &str) -> bool {
     let s = line.trim();
     if s.is_empty() || s.chars().count() > HEADING_MAX_LEN {
@@ -225,7 +231,16 @@ pub fn page_to_blocks(doc_path: &str, page_no: usize, text: &str, start_ord: usi
         if s.is_empty() {
             continue;
         }
-        if is_h && pending.is_empty() {
+        // A heading is a heading only if it has body under it. Treating a lone
+        // short line as one swallowed the entire page: the line went into
+        // `heading`, `pending` stayed empty, and the final flush produced
+        // nothing — so a whole page silently contributed zero blocks.
+        //
+        // That was latent while PDFs were text-only (a real page has several
+        // lines), but the vision tier makes it load-bearing: a VLM commonly
+        // transcribes a sparse page as exactly one short sentence, and then the
+        // text we just paid a model to recover would be thrown away.
+        if is_h && pending.is_empty() && !is_last_non_empty_line(text, s) {
             heading = Some(s.to_string());
             continue;
         }

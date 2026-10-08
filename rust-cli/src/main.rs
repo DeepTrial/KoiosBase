@@ -87,6 +87,14 @@ enum Cmd {
         path: PathBuf,
         #[arg(short = 'k', long, default_value_t = 8)]
         top: usize,
+        /// shell command used as the generator; reads the context on stdin and
+        /// prints the answer. Defaults to $KOIOS_LLM_CMD. Without one you get
+        /// the built-in extractive answer, unchanged.
+        #[arg(long = "llm-cmd")]
+        llm_cmd: Option<String>,
+        /// principal groups for ACL (§9.2), comma separated
+        #[arg(long)]
+        groups: Option<String>,
     },
     /// eval harness metrics (§10.2)
     Eval {
@@ -294,8 +302,52 @@ fn cmd_full(path: &Path, max_chars: usize) -> rusqlite::Result<()> {
     print_blocks(&conn, &ids)
 }
 
-fn cmd_query(path: &Path, query: &str, top: usize) -> rusqlite::Result<()> {
+/// `koios query` — full pipeline with the Grader verdict (§6.2).
+///
+/// When a generator is configured (`--llm-cmd` or `$KOIOS_LLM_CMD`) this routes
+/// through `full_query_with`, so the model's answer is gated by the same
+/// citation and refusal contracts as the built-in one (§6.5). Without one it is
+/// byte-for-byte the old output, which is what `eval` and the parity tests rely
+/// on.
+fn cmd_query(
+    path: &Path,
+    query: &str,
+    top: usize,
+    llm_cmd: Option<&str>,
+    groups: Option<&str>,
+) -> rusqlite::Result<()> {
     let conn = connect(path)?;
+    let groups = parse_groups(groups);
+
+    if let Some(cmd) = koios::llm::llm_cmd(llm_cmd) {
+        let f = move |q: &str, ctx: &str| -> Result<String, String> {
+            koios::llm::generate_with(&cmd, q, ctx)
+        };
+        let res = pipeline::full_query_with(&conn, query, top, groups.as_deref(), Some(&f));
+        println!(
+            "verdict: {}  hits: {}  escalated: {}",
+            res.trace
+                .get("verdict")
+                .and_then(|v| v.as_str())
+                .unwrap_or("enough"),
+            res.evidence.len(),
+            res.trace.get("escalated").is_some()
+        );
+        println!("{}", res.answer);
+        if !res.violations.is_empty() {
+            let mut keys: Vec<&String> = res.violations.keys().collect();
+            keys.sort();
+            eprintln!(
+                "[contracts] {}",
+                keys.iter()
+                    .map(|k| format!("{k}={}", res.violations[*k]))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
+        }
+        return Ok(());
+    }
+
     let rows = retrieval::hybrid_search(&conn, query, top, true)?;
     let ids: Vec<String> = rows.iter().map(|(i, _)| i.clone()).collect();
     let first: String = ids
@@ -504,7 +556,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?,
         Cmd::Tree { query, path } => cmd_tree(&path, &query.join(" "))?,
         Cmd::Full { path, max_chars } => cmd_full(&path, max_chars)?,
-        Cmd::Query { query, path, top } => cmd_query(&path, &query.join(" "), top)?,
+        Cmd::Query {
+            query,
+            path,
+            top,
+            llm_cmd,
+            groups,
+        } => cmd_query(
+            &path,
+            &query.join(" "),
+            top,
+            llm_cmd.as_deref(),
+            groups.as_deref(),
+        )?,
         Cmd::Eval {
             path_flag,
             path,
