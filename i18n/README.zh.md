@@ -228,6 +228,37 @@ koios mcp
 通过 stdio 讲 JSON-RPC 2.0，暴露 `koios_search`、`koios_ask`、
 `koios_write_answer`。不依赖 SDK；可离线运行。
 
+不用手写 JSON，直接注册到 agent 宿主：
+
+```bash
+koios mcp --install            # PATH 上找到的每个宿主
+koios mcp --install codex      # 或指定一个
+koios mcp --install claude-code
+koios mcp --uninstall --host codex
+```
+
+它做两件事：
+
+- **注册 server** —— 宿主自带 CLI 时用它（`claude mcp add` / `codex mcp add`），
+  否则自己写 `~/.claude.json` 或 `~/.codex/config.toml`。
+- **安装一个 skill** 到 `~/.claude/skills/koiosbase/` 或
+  `~/.agents/skills/koiosbase/` —— 两个宿主用同一套 `SKILL.md` + frontmatter
+  标准。skill 负责教会模型那条最要紧的规则：**没有引用的答案意味着 vault 里没有，
+  模型不许用自己的知识填空。**
+
+已端到端验证：有证据时每个事实句都带 `[[raw/...]]`；答不了的问题返回
+`资料中未涉及：当前知识库中没有任何相关证据。`，而不是瞎猜。
+
+---
+
+## 在 Claude Code / Codex 里使用
+
+注册好之后直接用自然语言问——宿主会替你调 `koios_ask`。每个工具都需要绝对的
+`vault` 路径，没有「当前 vault」这个概念。
+
+skill 里也写了兜底：如果没有 `koios_*` 工具，就直接跑 CLI
+（`koios query "…" -p /abs/vault`），并遵守同一条规则。
+
 ---
 
 ## 接入 LLM
@@ -510,7 +541,7 @@ Markdown 原生的（P1）；视觉只作为文本抽取失败时的恢复路径
 ## 只有一个 shell
 
 KoiosBase 起初是一份 Python 参考实现，后被移植到 Rust。Rust 二进制如今是仓库里
-**唯一**的 shell：相同的 vault 格式、相同的命令面（16 个子命令），且无运行时
+**唯一**的 shell：相同的 vault 格式、相同的命令面（17 个子命令），且无运行时
 依赖。PDF 层以 AGPL 或商业授权链接 MuPDF —— 这与 PyMuPDF 早已给本项目带来的
 处境相同，因为那曾是它唯一的运行时依赖。支撑这次移植的 Python 代码与差分工具
 作为审计轨迹保留在 `docs/python-rust-parity.md` 中，而不是作为第二个运行时。
@@ -565,7 +596,7 @@ KoiosBase/
       studio.rs     brief / mindmap 导出
       main.rs       命令行接口
     examples/       本 README 引用的可运行片段
-    tests/          19 个集成测试套件（136 个用例）
+    tests/          20 个集成测试套件（143 个用例）
   docs/             设计基线、i18n 布局、parity 审计
   i18n/             本 README 的中文与日文版
 ```

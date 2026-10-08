@@ -238,6 +238,39 @@ koios mcp
 stdio 経由で JSON-RPC 2.0 を話し、`koios_search`、`koios_ask`、
 `koios_write_answer` を公開します。SDK 依存はなく、オフラインで動作します。
 
+JSON を手書きせず、エージェントホストへ登録できます：
+
+```bash
+koios mcp --install            # PATH 上にある全ホスト
+koios mcp --install codex      # あるいは明示的に指定
+koios mcp --install claude-code
+koios mcp --uninstall --host codex
+```
+
+これは二つのことを行います：
+
+- **サーバーの登録** —— ホスト自身の CLI（`claude mcp add` / `codex mcp add`）が
+  あればそれを使い、無ければ `~/.claude.json` または `~/.codex/config.toml` を
+  自分で書きます。
+- **スキルの導入** —— `~/.claude/skills/koiosbase/` または
+  `~/.agents/skills/koiosbase/` へ。どちらのホストも同じ `SKILL.md` +
+  frontmatter 標準です。スキルが教えるのは最も重要な一つの規則：**引用の無い
+  回答は「vault に無い」という意味であり、モデルは自分の知識で穴埋めしては
+  ならない。**
+
+端到端で検証済み：証拠がある場合、各事实文に `[[raw/...]]` が付き、答えられない
+質問は推測ではなく `资料中未涉及：当前知识库中没有任何相关证据。` を返します。
+
+---
+
+## Claude Code / Codex から使う
+
+登録済みなら自然言語で尋ねるだけで、ホストが `koios_ask` を呼びます。全ツールに
+絶対パスの `vault` が必要で、「カレント vault」という概念はありません。
+
+スキルにはフォールバックも書かれています：`koios_*` ツールが無ければ CLI を直接
+実行し（`koios query "…" -p /abs/vault`）、同じ規則を適用します。
+
 ---
 
 ## LLM を接続する
@@ -540,7 +573,7 @@ PDF 以外のマルチモーダル入力——画像、グラフ、スクリー�
 ## 一つのシェル
 
 KoiosBase は Python の参照実装として始まり、Rust に移植されました。Rust バイナリ
-が今やリポジトリで**唯一**のシェルです：同じ vault 形式、同じコマンド面（16 の
+が今やリポジトリで**唯一**のシェルです：同じ vault 形式、同じコマンド面（17 の
 サブコマンド）、そして実行時依存なし。PDF 層は MuPDF を AGPL または商用ライセンス
 でリンクします —— これは PyMuPDF がかつて唯一の実行時依存として本プロジェクトに
 既に与えていた立場と同じです。移植を証明した Python コードと差分ツールは、第二の
@@ -600,7 +633,7 @@ KoiosBase/
       studio.rs     brief / mindmap 書き出し
       main.rs       コマンドラインインターフェース
     examples/       本 README で引用している実行可能なスニペット
-    tests/          19 の統合テストスイート（136 ケース）
+    tests/          20 の統合テストスイート（143 ケース）
   docs/             設計baseline、i18n 配置、parity 監査
   i18n/             本 README の中国語版と日本語版
 ```

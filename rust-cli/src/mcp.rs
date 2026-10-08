@@ -9,6 +9,15 @@
 //! knowledge. Session memory and user preferences belong to the agent side and
 //! must NOT be written back.
 
+/// Server-wide guidance returned at `initialize`. See the note at the call site
+/// for why it exists; keep it short enough to survive host truncation.
+const SERVER_INSTRUCTIONS: &str = "\
+KoiosBase is a Markdown knowledge base. Every tool needs an absolute `vault` \
+path; there is no current-vault state. Prefer `koios_ask` for an answer whose \
+facts carry [[raw/...]] citations, `koios_search` for raw evidence. Never \
+present an uncited sentence as fact: if the answer lacks citations or says \
+资料中未涉及, the vault does not have it — do not fill the gap yourself.";
+
 use rusqlite::Connection;
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
@@ -364,6 +373,16 @@ pub fn handle_request(req: &Value) -> Value {
             "protocolVersion": PROTOCOL_VERSION,
             "capabilities": {"tools": {}},
             "serverInfo": {"name": "koiosbase", "version": env!("CARGO_PKG_VERSION")},
+            // Hosts that support `instructions` (Codex CLI, IDE extension,
+            // ChatGPT desktop) load this as server-wide guidance alongside the
+            // tools. It is the only place a cross-tool constraint can be
+            // stated, and the constraint that matters here is not obvious from
+            // the tool list: every vault path must be passed explicitly, and
+            // the citation ids in results are the contract, not decoration.
+            //
+            // Kept under 512 chars so it survives truncation on hosts that cut
+            // the field short.
+            "instructions": SERVER_INSTRUCTIONS,
         })),
         "tools/list" => ok(json!({"tools": tool_defs()})),
         "tools/call" => {
@@ -472,3 +491,322 @@ pub fn handle_line(line: &str) -> String {
         .to_string(),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Host registration
+//
+// The server above speaks MCP; this is how an agent host finds it. Two hosts,
+// two different file formats, both documented by their vendors:
+//
+//  - Claude Code: `claude mcp add <name> -- <command>`, or a `mcpServers`
+//    block in `.mcp.json` / `~/.claude.json`.
+//  - Codex: `codex mcp add <name> -- <command>`, or a
+//    `[mcp_servers.<name>]` table in `~/.codex/config.toml`.
+//
+// We prefer the vendor CLI when it is on PATH (it validates and lands in the
+// right scope) and fall back to writing the file ourselves.
+// ---------------------------------------------------------------------------
+
+/// Which agent host we are registering with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Host {
+    ClaudeCode,
+    Codex,
+}
+
+impl Host {
+    pub fn label(self) -> &'static str {
+        match self {
+            Host::ClaudeCode => "claude-code",
+            Host::Codex => "codex",
+        }
+    }
+
+    /// The binary to shell out to. Distinct from `label`: the host is
+    /// "claude-code" but its executable is `claude`. Conflating the two made
+    /// the vendor-CLI path silently unreachable for Claude, so every install
+    /// fell through to hand-writing ~/.claude.json.
+    fn cli(self) -> &'static str {
+        match self {
+            Host::ClaudeCode => "claude",
+            Host::Codex => "codex",
+        }
+    }
+
+    fn from_name(s: &str) -> Option<Self> {
+        match s.trim().to_lowercase().replace('_', "-").as_str() {
+            "claude" | "claude-code" | "claudecode" => Some(Host::ClaudeCode),
+            "codex" | "openai-codex" => Some(Host::Codex),
+            _ => None,
+        }
+    }
+
+    /// Detect by looking for the host's CLI on PATH, then its config directory.
+    fn detect() -> Option<Self> {
+        let on_path = |b: &str| {
+            std::env::var_os("PATH")
+                .map(|p| {
+                    std::env::split_paths(&p).any(|d| {
+                        d.join(b).exists()
+                            || d.join(format!("{b}.exe")).exists()
+                            || d.join(format!("{b}.cmd")).exists()
+                    })
+                })
+                .unwrap_or(false)
+        };
+        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+        let has_dir = |d: &str| home.as_ref().map(|h| h.join(d).exists()).unwrap_or(false);
+        if on_path("claude") || has_dir(".claude") {
+            return Some(Host::ClaudeCode);
+        }
+        if on_path("codex") || has_dir(".codex") {
+            return Some(Host::Codex);
+        }
+        None
+    }
+}
+
+/// The binary path we register. Resolved from argv[0] so a user who installed
+/// `koios` anywhere gets that exact path recorded, not whatever `koios` happens
+/// to resolve to in the host's environment (which may differ or not exist).
+fn self_exe() -> String {
+    std::env::current_exe()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "koios".to_string())
+}
+
+fn home_dir() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| "HOME is not set".into())
+}
+
+fn run(cmd: &str, args: &[&str]) -> std::io::Result<std::process::Output> {
+    std::process::Command::new(cmd).args(args).output()
+}
+
+/// `koios mcp --install` / `--uninstall`.
+pub fn install(
+    target: Option<&str>,
+    uninstall: bool,
+    host_flag: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let host = match host_flag {
+        Some(h) => Host::from_name(h)
+            .ok_or_else(|| format!("unknown host {h:?}; expected claude-code or codex"))?,
+        None => match target {
+            Some(t) => Host::from_name(t)
+                .ok_or_else(|| format!("unknown host {t:?}; expected claude-code or codex"))?,
+            None => {
+                let all = !uninstall;
+                if all {
+                    // Installing with no host named: do every host we can see.
+                    let detected: Vec<Host> = [Host::ClaudeCode, Host::Codex]
+                        .into_iter()
+                        .filter(|h| {
+                            std::env::var_os("PATH")
+                                .map(|p| {
+                                    std::env::split_paths(&p).any(|d| {
+                                        d.join(h.cli()).exists()
+                                            || d.join(format!("{}.exe", h.cli())).exists()
+                                    })
+                                })
+                                .unwrap_or(false)
+                        })
+                        .collect();
+                    if detected.is_empty() {
+                        return Err("no agent host found on PATH; pass \
+                                    `koios mcp --install claude-code` or `--install codex`"
+                            .into());
+                    }
+                    for h in detected {
+                        install_one(h, false)?;
+                    }
+                    return Ok(());
+                }
+                Host::detect().ok_or(
+                    "no agent host detected; pass `koios mcp --host claude-code` \
+                     or `--host codex`",
+                )?
+            }
+        },
+    };
+    install_one(host, uninstall)
+}
+
+fn install_one(host: Host, uninstall: bool) -> Result<(), Box<dyn std::error::Error>> {
+    if uninstall {
+        return uninstall_one(host);
+    }
+    let exe = self_exe();
+    let cli = host.cli();
+    // Preferred path: let the vendor CLI do it. It validates, picks a sane
+    // scope, and stays correct if the config format changes.
+    let out = run(cli, &["mcp", "add", "koios", "--", &exe, "mcp"]);
+    let via_cli = matches!(&out, Ok(o) if o.status.success());
+    if via_cli {
+        println!("registered with {} via `{} mcp add`", host.label(), cli);
+        println!("  command: {} mcp", exe);
+    } else {
+        install_by_file(host, &exe)?;
+    }
+    // The skills are orthogonal to the MCP registration: they are what tells
+    // the model *how* to use the tools (cite or refuse), and they cost nothing
+    // until loaded. One standard (`SKILL.md` + frontmatter), two directories.
+    install_skill(host)?;
+    Ok(())
+}
+
+fn uninstall_one(host: Host) -> Result<(), Box<dyn std::error::Error>> {
+    let cli = host.cli();
+    if let Ok(o) = run(cli, &["mcp", "remove", "koios"]) {
+        if o.status.success() {
+            println!("removed from {} via `{} mcp remove`", host.label(), cli);
+            return Ok(());
+        }
+    }
+    // No CLI: drop the entry from the file we would have written.
+    match host {
+        Host::ClaudeCode => {
+            let p = home_dir()?.join(".claude.json");
+            strip_claude_json(&p)?;
+        }
+        Host::Codex => {
+            let p = home_dir()?.join(".codex").join("config.toml");
+            strip_codex_toml(&p)?;
+        }
+    }
+    Ok(())
+}
+
+fn install_by_file(host: Host, exe: &str) -> Result<(), Box<dyn std::error::Error>> {
+    match host {
+        Host::ClaudeCode => {
+            let p = home_dir()?.join(".claude.json");
+            let mut root: serde_json::Value = if p.exists() {
+                serde_json::from_str(&std::fs::read_to_string(&p)?)?
+            } else {
+                serde_json::json!({})
+            };
+            let servers = root
+                .as_object_mut()
+                .ok_or("~/.claude.json is not a JSON object")?
+                .entry("mcpServers")
+                .or_insert_with(|| serde_json::json!({}));
+            servers
+                .as_object_mut()
+                .ok_or("mcpServers is not an object")?
+                .insert(
+                    "koios".to_string(),
+                    serde_json::json!({
+                        "command": exe,
+                        "args": ["mcp"],
+                        // KoiosBase is offline and reads no secrets of its own; a
+                        // model configured in a vault reads its own env var.
+                        "type": "stdio"
+                    }),
+                );
+            std::fs::write(&p, serde_json::to_string_pretty(&root)?)?;
+            println!("wrote {} -> mcpServers.koios", p.display());
+        }
+        Host::Codex => {
+            let dir = home_dir()?.join(".codex");
+            std::fs::create_dir_all(&dir)?;
+            let p = dir.join("config.toml");
+            let existing = if p.exists() {
+                std::fs::read_to_string(&p)?
+            } else {
+                String::new()
+            };
+            if existing.contains("[mcp_servers.koios]") {
+                println!("{} already has [mcp_servers.koios]", p.display());
+                return Ok(());
+            }
+            let block = format!(
+                "\n[mcp_servers.koios]\ncommand = {}\nargs = [\"mcp\"]\n",
+                toml_string(exe)
+            );
+            std::fs::write(&p, format!("{}{}", existing.trim_end(), block))?;
+            println!("wrote {} -> [mcp_servers.koios]", p.display());
+        }
+    }
+    println!("  command: {} mcp", exe);
+    println!("  restart the host to pick it up");
+    Ok(())
+}
+
+/// TOML basic string escaping. An exe path with a backslash or quote would
+/// otherwise produce a config file the host cannot parse — and a host that
+/// silently ignores a broken config looks exactly like one that found no tools.
+fn toml_string(s: &str) -> String {
+    let esc = s
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r");
+    format!("\"{esc}\"")
+}
+
+fn strip_claude_json(p: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    if !p.exists() {
+        return Ok(());
+    }
+    let mut root: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(p)?)?;
+    if let Some(obj) = root.as_object_mut() {
+        if let Some(s) = obj.get_mut("mcpServers").and_then(|v| v.as_object_mut()) {
+            s.remove("koios");
+        }
+    }
+    std::fs::write(p, serde_json::to_string_pretty(&root)?)?;
+    println!("removed mcpServers.koios from {}", p.display());
+    Ok(())
+}
+
+fn strip_codex_toml(p: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    if !p.exists() {
+        return Ok(());
+    }
+    let text = std::fs::read_to_string(p)?;
+    let mut out = String::new();
+    let mut skipping = false;
+    for line in text.lines() {
+        let t = line.trim();
+        if t.starts_with('[') {
+            skipping = t == "[mcp_servers.koios]";
+        }
+        if !skipping {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    std::fs::write(p, out)?;
+    println!("removed [mcp_servers.koios] from {}", p.display());
+    Ok(())
+}
+
+/// Ship the skill that teaches the model how to use the tools.
+///
+/// Registering the server gives the model *access*; it does not tell it that a
+/// KoiosBase answer without a citation must be treated as "not found" rather
+/// than filled in from its own knowledge. That is the one thing this project
+/// actually promises, so it ships as a skill.
+///
+/// Both hosts follow the same `SKILL.md` + frontmatter standard; only the
+/// directory differs.
+fn install_skill(host: Host) -> Result<(), Box<dyn std::error::Error>> {
+    let home = home_dir()?;
+    let dir = match host {
+        Host::ClaudeCode => home.join(".claude").join("skills"),
+        // Codex reads `$HOME/.agents/skills` (USER scope).
+        Host::Codex => home.join(".agents").join("skills"),
+    };
+    let dest = dir.join("koiosbase").join("SKILL.md");
+    std::fs::create_dir_all(dest.parent().unwrap())?;
+    std::fs::write(&dest, SKILL_MD)?;
+    println!("  skill: {}", dest.display());
+    Ok(())
+}
+
+/// Inlined rather than read at runtime: the binary must be a single file that
+/// works from anywhere, not one that depends on being run next to a checkout.
+const SKILL_MD: &str = include_str!("../../skills/koiosbase/SKILL.md");

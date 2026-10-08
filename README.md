@@ -238,6 +238,41 @@ koios mcp
 Speaks JSON-RPC 2.0 over stdio and exposes `koios_search`, `koios_ask`,
 `koios_write_answer`. No SDK dependency; works offline.
 
+Register it with an agent host instead of wiring JSON by hand:
+
+```bash
+koios mcp --install            # every host found on PATH
+koios mcp --install codex      # or name one
+koios mcp --install claude-code
+koios mcp --uninstall --host codex
+```
+
+That does two things:
+
+- **Registers the server** — via the host's own CLI (`claude mcp add` /
+  `codex mcp add`) when present, otherwise by writing
+  `~/.claude.json` or `~/.codex/config.toml` itself.
+- **Installs a skill** to `~/.claude/skills/koiosbase/` or
+  `~/.agents/skills/koiosbase/` — both hosts use the same `SKILL.md` +
+  frontmatter standard. The skill is what teaches the model the one rule that
+  matters: **an answer without a citation means the vault does not have it, and
+  the model must not fill the gap from its own knowledge.**
+
+Verified end to end: a cited answer comes back with `[[raw/...]]` on every
+factual sentence, and an unanswerable question returns
+`资料中未涉及：当前知识库中没有任何相关证据。` rather than a guess.
+
+---
+
+## Use it from Claude Code / Codex
+
+With the server registered, ask in natural language — the host calls
+`koios_ask` for you. Every tool needs an absolute `vault` path; there is no
+"current vault".
+
+The skill also covers the fallback: if no `koios_*` tools are present, run the
+CLI directly (`koios query "…" -p /abs/vault`) and apply the same rule.
+
 ---
 
 ## Connect an LLM
@@ -548,7 +583,7 @@ Seven principles constrain every mechanism:
 
 KoiosBase began as a Python reference implementation and was ported to Rust.
 The Rust binary is now the **only** shell in the repository: same vault format,
-same command surface (16 subcommands), and no runtime dependencies. The PDF tier
+same command surface (17 subcommands), and no runtime dependencies. The PDF tier
 links MuPDF under AGPL-or-commercial — the same position PyMuPDF already gave
 the project, since that was its single runtime dependency. The Python tree and
 the diff tools that proved the port live on in `docs/python-rust-parity.md` as
@@ -607,7 +642,7 @@ KoiosBase/
       studio.rs     brief / mindmap exports
       main.rs       command-line interface
     examples/       runnable snippets quoted in this README
-    tests/          19 integration suites (136 tests)
+    tests/          20 integration suites (143 tests)
   docs/             design baseline, i18n layout, parity audit
   i18n/             this README in Chinese and Japanese
 ```

@@ -35,7 +35,7 @@ rename to `check-claim` and silently break scripts ported from Python.
 ## Tests
 
 ```bash
-cargo test --release --manifest-path Cargo.toml    # 136 tests, 19 suites
+cargo test --release --manifest-path Cargo.toml    # 143 tests, 20 suites
 cargo fmt  --manifest-path Cargo.toml --all -- --check
 cargo clippy --release --manifest-path Cargo.toml -- -D warnings
 ```

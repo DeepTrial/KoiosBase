@@ -171,7 +171,17 @@ enum Cmd {
         groups: Option<String>,
     },
     /// run the MCP server over stdio (§11)
-    Mcp,
+    Mcp {
+        /// register this binary with an agent host instead of serving
+        #[arg(long, value_name = "HOST")]
+        install: Option<String>,
+        /// remove the registration
+        #[arg(long)]
+        uninstall: bool,
+        /// claude-code | codex (default: auto-detect)
+        #[arg(long)]
+        host: Option<String>,
+    },
     /// show or scaffold the model config (`koios.toml`)
     Config {
         #[arg(short = 'p', long = "path", default_value = ".")]
@@ -771,8 +781,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-        Cmd::Mcp => {
-            mcp::serve()?;
+        Cmd::Mcp {
+            install,
+            uninstall,
+            host,
+        } => {
+            if install.is_some() || uninstall {
+                mcp::install(install.as_deref(), uninstall, host.as_deref())?;
+            } else {
+                mcp::serve()?;
+            }
         }
         Cmd::Config { path, init } => cmd_config(&path, init)?,
         Cmd::Answer {
