@@ -129,14 +129,14 @@ pub fn get_block(conn: &Connection, id: &str) -> Option<Ev> {
     .ok()
 }
 
-/// Channel dispatch (retrieve_channel, channels.py) + `_to_blocks`.
+/// Channel dispatch — `groups` carries the caller's principal.
 ///
 /// Two filters are applied here and nowhere else, both before context assembly:
 ///   * ACL (§9.2)    — a block the principal cannot see must never shape an answer
 ///   * state (§8.2)  — superseded/retracted blocks are excluded from recall
+///
 /// Skipping either one is how Python v0.1 leaked restricted docs to anonymous
 /// callers, so both stay on the hot path even though they cost a query.
-/// Channel dispatch — `groups` carries the caller's principal.
 ///
 /// It previously hardcoded `filter_blocks(..., None)`, so EVERY caller
 /// (studio, MCP, answer write-back) silently retrieved as anonymous and an
@@ -307,6 +307,10 @@ fn generate(
     lines.join("\n")
 }
 
+/// A generator: receives `(question, assembled_context)` and returns the answer.
+/// Aliased so the callable's signature reads as a contract rather than noise.
+pub type LlmFn = dyn Fn(&str, &str) -> Result<String, String>;
+
 pub struct QueryResult {
     pub answer: String,
     pub evidence: Vec<Ev>,
@@ -342,7 +346,7 @@ pub fn full_query_with(
     question: &str,
     top: usize,
     groups: Option<&[String]>,
-    llm: Option<&dyn Fn(&str, &str) -> Result<String, String>>,
+    llm: Option<&LlmFn>,
 ) -> QueryResult {
     let mut blocks = retrieve_channel(conn, question, top, groups);
     let mut verdict = grade(question, &blocks);
@@ -390,8 +394,7 @@ pub fn full_query_with(
             }
         }
         if !s.is_empty() {
-            let arr: Vec<serde_json::Value> =
-                s.iter().map(|p| serde_json::json!(p)).collect();
+            let arr: Vec<serde_json::Value> = s.iter().map(|p| serde_json::json!(p)).collect();
             trace["stale_pages"] = serde_json::json!(arr);
         }
         s

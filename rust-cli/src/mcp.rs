@@ -133,6 +133,22 @@ fn as_str(args: &Value, k: &str) -> Result<String, String> {
 
 /// Python returns `dict(row)` from `SELECT * FROM blocks`, i.e. every column.
 /// Matching that exactly keeps MCP payloads interchangeable between shells.
+/// One row of `SELECT * FROM blocks`, in column order. Aliased because the
+/// eleven-field tuple is unreadable inline and trips clippy's complexity lint.
+type BlockRow = (
+    String,
+    String,
+    Option<String>,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    i64,
+    String,
+);
+
 fn blocks_to_json(conn: &Connection, blocks: &[Ev]) -> Vec<Value> {
     blocks
         .iter()
@@ -140,8 +156,7 @@ fn blocks_to_json(conn: &Connection, blocks: &[Ev]) -> Vec<Value> {
             let mut stmt = conn
                 .prepare("SELECT id,doc_path,section_id,type,breadcrumb,raw,hash,page_range,meta,ordinal,layer FROM blocks WHERE id=?")
                 .ok()?;
-            let row: (String, String, Option<String>, String, String, String, String,
-                      Option<String>, Option<String>, i64, String) = stmt
+            let row: BlockRow = stmt
                 .query_row(rusqlite::params![&b.id], |r| {
                     Ok((
                         r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?,

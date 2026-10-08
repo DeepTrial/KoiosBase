@@ -108,17 +108,14 @@ pub fn fts_search(
             // require >=2 distinct query characters in the raw text, or a single
             // ubiquitous character defeats the refusal contract.
             let need = std::cmp::min(2, chars.len());
-            rows = rows
-                .into_iter()
-                .filter(|(id, _)| {
-                    let raw: String = conn
-                        .query_row("SELECT raw FROM blocks WHERE id=?", params![id], |r| {
-                            r.get(0)
-                        })
-                        .unwrap_or_default();
-                    chars.iter().filter(|c| raw.contains(c.as_str())).count() >= need
-                })
-                .collect();
+            rows.retain(|(id, _)| {
+                let raw: String = conn
+                    .query_row("SELECT raw FROM blocks WHERE id=?", params![id], |r| {
+                        r.get(0)
+                    })
+                    .unwrap_or_default();
+                chars.iter().filter(|c| raw.contains(c.as_str())).count() >= need
+            });
         }
         if !rows.is_empty() {
             return Ok(rows);
@@ -192,7 +189,11 @@ pub fn build_page_confidence(conn: &Connection) -> HashMap<String, String> {
             .and_then(|fm| {
                 serde_json::from_str::<serde_json::Value>(&fm)
                     .ok()
-                    .and_then(|v| v.get("confidence").and_then(|x| x.as_str()).map(str::to_string))
+                    .and_then(|v| {
+                        v.get("confidence")
+                            .and_then(|x| x.as_str())
+                            .map(str::to_string)
+                    })
                     .or_else(|| frontmatter_confidence(&fm))
             })
             .unwrap_or_else(|| "draft".to_string());
@@ -232,7 +233,10 @@ pub fn load_graph_weighted(
     })?;
     let mut adj: HashMap<String, Vec<(String, f64)>> = HashMap::new();
     for (src, dst, w) in rows.flatten() {
-        let conf = page_confidence.get(&src).map(|s| s.as_str()).unwrap_or("draft");
+        let conf = page_confidence
+            .get(&src)
+            .map(|s| s.as_str())
+            .unwrap_or("draft");
         let w = w * crate::compile::edge_weight(conf);
         adj.entry(src).or_default().push((dst, w));
     }
@@ -454,11 +458,9 @@ pub fn full_corpus(conn: &Connection, max_chars: usize) -> rusqlite::Result<Vec<
 /// Total characters across every block — the channel ④ threshold input
 /// (exposed so callers can check the budget without requesting the ids).
 pub fn corpus_size(conn: &Connection) -> rusqlite::Result<usize> {
-    let n: i64 = conn.query_row(
-        "SELECT COALESCE(SUM(LENGTH(raw)),0) FROM blocks",
-        [],
-        |r| r.get(0),
-    )?;
+    let n: i64 = conn.query_row("SELECT COALESCE(SUM(LENGTH(raw)),0) FROM blocks", [], |r| {
+        r.get(0)
+    })?;
     Ok(n as usize)
 }
 
@@ -474,11 +476,10 @@ pub fn score_section(summary: &str, title: &str, qterms: &[String]) -> f64 {
         .split_whitespace()
         .map(str::to_string)
         .collect();
-    let hay: std::collections::HashSet<String> =
-        cjk_pad(&format!("{title} {summary}"))
-            .split_whitespace()
-            .map(str::to_string)
-            .collect();
+    let hay: std::collections::HashSet<String> = cjk_pad(&format!("{title} {summary}"))
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
     if hay.is_empty() || padded_q.is_empty() {
         return 0.0;
     }

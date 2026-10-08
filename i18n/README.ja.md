@@ -16,6 +16,11 @@ $ koios search "revenue" -p myvault
     2024 Annual Report > Financials > Revenue
     ACME Corp revenue in 2024 was 3.2 billion yuan, up 12 percent.
 [1] sources/report.md#2024 Annual Report/覆盖章节/1
+    2024 Annual Report > 2024 Annual Report > 覆盖章节
+    - Financials (`report.md#Financials`) - Revenue (`report.md#Financials/Revenue`)
+[2] sources/report.md#2024 Annual Report/导读摘要/1
+    2024 Annual Report > 2024 Annual Report > 导读摘要
+    ACME Corp revenue in 2024 was 3. 2 billion yuan, up 12 percent.
 ```
 
 すべてのヒットは自分のブロックアドレスと完全なパンくずリストを伴うため、
@@ -91,16 +96,10 @@ flowchart TD
 
 ## インストール
 
-### 選択肢 A — pip（任意の OS、Python 3.10+ が必要）
+KoiosBase は単一の Rust バイナリで、**実行時依存なし**——Python もインタプリタも
+PyMuPDF も不要。SQLite は `rusqlite` の bundled feature で静的に組み込まれる。
 
-```bash
-pip install -e ".[test]"     # editable, from a clone
-```
-
-SQLite の FTS5 は CPython に同梱されているため、他にインストールするものは
-ありません。
-
-### 選択肢 B — ビルド済みバイナリ（Python 不要）
+### 選択肢 A — ビルド済みバイナリ
 
 各 [リリース](https://github.com/DeepTrial/KoiosBase/releases) には二つの
 バイナリが同梱されています：
@@ -116,13 +115,28 @@ chmod +x koios-linux-x86_64
 ./koios-linux-x86_64 --help
 ```
 
-### 検証
+### 選択肢 B — ソースからビルド
 
 ```bash
-koios init demo && koios index demo && koios lint demo
-# initialized KoiosBase vault at demo
-# indexed 0 blocks from demo       <- empty vault, correct
-# ---- lint: 0 finding(s)
+git clone https://github.com/DeepTrial/KoiosBase && cd KoiosBase
+cargo build --release --manifest-path rust-cli/Cargo.toml
+./rust-cli/target/release/koios --help
+```
+
+`mupdf-sys` は MuPDF をソースからビルドするため、bindgen 用に libclang が
+必要：`sudo apt-get install clang libclang-dev`（Debian/Ubuntu）。
+
+### 検証
+
+```console
+$ koios init demo && koios index demo && koios lint demo
+initialized KoiosBase vault at demo
+indexed 0 blocks from demo
+---- lint: 0 finding(s)
+```
+
+```bash
+cargo test --release --manifest-path rust-cli/Cargo.toml   # 122 tests, green
 ```
 
 ---
@@ -206,7 +220,7 @@ koios compile -p myvault
 koios studio brief  -p myvault -t revenue   --groups finance-team
 # wrote myvault/wiki/synthesis/brief-revenue.md
 koios studio mindmap -p myvault -t Financials --groups finance-team
-# wrote myvault/wiki/synthesis/mindmap-Financials.md
+# wrote myvault/wiki/synthesis/mindmap-financials.md
 ```
 
 フラグに注意：`-t/--topic` が主題を設定し、動詞が先に来ます。これらは
@@ -234,22 +248,25 @@ stdio 経由で JSON-RPC 2.0 を話し、`koios_search`、`koios_ask`、
 散文を生成させたい場合は、呼び出し可能オブジェクトを渡します。これは組み立て済みの
 コンテキストを受け取り、テキストを返します：
 
-```python
-from koiosbase.index.schema import connect
-from koiosbase.query.pipeline import query
+```rust
+// Rust ライブラリ API —— 呼び出し可能オブジェクトは普通のクロージャ。
+use koios::pipeline::{full_query_with, QueryResult};
+use koios::connect;
 
-def my_llm(question: str, context: str) -> str:
-    return call_your_model(context)      # OpenAI, Anthropic, local, anything
-
-conn = connect("myvault/.index")
-result = query(conn, "revenue", top=8, principal_groups={"finance-team"}, llm=my_llm)
-print(result.answer)
-print(result.violations)                 # {} when the contracts hold
+let conn = connect(std::path::Path::new("myvault")).unwrap();
+let my_llm = |question: &str, context: &str| -> Result<String, String> {
+    Ok(call_your_model(context))     // OpenAI、Anthropic、ローカル、何でも
+};
+let result: QueryResult =
+    full_query_with(&conn, "revenue", 8, Some(&["finance-team".into()]), Some(&my_llm));
+println!("{}", result.answer);
+println!("{:?}", result.violations);   // 契約が守られていれば空
 ```
 
-呼び出し可能オブジェクトの契約は `llm(question, context) -> str` で、コードベース
-のどこにもプロバイダーアダプターや API キー設定はありません——呼び出し可能
-オブジェクトはあなたが渡すので、特定のベンダーが埋め込まれることはありません。
+呼び出し可能オブジェクトの契約は `Fn(&str, &str) -> Result<String, String>`
+（`koios::pipeline::LlmFn` の別名）で、コードベースのどこにもプロバイダー
+アダプターや API キー設定はありません——呼び出し可能オブジェクトはあなたが
+渡すので、特定のベンダーが埋め込まれることはありません。
 
 ### ガードレールは依然として働く
 
@@ -257,15 +274,26 @@ print(result.violations)                 # {} when the contracts hold
 モデルの出力にも適用されます**。KoiosBase に LLM を渡しても、それが捏造できる
 ようにはなりません。
 
-```python
+```rust
 result.violations
-# {}                                              cited its sources
-# {'citation': '0/1 sentences cited'}             model omitted citations
-# {'refusal': 'answered without evidence'}        answered with zero blocks
+// 空の HashMap            cited its sources
+// {"citation": "0/5 sentences cited"}   呼び出し可能オブジェクトが引用を省略
+// {"refusal": "answered without evidence"}   証拠ゼロで回答した
+```
+
+`examples/readme_llm_snippet.rs` の実出力（単一文書の vault）：
+
+```console
+$ cargo run --release --manifest-path rust-cli/Cargo.toml \
+    --example readme_llm_snippet -- myvault
+[sources/report.md#Report/导读摘要/1] (Report > Report > 导读摘要)
+revenue in 2024 was 3. 2 billion.
+
+{"citation": "0/5 sentences cited"}
 ```
 
 検索は権威であり続けます——制限付き文書はモデルが何を見る前に既に除外されている
-ため、`llm()` は与えられていないものを漏らすことができません。
+ため、`my_llm` は与えられていないものを漏らすことができません。
 
 ### アップグレードが解決するもの
 
@@ -293,10 +321,14 @@ CI で実行できるほど軽量です。
 
 事実が間違っていると分かったら、編集でごまかさず**撤回**してください：
 
-```bash
-koios retract -p myvault -b "report.md#Financials/Revenue/1" -r "wrong figure"
-# retracted report.md#Financials/Revenue/1; affected pages: 2
-# ['wiki/entities/acme-corp.md', 'wiki/entities/acme.md']
+実出力：
+
+```console
+$ koios retract -p myvault -b "report.md#Financials/Revenue/1" --reason "wrong figure"
+retracted report.md#Financials/Revenue/1; affected pages: 2
+["wiki/entities/acme-corp.md", "wiki/entities/acme.md"]
+$ cd myvault && koios promote --verified "wiki/entities/acme.md"
+medium
 ```
 
 これは三つのことを行います：そのブロックが質問に答えなくなる（すべての検索経路
@@ -312,17 +344,17 @@ koios retract -p myvault -b "report.md#Financials/Revenue/1" -r "wrong figure"
 
 ```bash
 cd myvault          # promote takes a filesystem path, not a vault-relative one
-koios promote --verified "wiki/entities/acme.md"   # promoted: draft -> medium
-koios promote --human    "wiki/entities/acme.md"   # promoted: medium -> high
+koios promote --verified        "wiki/entities/acme.md"   # promoted: draft -> medium
+koios promote --human-confirmed "wiki/entities/acme.md"   # promoted: medium -> high
 ```
 
 `draft → medium → high`。
 
 他のすべてのコマンドと異なり、`promote` は**カレントディレクトリからのファイル
 システムパス**を取ります——`-p` フラグがないため、まず vault に `cd` してくだ
-さい。フラグなしの場合は `not promoted (still draft): needs --verified or
---human` を出力し、終了コード 1 で終わります。昇格は再コンパイル後も保持され
-ます。
+さい。結果の階層（`draft`/`medium`/`high`）を出力し、`--verified` も
+`--human-confirmed` も指定しない場合は現在の階層をそのまま報告します。
+昇格は再コンパイル後も保持されます。
 
 ### ハウスキーピング
 
@@ -369,23 +401,33 @@ VLM tier が重要なのは、OCR を使わないパイプラインがスキャ�
 
 **PNG バイト**（パスではなく）を受け取る呼び出し可能オブジェクトとして渡します：
 
-```python
-from koiosbase.parsers.pdf import parse_pdf
+```rust
+// Rust ライブラリ API —— 呼び出し可能オブジェクトはパスではなく PNG バイトを受け取る。
+use koios::pdf::extract_pages;
 
-def my_vlm(path: str, image_bytes: bytes) -> str:
-    return vision_model_transcribe(image_bytes)
+let my_vlm = |_path: &str, png: &[u8]| -> Result<String, String> {
+    Ok(vision_model_transcribe(png))
+};
+let pages = extract_pages(std::path::Path::new("scan.pdf"), Some(&my_vlm));
+```
 
-doc = parse_pdf("scan.pdf", vlm=my_vlm)
+実出力（2 ページの PDF。CPU 層がテキストを抽出できるため VLM スタブは呼ばれ
+ません——これこそが 2 層 tier 設計の想定どおりの挙動です）：
+
+```console
+$ cargo run --release --manifest-path rust-cli/Cargo.toml \
+    --example readme_vlm_snippet -- scan.pdf
+2 page(s) extracted
 ```
 
 この層は誇張しやすいため、正直な注意点を 2 つ挙げます：
 
-- **VLM tier は現時点ではライブラリ専用です。** `parse_pdf(vlm=...)` は呼び出し
-  可能オブジェクトの引数にすぎず、CLI フラグはなく `ingest/` 内にも呼び出し箇所は
-  ありません——`koios index` に組み込むには設定ではなくコードが必要です。これは
-  オンにできる機能ではなく、フックです。
-- **ページのラスタライズに `pymupdf` が必要です。** なければこの層は静かに
-  スキップされます。
+- **VLM tier は現時点ではライブラリ専用です。** `extract_pages(path, vlm)` は
+  呼び出し可能オブジェクトの引数にすぎず、CLI フラグはなく `ingest/` 内にも
+  呼び出し箇所はありません——`koios index` に組み込むには設定ではなくコードが
+  必要です。これはオンにできる機能ではなく、フックです。
+- **ラスタライズは同梱の MuPDF が行います。** PDF 読み取りが既に使っている
+  依存と同じなので、追加のインストールは不要です。
 
 PDF 以外のマルチモーダル入力——画像、グラフ、スクリーンショットをファーストクラスの
 ソースとして扱うこと——は未実装です。KoiosBase は Markdown ネイティブであり（P1）、
@@ -419,20 +461,26 @@ PDF 以外のマルチモーダル入力——画像、グラフ、スクリー�
 
 ---
 
-## 二つのシェル、一つの vault
+## 一つのシェル
 
-KoiosBase は Python 実装と Rust 実装を同梱しています。どちらも**同じ** vault
-形式を読み書きするため、どちらでインデックスしどちらで検索しても構いません。
+KoiosBase は Python の参照実装として始まり、Rust に移植されました。Rust バイナリ
+が今やリポジトリで**唯一**のシェルです：同じ vault 形式、同じコマンド面（21 の
+サブコマンド）、そして実行時依存なし。PDF 層は MuPDF を AGPL または商用ライセンス
+でリンクします —— これは PyMuPDF がかつて唯一の実行時依存として本プロジェクトに
+既に与えていた立場と同じです。移植を証明した Python コードと差分ツールは、第二の
+ランタイムではなく監査証跡として `docs/python-rust-parity.md` に残っています。
 
-Python がリファレンス実装です。Rust バイナリも同じコマンド面を網羅し、共有
-フィクスチャ上で Python の出力と照合されています（ブロック ID、パンくずリスト、
-生成ページ、MCP 応答をバイト単位で比較）。
+上の parity の主張はいずれも、空でないフィクスチャ上で二つの実装を突き合わせて
+差分を取ることで導かれたものです —— 手法と再現用コマンドは
+`docs/python-rust-parity.md` に記載されています。
 
-```bash
-# Python CLI, full surface
-koios eval -p myvault              # eval baseline
-koios eval -p myvault --strict     # count known semantic gaps as failures
-koios checkclaim "revenue 3.2bn" "revenue was 3.2 billion yuan"
+`tests/channels_eval.rs` が使うフィクスチャでの実出力：
+
+```console
+$ koios eval -p myvault
+total=5 recall@1=0.600 refusal_acc=1.000 citation_cov=0.348 needs_llm=0
+$ koios checkclaim "revenue 3.2bn" "revenue was 3.2 billion yuan"
+entailed
 ```
 
 ---
@@ -459,23 +507,26 @@ koios checkclaim "revenue 3.2bn" "revenue was 3.2 billion yuan"
 
 ## 構成
 
-```
-koiosbase/
-  core/        Block / Section / Document model
-  parsers/     Markdown + PDF adapters
-  ingest/      raw + wiki -> derived index
-  index/       SQLite schema (tree, blocks, FTS, links)
-  retrieval/   BM25, RRF fusion, personalized PageRank
-  generation/  citation + refusal contracts, judge
-  compile/     entity + source pages, quality gate
-  state/       knowledge state machine and cascade
-  lint/        L1 gardener
-  query/       retrieve -> assemble -> generate
-  security/    ACL / multi-tenancy
-  mcp/         JSON-RPC over stdio
-  studio/      brief / mindmap exports
-  cli.py       command-line interface
-rust-cli/      the Rust shell (same vault format)
+```text
+KoiosBase/
+  rust-cli/
+    src/
+      lib.rs        block モデル、パーサー、インデクサ、connect()
+      ingest.rs     raw + wiki -> 派生インデックス
+      pdf.rs        MuPDF ベースの PDF アダプタ（CPU + VLM の 2 層）
+      retrieval.rs  BM25、RRF 融合、パーソナライズ PageRank
+      pipeline.rs   retrieve -> assemble -> generate、契約
+      compile.rs    エンティティ + sources ページ、品質ゲート、synthesis
+      state.rs      知識状態マシンとカスケード
+      lint.rs       L1 gardener
+      acl.rs        ACL / マルチテナント
+      mcp.rs        JSON-RPC over stdio
+      studio.rs     brief / mindmap 書き出し
+      main.rs       コマンドラインインターフェース
+    examples/       本 README で引用している実行可能なスニペット
+    tests/          Python 参照実装に対する 17 の parity スイート
+  docs/             設計baseline、i18n 配置、parity 監査
+  i18n/             本 README の中国語版と日本語版
 ```
 
 ## ドキュメント

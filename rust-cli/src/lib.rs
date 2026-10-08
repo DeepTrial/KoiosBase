@@ -243,8 +243,7 @@ pub fn index_file(
                 || s.starts_with("- ")
                 || s.starts_with("* ")
                 || s.starts_with("+ ")
-                || (s.chars().next().is_some_and(|c| c.is_ascii_digit())
-                    && s.contains(". "))
+                || (s.chars().next().is_some_and(|c| c.is_ascii_digit()) && s.contains(". "))
         }) {
             // Python's split_blocks() tracks a list until the run breaks, so a
             // list flushes with type "list" regardless of length. Rust only had
@@ -430,10 +429,15 @@ pub fn json_python_dumps(v: &serde_json::Value) -> String {
         serde_json::Value::Null => "null".to_string(),
         serde_json::Value::Bool(b) => if *b { "true" } else { "false" }.to_string(),
         serde_json::Value::Number(n) => n.to_string(),
-        serde_json::Value::String(s) => serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string()),
+        serde_json::Value::String(s) => {
+            serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string())
+        }
         serde_json::Value::Array(a) => format!(
             "[{}]",
-            a.iter().map(json_python_dumps).collect::<Vec<_>>().join(", ")
+            a.iter()
+                .map(json_python_dumps)
+                .collect::<Vec<_>>()
+                .join(", ")
         ),
         serde_json::Value::Object(o) => format!(
             "{{{}}}",
@@ -460,13 +464,15 @@ pub fn fm_title(fm: &str) -> Option<String> {
     None
 }
 
+/// `(rel_path, title, blocks)` for one raw document, as handed to `compile`.
+pub type RawDoc = (String, String, Vec<pipeline::Ev>);
+/// Own document -> its `(title, section_id)` list, in document order.
+pub type SectionsByDoc = HashMap<String, Vec<(String, String)>>;
+
 pub fn collect_raw_docs(
     conn: &rusqlite::Connection,
     vault: &Path,
-) -> rusqlite::Result<(
-    Vec<(String, String, Vec<pipeline::Ev>)>,
-    HashMap<String, Vec<(String, String)>>,
-)> {
+) -> rusqlite::Result<(Vec<RawDoc>, SectionsByDoc)> {
     let mut docs: Vec<(String, String, Vec<pipeline::Ev>)> = Vec::new();
     let mut sections_by_doc: HashMap<String, Vec<(String, String)>> = HashMap::new();
     let mut rels: Vec<String> = Vec::new();
