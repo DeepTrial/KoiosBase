@@ -464,7 +464,7 @@ Seven principles constrain every mechanism:
 
 KoiosBase began as a Python reference implementation and was ported to Rust.
 The Rust binary is now the **only** shell in the repository: same vault format,
-same command surface (21 subcommands), and no runtime dependencies. The PDF tier
+same command surface (16 subcommands), and no runtime dependencies. The PDF tier
 links MuPDF under AGPL-or-commercial — the same position PyMuPDF already gave
 the project, since that was its single runtime dependency. The Python tree and
 the diff tools that proved the port live on in `docs/python-rust-parity.md` as
@@ -523,14 +523,15 @@ KoiosBase/
       studio.rs     brief / mindmap exports
       main.rs       command-line interface
     examples/       runnable snippets quoted in this README
-    tests/          17 parity suites against the Python reference
+    tests/          17 integration suites (122 tests)
   docs/             design baseline, i18n layout, parity audit
   i18n/             this README in Chinese and Japanese
 ```
 
 ## Docs
 
-- `docs/KoiosBase设计文档v1.3.md` — full design baseline (Chinese)
+- `docs/KoiosBase设计文档v1.3.md` — design baseline (Chinese); the v1.4 header
+  notes where the shipped Rust binary deviates from it
 - `docs/i18n.md` — translation layout (see `i18n/`)
 - `AGENTS.md` — the contract written into every vault
 

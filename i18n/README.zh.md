@@ -438,7 +438,7 @@ Markdown 原生的（P1）；视觉只作为文本抽取失败时的恢复路径
 ## 只有一个 shell
 
 KoiosBase 起初是一份 Python 参考实现，后被移植到 Rust。Rust 二进制如今是仓库里
-**唯一**的 shell：相同的 vault 格式、相同的命令面（21 个子命令），且无运行时
+**唯一**的 shell：相同的 vault 格式、相同的命令面（16 个子命令），且无运行时
 依赖。PDF 层以 AGPL 或商业授权链接 MuPDF —— 这与 PyMuPDF 早已给本项目带来的
 处境相同，因为那曾是它唯一的运行时依赖。支撑这次移植的 Python 代码与差分工具
 作为审计轨迹保留在 `docs/python-rust-parity.md` 中，而不是作为第二个运行时。
@@ -493,14 +493,14 @@ KoiosBase/
       studio.rs     brief / mindmap 导出
       main.rs       命令行接口
     examples/       本 README 引用的可运行片段
-    tests/          对标 Python 参考实现的 17 个 parity 套件
+    tests/          17 个集成测试套件（122 个用例）
   docs/             设计基线、i18n 布局、parity 审计
   i18n/             本 README 的中文与日文版
 ```
 
 ## 文档
 
-- `docs/KoiosBase设计文档v1.3.md` — 完整设计基线（中文）
+- `docs/KoiosBase设计文档v1.3.md` — 完整设计基线（中文）；v1.4 头部注明实装与设计的偏差
 - `docs/i18n.md` — 翻译组织方式（见 `i18n/`）
 - `AGENTS.md` — 写入每个 vault 的维护契约
 
