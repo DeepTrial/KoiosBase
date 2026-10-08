@@ -76,12 +76,37 @@ pub fn extract_pages(path: &Path, vlm: Option<&VlmFn>) -> Vec<String> {
     cpu_pages
 }
 
+/// Open a PDF, portable across targets.
+///
+/// `mupdf::Document::open` takes `AsRef<FilePath>`, and `FilePath` is `str` on
+/// Windows but `[u8]` elsewhere — so passing a `&Path` compiles on Linux and
+/// fails to compile on Windows. That stayed invisible while only Linux was
+/// built, and surfaced the moment a Windows target was added.
+///
+/// Routing through the platform string type keeps one call site working on both
+/// instead of forking the PDF code per target.
+fn open_document(path: &std::path::Path) -> Result<mupdf::Document, String> {
+    #[cfg(windows)]
+    {
+        let s = path
+            .to_str()
+            .ok_or_else(|| format!("non-UTF-8 path: {}", path.display()))?;
+        mupdf::Document::open(s).map_err(|e| e.to_string())
+    }
+    #[cfg(not(windows))]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let b = path.as_os_str().as_bytes();
+        mupdf::Document::open(b).map_err(|e| e.to_string())
+    }
+}
+
 /// Render each page to PNG bytes with MuPDF
 fn render_pages_png(path: &Path) -> Vec<Vec<u8>> {
-    let doc = match mupdf::Document::open(path) {
+    let doc = match open_document(path) {
         Ok(d) => d,
         Err(e) => {
-            log_skip(&e.to_string());
+            log_skip(&e);
             return Vec::new();
         }
     };
@@ -118,10 +143,10 @@ fn extract_pages_cpu_inner(path: &Path) -> Vec<String> {
     // walks pages individually exactly like PyMuPDF's
     // `for page in doc: page.get_text()`; a whole-document blob would stamp
     // every citation with the wrong page.
-    let doc = match mupdf::Document::open(path) {
+    let doc = match open_document(path) {
         Ok(d) => d,
         Err(e) => {
-            log_skip(&e.to_string());
+            log_skip(&e);
             return Vec::new();
         }
     };
