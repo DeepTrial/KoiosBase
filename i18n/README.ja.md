@@ -156,6 +156,7 @@ myvault/
     sources/ answers/ entities/ concepts/ synthesis/
   .index/            build artifact   <- never commit
   AGENTS.md          the maintenance contract
+  koios.toml         optional model config（「LLM を接続する」を参照）
 ```
 
 ### 2. ドキュメントを追加する
@@ -245,28 +246,56 @@ stdio 経由で JSON-RPC 2.0 を話し、`koios_search`、`koios_ask`、
 引用付きの上位 3 ブロックを返し、決して捏造しません。これは意図的なものです。
 既定の動作は設定なしでも信頼できなければなりません。
 
-散文を生成させたい場合は、`koios query` を任意のコマンドに向けてください。
-組み立て済みのコンテキストを stdin から受け取り、答えを stdout に書きます。
-質問は `$KOIOS_QUESTION` で渡されます。
+### 一度設定する —— `<vault>/koios.toml`
 
 ```bash
-koios query "revenue" -p myvault --llm-cmd 'my-model-wrapper'
-KOIOS_LLM_CMD='my-model-wrapper' koios query "revenue" -p myvault
+koios config --init -p myvault     # 雛形を書き出す
+$EDITOR myvault/koios.toml
 ```
 
-どんなコマンドでも構いません——プロバイダへの `curl`、ローカルの llama.cpp、
-Python のワンライナー。KoiosBase は API キーを**一切見ません**：コマンドが自分で
-環境を読み、vault には何も書き込みません。
+```toml
+[model]
+# OpenAI 互換のエンドポイントなら何でも：OpenAI、ローカル llama.cpp / vLLM /
+# Ollama、社内プロキシ
+base_url = "https://api.openai.com/v1"
+model = "gpt-4o-mini"
+api_key_env = "OPENAI_API_KEY"      # 環境変数の「名前」。キー本体ではない
+
+# 任意：スキャンされた PDF ページ（§5.1 視覚層）
+# [model.vision]
+# model = "gpt-4o"
+
+# 追加パラメータはそのままプロバイダへ渡される
+temperature = 0.2
+
+[retrieval]
+top = 8
+```
+
+**キーはファイルに書かない。** `api_key_env` は変数名だけを指定し、値は呼び出し
+時に読まれる——コミットされる vault が認証情報の漏えい源になってはならない。
+
+`koios config` は実際に何が接続されているか（キーが設定済みかも）を表示します。
+「モデルは接続されているか？」はこれなしには答えられません——打ち間違いがあると
+決定的生成器のままになり、それは「接続済みだが証拠が見つからなかった」場合と
+見分けがつかない。
 
 ```console
-$ koios query "revenue" -p myvault \
-    --llm-cmd 'printf "%s" "Revenue was 3.2 billion yuan [[raw/report.md#Financials/Revenue/1]]"'
-verdict: enough  hits: 4  escalated: false
-Revenue was 3.2 billion yuan [[raw/report.md#Financials/Revenue/1]]
+$ koios config -p myvault
+config: myvault/koios.toml
+  chat: gpt-4o-mini @ https://api.openai.com/v1
+  api key: $OPENAI_API_KEY (set)
+  vision: (none) — scanned pages are skipped
+  retrieval.top: 8
 ```
 
-コストは CPU と、あなたが渡したモデルだけです。コードベースにはプロバイダ
-アダプターも API キー設定も HTTP クライアントもありません——crate は合計 6 個。
+モデルを使える全コマンドがこのファイルを読みます：`query`、`mcp`、そして
+`index`（視覚層）。それ以外は何も変わらない——ファイルが無い、あるいは
+`[model]` セクションが無ければ、以前とまったく同じ動作になる。
+
+コードベースにベンダー SDK はありません。`ureq` は小さな HTTP クライアントで、
+Wire 形式は OpenAI の chat 形状（ローカルサーバーもこれを話す）。ベンダーは
+埋め込まれていません。HTTP ですらない場合の避難口が `model.command` です。
 
 ### ガードレールは依然として働く
 
@@ -281,30 +310,34 @@ Revenue was 3.2 billion yuan.
 [contracts] citation=0/1 sentences cited
 ```
 
-コマンドの失敗は捏造された回答ではなくエラーになります：
+モデルの失敗は捏造された回答ではなくエラーになります——キーが未設定の場合も：
 
 ```console
-$ koios query "revenue" -p myvault --llm-cmd 'exit 1'
+$ koios query "revenue" -p myvault
 verdict: enough  hits: 4  escalated: false
-model command exited with exit status: 1
+model request failed: io: Connection refused (os error 111)
+
+$ koios query "revenue" -p myvault       # api_key_env が指す変数が未設定
+verdict: enough  hits: 4  escalated: false
+model config names api_key_env = "OPENAI_API_KEY" but that variable is not set
 ```
 
 ### MCP 経由
 
-`koios mcp` は同じ環境変数を読むので、サーバーを起動したエージェントが環境経由で
-モデルを制御できます：
+`koios mcp` は同じファイルを読むので、サーバーを起動したエージェントは CLI と
+同じモデルを得ます：
 
 ```bash
-KOIOS_LLM_CMD='my-model-wrapper' koios mcp
+koios mcp
 ```
 
 ### 視覚層（スキャンされた PDF）
 
-テキストを抽出できないページのための、同じ仕組みです。コマンドは stdin から
-**PNG バイト**を受け取り、文字起こしを書き出します：
+テキストを抽出できないページのために、同じファイルへもう一段追記します：
 
-```bash
-KOIOS_VLM_CMD='my-vision-wrapper' koios index myvault
+```toml
+[model.vision]
+model = "gpt-4o"
 ```
 
 設定しなければ、スキャンされたページは何も貢献しません——黙って。それが意図された
@@ -439,7 +472,7 @@ VLM tier が重要なのは、OCR を使わないパイプラインがスキャ�
 見えなくなり、しかもエラーは出ません。ページ画像を視覚モデルに渡せばそれを
 回復でき、回復されたテキストは CPU 層と同じページ単位の引用を伴います。
 
-コマンドラインでは `KOIOS_VLM_CMD` です（「LLM を接続する」を参照）。ライブラリの
+`koios.toml` にもう一段追記するだけです（「LLM を接続する」を参照）。ライブラリの
 呼び出し可能オブジェクトとして渡す場合は、**PNG バイト**（パスではなく）を受け取ります：
 
 ```rust
@@ -463,10 +496,9 @@ $ cargo run --release --manifest-path rust-cli/Cargo.toml \
 
 この層は誇張しやすいため、正直な注意点を 2 つ挙げます：
 
-- **視覚コマンド未設定のスキャンページは何も貢献しません**——黙って。これが意図
-  された既定動作です。誰も読んでいないページのテキストを捏造するほうが、索引
-  しないより悪い。この層に CLI フラグはなく、`koios index` は環境から
-  `KOIOS_VLM_CMD` を読みます。
+- **`[model.vision]` 未設定のスキャンページは何も貢献しません**——黙って。これが
+  意図された既定動作です。誰も読んでいないページのテキストを捏造するほうが、
+  索引しないより悪い。
 - **ラスタライズは同梱の MuPDF が行います。** PDF 読み取りが既に使っている
   依存と同じなので、追加のインストールは不要です。
 
@@ -568,7 +600,7 @@ KoiosBase/
       studio.rs     brief / mindmap 書き出し
       main.rs       コマンドラインインターフェース
     examples/       本 README で引用している実行可能なスニペット
-    tests/          17 の統合テストスイート（122 ケース）
+    tests/          19 の統合テストスイート（136 ケース）
   docs/             設計baseline、i18n 配置、parity 監査
   i18n/             本 README の中国語版と日本語版
 ```

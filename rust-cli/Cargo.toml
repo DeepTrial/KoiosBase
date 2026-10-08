@@ -32,3 +32,11 @@ serde_json = { version = "1", features = ["preserve_order"] }
 # more copyleft surface. Strip to the PDF core.
 mupdf = { version = "0.8", default-features = false, features = ["base14-fonts"] }
 sha2 = "0.10.9"
+# Model access. ureq is synchronous on purpose: the pipeline blocks on the model
+# call anyway, so an async runtime would add a large dependency tree and buy
+# nothing. rustls rather than the platform TLS so the binary stays portable.
+# No provider SDK — the wire format is the OpenAI chat shape, which local
+# servers (llama.cpp, vLLM, Ollama) also speak.
+ureq = { version = "3", default-features = false, features = ["json", "rustls"] }
+toml = "1.1.7"
+serde = { version = "1.0.229", features = ["derive"] }

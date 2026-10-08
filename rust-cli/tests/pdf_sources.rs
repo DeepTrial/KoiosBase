@@ -103,7 +103,7 @@ fn scanned_detection() {
 fn pdf_blocks_carry_page_provenance() {
     let (v, p) = pdf_vault("prov", "ACME revenue was 32 yuan.");
     let conn = connect(&v).unwrap();
-    let n = koios::index_pdf(&conn, "fin.pdf", &p).unwrap();
+    let n = koios::index_pdf(&conn, "fin.pdf", &p, None).unwrap();
     assert!(n > 0, "pdf must produce blocks");
     let sec: String = conn
         .query_row(
@@ -189,7 +189,7 @@ fn heading_with_body_below_still_becomes_the_breadcrumb() {
 fn frontmatter_marks_parser_and_hash() {
     let (v, p) = pdf_vault("fm", "ACME revenue was 32 yuan.");
     let conn = connect(&v).unwrap();
-    koios::index_pdf(&conn, "fin.pdf", &p).unwrap();
+    koios::index_pdf(&conn, "fin.pdf", &p, None).unwrap();
     let fm: String = conn
         .query_row(
             "SELECT frontmatter FROM documents WHERE path='fin.pdf'",

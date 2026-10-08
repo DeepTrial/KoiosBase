@@ -592,19 +592,23 @@ pub fn index_pdf(
     conn: &Connection,
     doc_path: &str,
     path: &std::path::Path,
+    cfg: Option<&crate::llm::Config>,
 ) -> rusqlite::Result<usize> {
     // Two-tier (§5.1): the CPU tier takes every page it can read; only when a
     // page has no extractable text does the vision tier run, and only if one is
-    // configured. No VLM configured means scanned pages stay invisible rather
-    // than being fabricated — which is the honest default, and the reason the
-    // tier is opt-in.
-    let pages = if let Some(cmd) = crate::llm::vlm_cmd(None) {
-        let f = move |p: &str, png: &[u8]| -> Result<String, String> {
-            crate::llm::transcribe_with(&cmd, p, png)
-        };
-        pdf::extract_pages(path, Some(&f))
-    } else {
-        pdf::extract_pages_cpu(path)
+    // configured. No vision model means scanned pages stay invisible rather
+    // than being fabricated — which is the honest default.
+    let pages = match cfg.filter(|c| crate::llm::has_vision(c)) {
+        // `f` must own the config: `extract_pages` takes `&VlmFn`, and a
+        // closure borrowing a function parameter cannot outlive the call.
+        Some(c) => {
+            let owned = c.clone();
+            let f = move |_p: &str, png: &[u8]| -> Result<String, String> {
+                crate::llm::vision(&owned, png)
+            };
+            pdf::extract_pages(path, Some(&f))
+        }
+        None => pdf::extract_pages_cpu(path),
     };
     let scanned = pdf::looks_scanned(&pages, 40);
     let fm = pdf::pdf_frontmatter(path, scanned);
@@ -743,6 +747,9 @@ pub fn cmd_index(path: &Path) -> rusqlite::Result<()> {
     // failed on a cold vault — generate-before-walk could not see any raw
     // blocks yet, so run 1 counted only raw and run 2 counted raw+derived,
     // making the command look non-idempotent on its very first invocation.
+    // Read the vault's config once, not per file: the vision tier would
+    // otherwise re-parse koios.toml for every scanned page.
+    let cfg = crate::llm::load(path).unwrap_or_default();
     let mut indexed_raw = false;
     for (layer, dir_name) in [("raw", "raw"), ("wiki", "wiki")] {
         if indexed_raw {
@@ -774,7 +781,7 @@ pub fn cmd_index(path: &Path) -> rusqlite::Result<()> {
             // that is long fixed, and its stated reason — "block count grows
             // forever" — does not hold for hash-based ingest.
             let n = if entry.extension().and_then(|x| x.to_str()) == Some("pdf") {
-                index_pdf(&conn, &rel, &entry)?
+                index_pdf(&conn, &rel, &entry, Some(&cfg))?
             } else {
                 let text = fs::read_to_string(&entry).unwrap_or_default();
                 index_file(&conn, &rel, &text, layer)?

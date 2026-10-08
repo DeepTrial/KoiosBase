@@ -218,23 +218,23 @@ fn tool_ask(args: &Value) -> Result<Value, String> {
     let question = as_str(args, "question")?;
     let top = args.get("top").and_then(|v| v.as_u64()).unwrap_or(8) as usize;
     let conn = crate::connect(&vault).map_err(|e| e.to_string())?;
-    // MCP is a long-lived process, so it reads $KOIOS_LLM_CMD rather than a
-    // flag: the client that launched it controls the environment. Unset means
-    // the deterministic generator, exactly as the CLI behaves.
-    let res = match crate::llm::llm_cmd(None) {
-        Some(cmd) => {
-            let f = move |q: &str, ctx: &str| -> Result<String, String> {
-                crate::llm::generate_with(&cmd, q, ctx)
-            };
-            crate::pipeline::full_query_with(
-                &conn,
-                &question,
-                top,
-                groups_of(args).as_deref(),
-                Some(&f),
-            )
-        }
-        None => crate::pipeline::full_query(&conn, &question, top, groups_of(args).as_deref()),
+    // MCP is a long-lived process over one vault; the config file is how it
+    // learns the model, same as every other command.
+    let cfg = crate::llm::load(&vault).unwrap_or_default();
+    let res = if crate::llm::has_chat(&cfg) {
+        let m = cfg.model.clone().unwrap_or_default();
+        let f =
+            move |q: &str, ctx: &str| -> Result<String, String> { crate::llm::chat(&m, q, ctx) };
+        let top = cfg.retrieval.as_ref().and_then(|r| r.top).unwrap_or(top);
+        crate::pipeline::full_query_with(
+            &conn,
+            &question,
+            top,
+            groups_of(args).as_deref(),
+            Some(&f),
+        )
+    } else {
+        crate::pipeline::full_query(&conn, &question, top, groups_of(args).as_deref())
     };
     let mut evidence = res.evidence;
     evidence = crate::acl::filter_blocks(&conn, evidence, groups_of(args).as_deref());

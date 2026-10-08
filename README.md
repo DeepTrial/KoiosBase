@@ -156,6 +156,7 @@ myvault/
     sources/ answers/ entities/ concepts/ synthesis/
   .index/            build artifact   <- never commit
   AGENTS.md          the maintenance contract
+  koios.toml         optional model config (see Connect an LLM)
 ```
 
 ### 2. Add documents
@@ -245,29 +246,58 @@ Out of the box KoiosBase answers from retrieved blocks alone — the built-in
 generator returns the top three blocks with citations and never fabricates. That
 is deliberate: the default must be trustworthy with zero configuration.
 
-### From the CLI — a command, not a config file
-
-Point `koios query` at any command. It receives the assembled context on stdin
-and prints the answer; `$KOIOS_QUESTION` carries the question.
+### Configure it once — `<vault>/koios.toml`
 
 ```bash
-koios query "revenue" -p myvault --llm-cmd 'my-model-wrapper'
-KOIOS_LLM_CMD='my-model-wrapper' koios query "revenue" -p myvault
+koios config --init -p myvault     # writes a starter file
+$EDITOR myvault/koios.toml
 ```
 
-Any command works — `curl` against a provider, a local llama.cpp, a Python
-one-liner. KoiosBase never sees your API key: the command reads your
-environment, and nothing is written to the vault.
+```toml
+[model]
+# Any OpenAI-compatible endpoint: OpenAI, a local llama.cpp / vLLM / Ollama,
+# or a corporate proxy.
+base_url = "https://api.openai.com/v1"
+model = "gpt-4o-mini"
+api_key_env = "OPENAI_API_KEY"      # the NAME of the env var, never the key
+
+# Optional: scanned PDF pages (§5.1 vision tier).
+# [model.vision]
+# model = "gpt-4o"
+
+# Extra parameters go straight through to the provider.
+temperature = 0.2
+
+[retrieval]
+top = 8
+```
+
+**The key is not in the file.** `api_key_env` names an environment variable and
+the value is read at call time — a vault people commit must not become a
+credential leak.
+
+`koios config` shows what is actually wired up, including whether the key is
+set — "is a model connected?" is otherwise unanswerable, since a typo leaves you
+on the deterministic generator and that looks identical to a working setup that
+merely found no evidence:
 
 ```console
-$ koios query "revenue" -p myvault \
-    --llm-cmd 'printf "%s" "Revenue was 3.2 billion yuan [[raw/report.md#Financials/Revenue/1]]"'
-verdict: enough  hits: 4  escalated: false
-Revenue was 3.2 billion yuan [[raw/report.md#Financials/Revenue/1]]
+$ koios config -p myvault
+config: myvault/koios.toml
+  chat: gpt-4o-mini @ https://api.openai.com/v1
+  api key: $OPENAI_API_KEY (set)
+  vision: (none) — scanned pages are skipped
+  retrieval.top: 8
 ```
 
-Only the CPU and the model you supply. There is no provider adapter, no API-key
-configuration and no HTTP client anywhere in the codebase — six crates total.
+Every command that can use a model reads this file: `query`, `mcp`, and `index`
+(for the vision tier). Nothing else changes — with no file, or no `[model]`
+section, everything runs exactly as before.
+
+There is no provider SDK in the codebase. `ureq` is a small HTTP client and the
+wire format is the OpenAI chat shape, which is what local servers also speak; no
+vendor is baked in. `model.command` is the escape hatch if you need something
+that is not HTTP at all.
 
 ### The guardrails still apply
 
@@ -276,18 +306,24 @@ model does not let it invent. An answer that omits citations is reported, not
 silently accepted:
 
 ```console
-$ koios query "revenue" -p myvault --llm-cmd 'printf "%s" "Revenue was 3.2 billion yuan."'
+$ koios query "revenue" -p myvault \
+    --llm-cmd 'printf "%s" "Revenue was 3.2 billion yuan."'
 verdict: enough  hits: 4  escalated: false
 Revenue was 3.2 billion yuan.
 [contracts] citation=0/1 sentences cited
 ```
 
-A command that fails is an error, not a fabricated answer:
+A model that fails is an error, not a fabricated answer — including a key that
+is not set:
 
 ```console
-$ koios query "revenue" -p myvault --llm-cmd 'exit 1'
+$ koios query "revenue" -p myvault
 verdict: enough  hits: 4  escalated: false
-model command exited with exit status: 1
+model request failed: io: Connection refused (os error 111)
+
+$ koios query "revenue" -p myvault       # api_key_env names an unset variable
+verdict: enough  hits: 4  escalated: false
+model config names api_key_env = "OPENAI_API_KEY" but that variable is not set
 ```
 
 Retrieval stays authoritative — restricted documents are already gone before the
@@ -295,25 +331,25 @@ model sees anything, so it cannot leak what it was never given.
 
 ### From MCP
 
-`koios mcp` reads the same variable, so an agent launching the server controls
-the model through the environment:
+`koios mcp` reads the same file, so an agent launching the server gets the same
+model as the CLI:
 
 ```bash
-KOIOS_LLM_CMD='my-model-wrapper' koios mcp
+koios mcp
 ```
 
 ### Vision tier (scanned PDFs)
 
-The same mechanism, for pages with no extractable text. The command receives
-**PNG bytes** on stdin and prints the transcription:
+One more block in the same file, for pages with no extractable text:
 
-```bash
-KOIOS_VLM_CMD='my-vision-wrapper' koios index myvault
+```toml
+[model.vision]
+model = "gpt-4o"
 ```
 
 Without it a scanned page contributes nothing — silently, by design. Inventing
-text for a page nobody read is worse than not indexing it. `rust-cli/tests/vlm_tier.rs`
-pins both halves of that behaviour.
+text for a page nobody read is worse than not indexing it.
+`rust-cli/tests/vlm_tier.rs` pins both halves of that behaviour.
 
 ### As a library
 
@@ -441,8 +477,8 @@ contract scanned to PDF becomes invisible to keyword search and to every answer,
 with no error to tell you. Handing the page image to a vision model recovers it,
 and the recovered text carries the same page-level citations as the CPU tier.
 
-Configured on the command line, it is `KOIOS_VLM_CMD` (see Connect an LLM).
-Supplied as a library callable, it receives **PNG bytes**, not a path:
+It is one block in `koios.toml` (see Connect an LLM). Supplied as a library
+callable, it receives **PNG bytes**, not a path:
 
 ```rust
 // Rust library API — the callable receives PNG bytes, not a path.
@@ -465,10 +501,9 @@ $ cargo run --release --manifest-path rust-cli/Cargo.toml \
 
 Two honest caveats, because this tier is easy to over-promise:
 
-- **A scanned page with no vision command configured contributes nothing** —
+- **A scanned page with no `[model.vision]` configured contributes nothing** —
   silently. That is the intended default: inventing text for a page nobody read
-  is worse than not indexing it. There is no CLI flag for this tier; `koios index`
-  picks up `KOIOS_VLM_CMD` from the environment.
+  is worse than not indexing it.
 - **Rasterization comes from the bundled MuPDF**, the same dependency every PDF
   read already uses, so there is nothing extra to install.
 
@@ -572,7 +607,7 @@ KoiosBase/
       studio.rs     brief / mindmap exports
       main.rs       command-line interface
     examples/       runnable snippets quoted in this README
-    tests/          17 integration suites (122 tests)
+    tests/          19 integration suites (136 tests)
   docs/             design baseline, i18n layout, parity audit
   i18n/             this README in Chinese and Japanese
 ```

@@ -26,6 +26,7 @@ rename to `check-claim` and silently break scripts ported from Python.
 | `src/compile.rs` | entity + sources pages, quality gate, synthesis layer |
 | `src/state.rs` | knowledge state machine and retraction cascade |
 | `src/lint.rs` | L1 gardener, `checkclaim` |
+| `src/llm.rs` | `koios.toml`, OpenAI-compatible chat + vision client |
 | `src/acl.rs` | ACL / multi-tenancy |
 | `src/mcp.rs` | JSON-RPC 2.0 over stdio, three tools |
 | `src/studio.rs` | brief / mindmap / FAQ exports |
@@ -34,7 +35,7 @@ rename to `check-claim` and silently break scripts ported from Python.
 ## Tests
 
 ```bash
-cargo test --release --manifest-path Cargo.toml    # 122 tests, 17 suites
+cargo test --release --manifest-path Cargo.toml    # 136 tests, 19 suites
 cargo fmt  --manifest-path Cargo.toml --all -- --check
 cargo clippy --release --manifest-path Cargo.toml -- -D warnings
 ```
@@ -43,9 +44,11 @@ The suites are named after what they guard, not after the modules: `parity.rs`
 (index db equality against the retired Python implementation),
 `synthesis_parity.rs` (lazy-recompile lifecycle), `acl_security.rs`
 (restricted blocks never reach an anonymous caller), `search_stdout.rs`
-(three-line hit format), and so on. Their assertions encode the Python
-implementation's observable behaviour, which is why they survive its removal —
-see `docs/python-rust-parity.md` for how those values were obtained.
+(three-line hit format), `model_config.rs` and `vlm_tier.rs` (the model
+wiring: configured is called, unconfigured is silent), and so on. The `parity.*`
+assertions encode the Python implementation's observable behaviour, which is why
+they survive its removal — see `docs/python-rust-parity.md` for how those values
+were obtained.
 
 ## Examples
 
@@ -67,9 +70,16 @@ library already present.
 | `rusqlite` (`bundled`) | SQLite **with FTS5** compiled from source |
 | `mupdf` | PDF extraction and page rasterization |
 | `clap` | CLI parsing |
-| `regex` | lot code paths (CJK padding, `checkclaim`) |
+| `regex` | CJK padding, `checkclaim`, sentence splitting |
 | `serde_json` (`preserve_order`) | MCP payloads, key order matters |
 | `sha2` | content hashes for incremental rebuilds |
+| `ureq` (`rustls`) | the model call — one small HTTP client, no async runtime |
+| `toml` + `serde` | `koios.toml` |
+
+`ureq` deserves a note: a synchronous client with no tokio and no async
+runtime. The model call is a blocking request the pipeline already had to wait
+for, so an async runtime would have bought nothing and cost a large dependency
+tree.
 
 ## License caveat worth repeating
 

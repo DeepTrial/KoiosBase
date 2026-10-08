@@ -149,6 +149,7 @@ myvault/
     sources/ answers/ entities/ concepts/ synthesis/
   .index/            build artifact   <- never commit
   AGENTS.md          the maintenance contract
+  koios.toml         可选的模型配置（见「接入 LLM」）
 ```
 
 ### 2. 添加文档
@@ -234,26 +235,53 @@ koios mcp
 默认开箱状态下，KoiosBase 只依据检索到的块作答——内置生成器返回带引用的前三块，
 绝不编造。这是刻意为之：默认模式在零配置下也必须是可信赖的。
 
-若要改为生成散文式回答，把 `koios query` 指向任意一条命令即可。它从 stdin 收到
-已组装好的上下文，答案写到 stdout，`$KOIOS_QUESTION` 携带问题。
+### 配置一次 —— `<vault>/koios.toml`
 
 ```bash
-koios query "revenue" -p myvault --llm-cmd 'my-model-wrapper'
-KOIOS_LLM_CMD='my-model-wrapper' koios query "revenue" -p myvault
+koios config --init -p myvault     # 写一份起始配置
+$EDITOR myvault/koios.toml
 ```
 
-任何命令都行——`curl` 打供应商、本地 llama.cpp、一行 Python。KoiosBase 永远看不到
-你的 API key：命令自己读你自己的环境，vault 里不写任何东西。
+```toml
+[model]
+# 任何 OpenAI 兼容端点：OpenAI、本地 llama.cpp / vLLM / Ollama、企业代理
+base_url = "https://api.openai.com/v1"
+model = "gpt-4o-mini"
+api_key_env = "OPENAI_API_KEY"      # 环境变量的「名字」，不是 key 本身
+
+# 可选：扫描件 PDF 页面（§5.1 视觉档）
+# [model.vision]
+# model = "gpt-4o"
+
+# 额外参数原样透传给供应商
+temperature = 0.2
+
+[retrieval]
+top = 8
+```
+
+**key 不在文件里。** `api_key_env` 只写变量名，真正的值在调用时读取——一个会被
+提交的 vault 不该变成凭据泄漏点。
+
+`koios config` 显示实际接上了什么，包括 key 是否已设置——否则"模型接上了吗"是
+无法回答的：一个拼写错误会让你留在确定性生成器上，而这与"接好了但没找到证据"
+看起来一模一样。
 
 ```console
-$ koios query "revenue" -p myvault \
-    --llm-cmd 'printf "%s" "Revenue was 3.2 billion yuan [[raw/report.md#Financials/Revenue/1]]"'
-verdict: enough  hits: 4  escalated: false
-Revenue was 3.2 billion yuan [[raw/report.md#Financials/Revenue/1]]
+$ koios config -p myvault
+config: myvault/koios.toml
+  chat: gpt-4o-mini @ https://api.openai.com/v1
+  api key: $OPENAI_API_KEY (set)
+  vision: (none) — scanned pages are skipped
+  retrieval.top: 8
 ```
 
-代价只有 CPU 加你自己给的模型。代码库里没有 provider 适配器、没有 API-key
-配置、没有 HTTP 客户端——总共六个 crate。
+所有能用模型的命令都读这个文件：`query`、`mcp`，以及 `index`（视觉档）。其余
+一切不变——没有文件、或没有 `[model]` 段时，行为和从前完全一致。
+
+代码库里没有供应商 SDK。`ureq` 是个小 HTTP 客户端，线上格式是 OpenAI 的 chat
+形状（本地服务端也说这种），没有厂商被写死。`model.command` 是给"压根不走 HTTP"
+的场景留的逃生口。
 
 ### 护栏依然生效
 
@@ -267,28 +295,33 @@ Revenue was 3.2 billion yuan.
 [contracts] citation=0/1 sentences cited
 ```
 
-命令失败是错误，不是编造的答案：
+模型失败是错误，不是编造的答案——包括 key 没设置：
 
 ```console
-$ koios query "revenue" -p myvault --llm-cmd 'exit 1'
+$ koios query "revenue" -p myvault
 verdict: enough  hits: 4  escalated: false
-model command exited with exit status: 1
+model request failed: io: Connection refused (os error 111)
+
+$ koios query "revenue" -p myvault       # api_key_env 指的变量未设置
+verdict: enough  hits: 4  escalated: false
+model config names api_key_env = "OPENAI_API_KEY" but that variable is not set
 ```
 
 ### 通过 MCP
 
-`koios mcp` 读同一个环境变量，启动它的 agent 通过环境控制模型：
+`koios mcp` 读同一个文件，启动它的 agent 得到与 CLI 相同的模型：
 
 ```bash
-KOIOS_LLM_CMD='my-model-wrapper' koios mcp
+koios mcp
 ```
 
 ### 视觉档（扫描件 PDF）
 
-同一套机制，用于抽不出文本的页面。命令从 stdin 收到 **PNG 字节**，写出转写文本：
+同一个文件里多加一段，用于抽不出文本的页面：
 
-```bash
-KOIOS_VLM_CMD='my-vision-wrapper' koios index myvault
+```toml
+[model.vision]
+model = "gpt-4o"
 ```
 
 不给它，扫描页就什么都不贡献——静默地，这是设计如此。为一张没人读过的页面编造
@@ -411,8 +444,8 @@ VLM tier 之所以重要，是因为不做 OCR 的流水线会静默丢失扫描
 的合同对关键词搜索和每一个答案来说都是隐形的，而且没有任何错误提示。把页面图像
 交给视觉模型可以把它找回来，而找回的文本带有与 CPU 层相同的页级引用。
 
-命令行上是 `KOIOS_VLM_CMD`（见「接入 LLM」一节）。作为库的可调用对象提供时，
-它接收 **PNG 字节**（而非路径）：
+它就在 `koios.toml` 里多加一段（见「接入 LLM」一节）。作为库的可调用对象提供时，
+接收 **PNG 字节**（而非路径）：
 
 ```rust
 // Rust 库 API —— 可调用对象接收 PNG 字节，而非路径。
@@ -435,9 +468,8 @@ $ cargo run --release --manifest-path rust-cli/Cargo.toml \
 
 两个诚实的提醒，因为这一层很容易被过度承诺：
 
-- **扫描页在未配置视觉命令时什么都不贡献**——静默地。这是预期默认：为一张没人
-  读过的页面编造文本，比不索引它更糟。这一档没有 CLI 标志，`koios index` 从环境
-  读取 `KOIOS_VLM_CMD`。
+- **扫描页在未配置 `[model.vision]` 时什么都不贡献**——静默地。这是预期默认：
+  为一张没人读过的页面编造文本，比不索引它更糟。
 - **光栅化由内置的 MuPDF 提供**，与每次读取 PDF 所用的依赖相同，因此无需额外
   安装任何东西。
 
@@ -533,7 +565,7 @@ KoiosBase/
       studio.rs     brief / mindmap 导出
       main.rs       命令行接口
     examples/       本 README 引用的可运行片段
-    tests/          17 个集成测试套件（122 个用例）
+    tests/          19 个集成测试套件（136 个用例）
   docs/             设计基线、i18n 布局、parity 审计
   i18n/             本 README 的中文与日文版
 ```

@@ -88,7 +88,7 @@ fn pdf_in_raw_gets_a_derived_source_page() {
     fs::write(&pdf_path, minimal_pdf("ACME revenue was 3.2 billion yuan.")).unwrap();
 
     let conn = connect(&p).unwrap();
-    let n = koios::index_pdf(&conn, "fin.pdf", &pdf_path).unwrap();
+    let n = koios::index_pdf(&conn, "fin.pdf", &pdf_path, None).unwrap();
     assert!(n > 0, "the PDF produced no blocks");
 
     let (docs, sections) = koios::collect_raw_docs(&conn, &p).unwrap();
@@ -121,7 +121,7 @@ fn non_markdown_docs_resolve_their_title_from_the_adapter_row() {
     fs::write(&pdf_path, minimal_pdf("ACME revenue was 3.2 billion yuan.")).unwrap();
 
     let conn = connect(&p).unwrap();
-    koios::index_pdf(&conn, "fin.pdf", &pdf_path).unwrap();
+    koios::index_pdf(&conn, "fin.pdf", &pdf_path, None).unwrap();
 
     let (docs, _) = koios::collect_raw_docs(&conn, &p).unwrap();
     let title = docs
@@ -147,7 +147,7 @@ fn pdf_frontmatter_is_typed_json_with_provenance_hash() {
     fs::write(&pdf_path, minimal_pdf("ACME revenue was 3.2 billion yuan.")).unwrap();
 
     let conn = connect(&p).unwrap();
-    koios::index_pdf(&conn, "fin.pdf", &pdf_path).unwrap();
+    koios::index_pdf(&conn, "fin.pdf", &pdf_path, None).unwrap();
     let fm: String = conn
         .query_row(
             "SELECT frontmatter FROM documents WHERE path='fin.pdf'",

@@ -87,9 +87,7 @@ enum Cmd {
         path: PathBuf,
         #[arg(short = 'k', long, default_value_t = 8)]
         top: usize,
-        /// shell command used as the generator; reads the context on stdin and
-        /// prints the answer. Defaults to $KOIOS_LLM_CMD. Without one you get
-        /// the built-in extractive answer, unchanged.
+        /// override `model.command` from the config for this one call
         #[arg(long = "llm-cmd")]
         llm_cmd: Option<String>,
         /// principal groups for ACL (§9.2), comma separated
@@ -174,6 +172,14 @@ enum Cmd {
     },
     /// run the MCP server over stdio (§11)
     Mcp,
+    /// show or scaffold the model config (`koios.toml`)
+    Config {
+        #[arg(short = 'p', long = "path", default_value = ".")]
+        path: PathBuf,
+        /// write a starter koios.toml if none exists
+        #[arg(long)]
+        init: bool,
+    },
 }
 
 fn cmd_init(path: &Path) -> std::io::Result<()> {
@@ -309,6 +315,85 @@ fn cmd_full(path: &Path, max_chars: usize) -> rusqlite::Result<()> {
 /// citation and refusal contracts as the built-in one (§6.5). Without one it is
 /// byte-for-byte the old output, which is what `eval` and the parity tests rely
 /// on.
+/// `koios config` — show what is configured, or scaffold a starter file.
+///
+/// Exists because "is a model actually wired up?" is otherwise unanswerable
+/// without reading the file: a typo'd key silently leaves you on the
+/// deterministic generator, which looks identical to a working setup that
+/// merely found no evidence.
+fn cmd_config(path: &Path, init: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let p = koios::llm::config_path(path);
+    if init {
+        if p.exists() {
+            eprintln!("{} already exists", p.display());
+        } else {
+            std::fs::write(&p, STARTER)?;
+            println!("wrote {}", p.display());
+        }
+        return Ok(());
+    }
+    let cfg = koios::llm::load(path).unwrap_or_default();
+    println!("config: {}", p.display());
+    match cfg.model.as_ref() {
+        None => {
+            println!("  model: (none) — using the built-in extractive generator");
+        }
+        Some(m) => {
+            if let Some(cmd) = m.command.as_deref() {
+                println!("  command: {cmd}");
+            } else {
+                println!(
+                    "  chat: {} @ {}",
+                    m.model.as_deref().unwrap_or("(none)"),
+                    m.base_url.as_deref().unwrap_or("https://api.openai.com/v1")
+                );
+                if let Some(k) = m.api_key_env.as_deref() {
+                    println!(
+                        "  api key: ${k} {}",
+                        if std::env::var(k).is_ok() {
+                            "(set)"
+                        } else {
+                            "(NOT SET)"
+                        }
+                    );
+                }
+            }
+            match m.vision.as_ref().and_then(|v| v.model.as_deref()) {
+                Some(v) => println!("  vision: {v}"),
+                None => println!("  vision: (none) — scanned pages are skipped"),
+            }
+        }
+    }
+    if let Some(r) = cfg.retrieval.as_ref().and_then(|r| r.top) {
+        println!("  retrieval.top: {r}");
+    }
+    Ok(())
+}
+
+const STARTER: &str = r#"# KoiosBase model configuration.
+# Copy/adjust and keep out of git if it ever holds anything private — the API
+# key itself is NOT here, only the name of the environment variable that holds
+# it, so this file is safe to commit.
+
+[model]
+# Any OpenAI-compatible endpoint: OpenAI, a local llama.cpp / vLLM / Ollama,
+# or a corporate proxy.
+base_url = "https://api.openai.com/v1"
+model = "gpt-4o-mini"
+api_key_env = "OPENAI_API_KEY"
+
+# Optional: scanned PDF pages (§5.1 vision tier). Without this, pages with no
+# extractable text are skipped rather than guessed at.
+# [model.vision]
+# model = "gpt-4o"
+
+# Optional: extra parameters passed through to the provider verbatim.
+# temperature = 0.2
+
+[retrieval]
+top = 8
+"#;
+
 fn cmd_query(
     path: &Path,
     query: &str,
@@ -318,11 +403,21 @@ fn cmd_query(
 ) -> rusqlite::Result<()> {
     let conn = connect(path)?;
     let groups = parse_groups(groups);
+    let cfg = koios::llm::load(path).unwrap_or_default();
+    // A one-shot --llm-cmd beats the file, so a model can be tried without
+    // editing anything.
+    let mut cfg = cfg;
+    if let Some(cmd) = llm_cmd {
+        let mut m = cfg.model.clone().unwrap_or_default();
+        m.command = Some(cmd.to_string());
+        cfg.model = Some(m);
+    }
 
-    if let Some(cmd) = koios::llm::llm_cmd(llm_cmd) {
-        let f = move |q: &str, ctx: &str| -> Result<String, String> {
-            koios::llm::generate_with(&cmd, q, ctx)
-        };
+    if koios::llm::has_chat(&cfg) {
+        let m = cfg.model.clone().unwrap_or_default();
+        let f =
+            move |q: &str, ctx: &str| -> Result<String, String> { koios::llm::chat(&m, q, ctx) };
+        let top = cfg.retrieval.as_ref().and_then(|r| r.top).unwrap_or(top);
         let res = pipeline::full_query_with(&conn, query, top, groups.as_deref(), Some(&f));
         println!(
             "verdict: {}  hits: {}  escalated: {}",
@@ -679,6 +774,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Cmd::Mcp => {
             mcp::serve()?;
         }
+        Cmd::Config { path, init } => cmd_config(&path, init)?,
         Cmd::Answer {
             question_flag,
             question,
