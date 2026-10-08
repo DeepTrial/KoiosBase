@@ -1,6 +1,6 @@
 [package]
 name = "koios"
-version = "0.8.2"
+version = "0.9.0"
 edition = "2021"
 # LICENSE NOTE (deliberate, reviewed 2026-10-02):
 # KoiosBase itself is MIT (see /LICENSE), but the PDF tier links MuPDF via the

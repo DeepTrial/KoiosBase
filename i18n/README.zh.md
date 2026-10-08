@@ -564,6 +564,8 @@ entailed
 
 已记录的边界，不是疏漏。依赖本系统前请先阅读。
 
+- **模型只用于写答案。** 生成器是唯一用到模型的地方。实体抽取、页面渲染、Grader
+  与 L2 judge 仍是确定性的（正则、模板、字符交集）——配了模型不会升级它们。
 - **`needs_llm` 用例。** `koios eval` 会报一个 `needs_llm` 计数：那些关键词命中
   但实际没有答案存在的问题（提到 公司 ≠ 回答分红政策问题）。需要 v0.3 的跨族
   Grader。
@@ -600,6 +602,27 @@ KoiosBase/
   docs/             设计基线、i18n 布局、parity 审计
   i18n/             本 README 的中文与日文版
 ```
+
+## 变更记录
+
+### v0.9.0
+
+让这个项目真正能当 LLM 知识库用，也真正能被 agent 调用。
+
+- **模型接入。** `<vault>/koios.toml` 配置 OpenAI 兼容端点（`base_url`、`model`、
+  `api_key_env` —— 只写变量「名」，所以密钥永不入仓库）。`koios config [--init]`
+  负责脚手架与自检。新增 `ureq` + `toml`；没有供应商 SDK。
+- **agent 宿主。** `koios mcp --install claude-code|codex` 通过宿主自带 CLI 注册
+  server（否则回落到写 `~/.claude.json` 或 `~/.codex/config.toml`），并投放一份
+  `SKILL.md`，写明模型必须遵守的规则：没有引用就意味着 vault 里没有，不许填空。
+- **视觉档可达。** `KOIOS_VLM_CMD` 移除——改为同一文件里的 `[model.vision]`，
+  `koios index` 用它处理扫描页。
+- **修复：** 正文只有一行的页面会索引出 0 个块（该行被当成标题、正文永不 flush）。
+  文本 PDF 时代是隐患，接了 VLM 转写稀疏页后就要命了。
+- **修复：** `checkclaim` 拼写、`retract --reason`、`promote --human-confirmed`、
+  `mindmap` 文件名大小写。
+
+默认行为不变：未配置模型时一切仍走确定性路径，`koios eval` 基线不变。
 
 ## 文档
 

@@ -608,6 +608,10 @@ entailed
 
 Documented limits, not oversights. Read before relying on the system.
 
+- **The model only writes answers.** The generator is the one place a model is
+  used. Entity extraction, page rendering, the Grader and the L2 judge are all
+  still deterministic (regex, templates, character overlap) — configuring a
+  model does not upgrade them.
 - **`needs_llm` cases.** `koios eval` reports a `needs_llm` count: questions
   where keywords hit but no real answer exists (mentioning 公司 ≠ answering a
   dividend-policy question). Needs the cross-family Grader of v0.3.
@@ -646,6 +650,32 @@ KoiosBase/
   docs/             design baseline, i18n layout, parity audit
   i18n/             this README in Chinese and Japanese
 ```
+
+## Changelog
+
+### v0.9.0
+
+Made the project actually usable as an LLM knowledge base and as an agent tool.
+
+- **Model access.** `<vault>/koios.toml` configures an OpenAI-compatible
+  endpoint (`base_url`, `model`, `api_key_env` — the *name* of the variable, so
+  no secret is ever committed). `koios config [--init]` scaffolds and verifies
+  it. Adds `ureq` + `toml`; no provider SDK.
+- **Agent hosts.** `koios mcp --install claude-code|codex` registers the server
+  through the host's own CLI (falling back to writing `~/.claude.json` or
+  `~/.codex/config.toml`) and ships a `SKILL.md` that states the rule a model
+  must follow: an uncited answer means not-in-vault, do not fill it in.
+- **Vision tier is reachable.** `KOIOS_VLM_CMD` is gone — it is now
+  `[model.vision]` in the same file, and `koios index` uses it for scanned
+  pages.
+- **Fixed:** a page whose text was a single short line indexed as zero blocks,
+  because the line was taken as a heading and the body never flushed. Latent
+  with text PDFs, load-bearing once a VLM transcribes a sparse page.
+- **Fixed:** the Python shell's `checkclaim` spelling, `retract --reason`,
+  `promote --human-confirmed`, and the `mindmap` filename case.
+
+Default behaviour is unchanged: with no model configured everything still runs
+deterministically, so `koios eval` reads the same baseline.
 
 ## Docs
 

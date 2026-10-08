@@ -10,7 +10,7 @@ cargo build --release --manifest-path Cargo.toml
 ./target/release/koios --help
 ```
 
-16 subcommands (`--help` for the full list), same spelling as the Python CLI it
+17 subcommands (`--help` for the full list), same spelling as the Python CLI it
 replaced — including the one-word `checkclaim`, which clap would otherwise
 rename to `check-claim` and silently break scripts ported from Python.
 
