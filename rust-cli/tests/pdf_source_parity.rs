@@ -104,7 +104,10 @@ fn pdf_in_raw_gets_a_derived_source_page() {
     assert!(page.contains("raw/fin.pdf"), "no provenance line:\n{page}");
     // Python appends the block address to each fallback question; a question
     // with no address cannot be traced back to its evidence.
-    assert!(page.contains("(fin.pdf#p1/1)"), "question lost its address:\n{page}");
+    assert!(
+        page.contains("(fin.pdf#p1/1)"),
+        "question lost its address:\n{page}"
+    );
 
     let _ = fs::remove_dir_all(&p);
 }
@@ -126,7 +129,10 @@ fn non_markdown_docs_resolve_their_title_from_the_adapter_row() {
         .find(|(r, _, _)| r == "fin.pdf")
         .map(|(_, t, _)| t.clone())
         .expect("fin.pdf missing");
-    assert_eq!(title, "fin", "title must come from the file stem: {title:?}");
+    assert_eq!(
+        title, "fin",
+        "title must come from the file stem: {title:?}"
+    );
 
     let _ = fs::remove_dir_all(&p);
 }

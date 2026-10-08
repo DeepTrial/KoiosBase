@@ -586,7 +586,10 @@ pub fn mark_syntheses_stale(
 
 /// True if the topic's synthesis page is stale or missing (§8.3 lazy).
 pub fn needs_recompile(conn: &Connection, vault: &Path, topic: &str) -> bool {
-    let target = vault.join("wiki").join("synthesis").join(format!("{topic}.md"));
+    let target = vault
+        .join("wiki")
+        .join("synthesis")
+        .join(format!("{topic}.md"));
     if !target.exists() {
         return true;
     }
@@ -604,7 +607,10 @@ pub fn recompile_synthesis(
     let sdir = vault.join("wiki").join("synthesis");
     std::fs::create_dir_all(&sdir)?;
     let target = sdir.join(format!("{topic}.md"));
-    std::fs::write(&target, render_synthesis(topic, entities, facts, &stamp_now(), false))?;
+    std::fs::write(
+        &target,
+        render_synthesis(topic, entities, facts, &stamp_now(), false),
+    )?;
     // Clearing the flag is what makes the lazy scheme terminate: without it
     // every read of the page would schedule another recompile.
     conn.execute(

@@ -67,7 +67,7 @@ pub fn days_from_civil(y: i64, m: u64, d: u64) -> i64 {
 fn civil_from_days(z: i64) -> (i64, u64, u64) {
     let z = z + 719468;
     let era = if z >= 0 { z } else { z - 146096 } / 146097;
-    let doe = (z - era * 146097) as i64;
+    let doe = z - era * 146097;
     let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
     let y = yoe + era * 400;
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);

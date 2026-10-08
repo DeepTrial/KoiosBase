@@ -102,9 +102,7 @@ pub fn render_faq(title: &str, qa: &[(String, String, Vec<Ev>)], stamp: &str) ->
     } else {
         joined
     };
-    format!(
-        "---\ntype: faq\ngenerated: true\ncreated: {stamp}\n---\n\n# {title}\n\n{body}\n"
-    )
+    format!("---\ntype: faq\ngenerated: true\ncreated: {stamp}\n---\n\n# {title}\n\n{body}\n")
 }
 
 pub fn render_brief(title: &str, blocks: &[Ev], stamp: &str) -> String {

@@ -1,8 +1,14 @@
 # KoiosBase Python ↔ Rust 双壳对比台账
 
-`rust-cli/` 是 `koiosbase/`（Python）的 Rust 重写。两边共用同一个 `.index/tree.db`
-格式 —— 索引是派生的，但两个 shell 必须对"派生"的语义完全一致，否则一个写的库
-另一个读不懂。
+> **状态（2026-10-08）：Python 侧已从仓库移除**（commit `c922be4` 起陆续删
+> `koiosbase/`、`tests/`、`tools/`，并上线 Rust-only CI）。本文件保留为**移植
+> 审计轨迹**：下面的差分方法与结论全部是 2026-10-06/10-08 实跑得出的。
+> 要在昔日形式手工复跑某一节，用 `git show <commit>:path` 取回当时的 Python
+> 源文件即可（例如 `git show cddcb64:koiosbase/cli.py`）。
+
+`rust-cli/` 曾是 `koiosbase/`（Python）的 Rust 重写。两边共用同一个
+`.index/tree.db` 格式 —— 索引是派生的，但两个 shell 必须对"派生"的语义完全一致，
+否则一个写的库另一个读不懂。
 
 **最后同步/核对时间：2026-10-06，基于 commit `a8195be`。**
 
@@ -175,19 +181,18 @@ _once cone也只有 Python 才有的能力_做了专项核查——`rust-cli/src
 
 ### 可复现的工具
 
-```bash
-cargo test --release --manifest-path rust-cli/Cargo.toml   # 20 suites
-.venv/bin/python -m pytest -q                              # 65
-# synthesis 层的跨壳生命周期差分（Python 实跑 vs Rust 实跑）
-.venv/bin/python -u tools/synth_diff.py   # 期望 RESULT: IDENTICAL ✔
-# 重新生成 synthesis 的 PY_* 常量（必须靠实跑 Python，不能靠读源码）
-.venv/bin/python tools/gen_synthesis_fixture.py
-```
+> 以下两点指向 `git show 0098f7d:tools/`（Python 侧已被删除）：与其联络起来
+> 才能让本节的结论可复现。
 
-[实验] `tools/synth_diff.py` 在非空语料上：13/13 生命周期答案一致、生成的
-synthesis 页 338 bytes 逐字节相同、`page_state` 3 行一致 → `RESULT: IDENTICAL ✔`。
-`tools/gen_synthesis_fixture.py` 的 fixture 来自**真正执行**
-`koiosbase/compile/synthesis.py`，验证过幂等。
+```bash
+cargo test --release --manifest-path rust-cli/Cargo.toml   # 20 suites, 122 tests
+git show 0098f7d:tools/synth_diff.py > /tmp/synth_diff.py
+git show 0098f7d:tools/gen_synthesis_fixture.py > /tmp/gen_synthesis_fixture.py
+# synthesis 层的跨壳生命周期差分（Python 实跑 vs Rust 实跑）
+python3 -u /tmp/synth_diff.py   # 期望 RESULT: IDENTICAL ✔
+# 重新生成 synthesis 的 PY_* 常量（必须靠实跑 Python，不能靠读源码）
+python3 /tmp/gen_synthesis_fixture.py
+```
 
 > **永远问"Rust 能不能做这件事"，而不是只问"做对了没有"。**
 > 上面的差分法只能发现后者；14–20 全是得靠前者才挖出来的。
@@ -205,6 +210,7 @@ PYTHONPATH=. .venv/bin/python -c "from koiosbase.cli import main; main(['eval','
 ```
 
 预期两壳都是 `total=5 recall@1=0.600 refusal_acc=1.000 citation_cov=0.348`。
+实测当前 Rust 二进制正是这一行（见 README 的 One shell 一节）。
 
 这个方法一次性挖出三个真实 Rust 缺口（均已修）：
 
@@ -225,11 +231,11 @@ PYTHONPATH=. .venv/bin/python -c "from koiosbase.cli import main; main(['eval','
 ## 核对方法（复现）
 
 ```bash
-# Rust
-cd rust-cli && cargo build --release && cargo test --release
-# Python
-cd /home/ubuntu/dev/KoiosBase && .venv/bin/python -m pytest -q
-# 交叉：同一 vault 分别用两壳 index + search，比对 block id 集合
+# Rust —— 仓库里现在唯一的一套
+cargo build --release --manifest-path rust-cli/Cargo.toml
+cargo test --release --manifest-path rust-cli/Cargo.toml   # 20 suites, 122 tests
+# Python —— 需要先把当时的源文件从历史里取回来（已被删除）
+git show cddcb64:koiosbase/cli.py > /tmp/koios_cli.py      # 依此类推
 ```
 
 ## 能否删掉 Python、只留 Rust？（2026-10-02 实证结论）

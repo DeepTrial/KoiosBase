@@ -16,6 +16,11 @@ $ koios search "revenue" -p myvault
     2024 Annual Report > Financials > Revenue
     ACME Corp revenue in 2024 was 3.2 billion yuan, up 12 percent.
 [1] sources/report.md#2024 Annual Report/覆盖章节/1
+    2024 Annual Report > 2024 Annual Report > 覆盖章节
+    - Financials (`report.md#Financials`) - Revenue (`report.md#Financials/Revenue`)
+[2] sources/report.md#2024 Annual Report/导读摘要/1
+    2024 Annual Report > 2024 Annual Report > 导读摘要
+    ACME Corp revenue in 2024 was 3. 2 billion yuan, up 12 percent.
 ```
 
 Every hit carries its block address and full breadcrumb, so you can quote it in
@@ -91,15 +96,10 @@ flowchart TD
 
 ## Install
 
-### Option A — pip (any OS, needs Python 3.10+)
+KoiosBase is a single Rust binary with **no runtime dependencies** — no Python,
+no interpreter, no PyMuPDF. SQLite is compiled in via `rusqlite`'s bundled feature.
 
-```bash
-pip install -e ".[test]"     # editable, from a clone
-```
-
-SQLite with FTS5 is bundled in CPython, so there is nothing else to install.
-
-### Option B — prebuilt binary (no Python)
+### Option A — prebuilt binary
 
 Each [release](https://github.com/DeepTrial/KoiosBase/releases) ships two
 binaries:
@@ -115,13 +115,28 @@ chmod +x koios-linux-x86_64
 ./koios-linux-x86_64 --help
 ```
 
-### Verify
+### Option B — build from source
 
 ```bash
-koios init demo && koios index demo && koios lint demo
-# initialized KoiosBase vault at demo
-# indexed 0 blocks from demo       <- empty vault, correct
-# ---- lint: 0 finding(s)
+git clone https://github.com/DeepTrial/KoiosBase && cd KoiosBase
+cargo build --release --manifest-path rust-cli/Cargo.toml
+./rust-cli/target/release/koios --help
+```
+
+`mupdf-sys` compiles MuPDF from source, so the build needs libclang for
+bindgen: `sudo apt-get install clang libclang-dev` (Debian/Ubuntu).
+
+### Verify
+
+```console
+$ koios init demo && koios index demo && koios lint demo
+initialized KoiosBase vault at demo
+indexed 0 blocks from demo
+---- lint: 0 finding(s)
+```
+
+```bash
+cargo test --release --manifest-path rust-cli/Cargo.toml   # 122 tests, green
 ```
 
 ---
@@ -205,7 +220,7 @@ human-authored notes.
 koios studio brief  -p myvault -t revenue   --groups finance-team
 # wrote myvault/wiki/synthesis/brief-revenue.md
 koios studio mindmap -p myvault -t Financials --groups finance-team
-# wrote myvault/wiki/synthesis/mindmap-Financials.md
+# wrote myvault/wiki/synthesis/mindmap-financials.md
 ```
 
 Note the flags: `-t/--topic` sets the subject, and the verb comes first. These
@@ -233,22 +248,25 @@ is deliberate: the default must be trustworthy with zero configuration.
 To generate prose instead, pass a callable. It receives the assembled context
 and returns text:
 
-```python
-from koiosbase.index.schema import connect
-from koiosbase.query.pipeline import query
+```rust
+// Rust library API — the callable is an ordinary closure.
+use koios::pipeline::{full_query_with, QueryResult};
+use koios::connect;
 
-def my_llm(question: str, context: str) -> str:
-    return call_your_model(context)      # OpenAI, Anthropic, local, anything
-
-conn = connect("myvault/.index")
-result = query(conn, "revenue", top=8, principal_groups={"finance-team"}, llm=my_llm)
-print(result.answer)
-print(result.violations)                 # {} when the contracts hold
+let conn = connect(std::path::Path::new("myvault")).unwrap();
+let my_llm = |question: &str, context: &str| -> Result<String, String> {
+    Ok(call_your_model(context))     // OpenAI, Anthropic, local, anything
+};
+let result: QueryResult =
+    full_query_with(&conn, "revenue", 8, Some(&["finance-team".into()]), Some(&my_llm));
+println!("{}", result.answer);
+println!("{:?}", result.violations);   // empty when the contracts hold
 ```
 
-The callable contract is `llm(question, context) -> str`, and there is no
-provider adapter or API-key configuration anywhere in the codebase — you supply
-the callable, so no vendor is baked in.
+The callable contract is `Fn(&str, &str) -> Result<String, String>` (aliased as
+`koios::pipeline::LlmFn`), and there is no provider adapter or API-key
+configuration anywhere in the codebase — you supply the callable, so no vendor
+is baked in.
 
 ### The guardrails still apply
 
@@ -256,11 +274,22 @@ This is the part worth knowing: **contracts are enforced on your model's output
 too**, not only on the built-in generator. Handing KoiosBase an LLM does not let
 it invent.
 
-```python
+```rust
 result.violations
-# {}                                              cited its sources
-# {'citation': '0/1 sentences cited'}             model omitted citations
-# {'refusal': 'answered without evidence'}        answered with zero blocks
+// empty HashMap            cited its sources
+// {"citation": "0/5 sentences cited"}   callable omitted citations
+// {"refusal": "answered without evidence"}   answered with zero blocks
+```
+
+Real output from `examples/readme_llm_snippet.rs` against a one-document vault:
+
+```console
+$ cargo run --release --manifest-path rust-cli/Cargo.toml \
+    --example readme_llm_snippet -- myvault
+[sources/report.md#Report/导读摘要/1] (Report > Report > 导读摘要)
+revenue in 2024 was 3. 2 billion.
+
+{"citation": "0/5 sentences cited"}
 ```
 
 Retrieval stays authoritative — restricted documents are already gone before the
@@ -293,10 +322,14 @@ it is cheap enough to run in CI.
 
 When a fact turns out to be wrong, **retract** it rather than editing around it:
 
-```bash
-koios retract -p myvault -b "report.md#Financials/Revenue/1" -r "wrong figure"
-# retracted report.md#Financials/Revenue/1; affected pages: 2
-# ['wiki/entities/acme-corp.md', 'wiki/entities/acme.md']
+Real output:
+
+```console
+$ koios retract -p myvault -b "report.md#Financials/Revenue/1" --reason "wrong figure"
+retracted report.md#Financials/Revenue/1; affected pages: 2
+["wiki/entities/acme-corp.md", "wiki/entities/acme.md"]
+$ cd myvault && koios promote --verified "wiki/entities/acme.md"
+medium
 ```
 
 This does three things: the block stops answering questions (it is filtered out
@@ -312,16 +345,17 @@ did not come from the generator itself (§5.4 — never citation counts):
 
 ```bash
 cd myvault          # promote takes a filesystem path, not a vault-relative one
-koios promote --verified "wiki/entities/acme.md"   # promoted: draft -> medium
-koios promote --human    "wiki/entities/acme.md"   # promoted: medium -> high
+koios promote --verified        "wiki/entities/acme.md"   # promoted: draft -> medium
+koios promote --human-confirmed "wiki/entities/acme.md"   # promoted: medium -> high
 ```
 
 `draft → medium → high`.
 
 Note `promote` takes a **filesystem path relative to your current directory**,
 unlike every other command — it has no `-p` flag, so `cd` into the vault first.
-Without a flag it prints `not promoted (still draft): needs --verified or
---human` and exits 1. Promotion survives recompiling.
+It prints the resulting tier (`draft`/`medium`/`high`); with neither
+`--verified` nor `--human-confirmed` it simply re-reports the current tier.
+Promotion survives recompiling.
 
 ### Housekeeping
 
@@ -365,23 +399,33 @@ and the recovered text carries the same page-level citations as the CPU tier.
 
 Supply it as a callable receiving **PNG bytes**, not a path:
 
-```python
-from koiosbase.parsers.pdf import parse_pdf
+```rust
+// Rust library API — the callable receives PNG bytes, not a path.
+use koios::pdf::extract_pages;
 
-def my_vlm(path: str, image_bytes: bytes) -> str:
-    return vision_model_transcribe(image_bytes)
+let my_vlm = |_path: &str, png: &[u8]| -> Result<String, String> {
+    Ok(vision_model_transcribe(png))
+};
+let pages = extract_pages(std::path::Path::new("scan.pdf"), Some(&my_vlm));
+```
 
-doc = parse_pdf("scan.pdf", vlm=my_vlm)
+Real output (a 2-page PDF; the CPU tier has text so the VLM stub is not invoked,
+which is exactly what the two-tier design is supposed to do):
+
+```console
+$ cargo run --release --manifest-path rust-cli/Cargo.toml \
+    --example readme_vlm_snippet -- scan.pdf
+2 page(s) extracted
 ```
 
 Two honest caveats, because this tier is easy to over-promise:
 
-- **The VLM tier is library-only today.** `parse_pdf(vlm=...)` is a callable
-  parameter with no CLI flag and no call site inside `ingest/` — wiring it into
-  `koios index` requires code, not configuration. It is a hook, not a feature
-  you can switch on.
-- **It needs `pymupdf`** to rasterize pages. Without it the tier is skipped
-  silently.
+- **The VLM tier is library-only today.** `extract_pages(path, vlm)` is a
+  callable parameter with no CLI flag and no call site inside `ingest/` — wiring
+  it into `koios index` requires code, not configuration. It is a hook, not a
+  feature you can switch on.
+- **Rasterization comes from the bundled MuPDF**, the same dependency every PDF
+  read already uses, so there is nothing extra to install.
 
 Multimodal input beyond PDF — images, charts, screenshots as first-class sources
 — is not implemented. KoiosBase is Markdown-native (P1); vision enters only as
@@ -416,20 +460,27 @@ Seven principles constrain every mechanism:
 
 ---
 
-## Two shells, one vault
+## One shell
 
-KoiosBase ships a Python implementation and a Rust one. Both read and write the
-**same** vault format, so you can index with either and query with either.
+KoiosBase began as a Python reference implementation and was ported to Rust.
+The Rust binary is now the **only** shell in the repository: same vault format,
+same command surface (16 subcommands), and no runtime dependencies. The PDF tier
+links MuPDF under AGPL-or-commercial — the same position PyMuPDF already gave
+the project, since that was its single runtime dependency. The Python tree and
+the diff tools that proved the port live on in `docs/python-rust-parity.md` as
+the audit trail, not as a second runtime.
 
-Python is the reference implementation. The Rust binary covers the same command
-surface and is checked against Python output on a shared fixture (block ids,
-breadcrumbs, generated pages, MCP responses compared byte-for-byte).
+Every parity claim above was produced by diffing the two implementations against
+each other on non-empty fixtures — `docs/python-rust-parity.md` lists the method
+and the reproducible commands.
 
-```bash
-# Python CLI, full surface
-koios eval -p myvault              # eval baseline
-koios eval -p myvault --strict     # count known semantic gaps as failures
-koios checkclaim "revenue 3.2bn" "revenue was 3.2 billion yuan"
+Real output on the fixture used by `tests/channels_eval.rs`:
+
+```console
+$ koios eval -p myvault
+total=5 recall@1=0.600 refusal_acc=1.000 citation_cov=0.348 needs_llm=0
+$ koios checkclaim "revenue 3.2bn" "revenue was 3.2 billion yuan"
+entailed
 ```
 
 ---
@@ -455,28 +506,32 @@ Documented limits, not oversights. Read before relying on the system.
 
 ## Layout
 
-```
-koiosbase/
-  core/        Block / Section / Document model
-  parsers/     Markdown + PDF adapters
-  ingest/      raw + wiki -> derived index
-  index/       SQLite schema (tree, blocks, FTS, links)
-  retrieval/   BM25, RRF fusion, personalized PageRank
-  generation/  citation + refusal contracts, judge
-  compile/     entity + source pages, quality gate
-  state/       knowledge state machine and cascade
-  lint/        L1 gardener
-  query/       retrieve -> assemble -> generate
-  security/    ACL / multi-tenancy
-  mcp/         JSON-RPC over stdio
-  studio/      brief / mindmap exports
-  cli.py       command-line interface
-rust-cli/      the Rust shell (same vault format)
+```text
+KoiosBase/
+  rust-cli/
+    src/
+      lib.rs        block model, parser, indexer, connect()
+      ingest.rs     raw + wiki -> derived index
+      pdf.rs        MuPDF-backed PDF adapter (CPU + VLM tiers)
+      retrieval.rs  BM25, RRF fusion, personalized PageRank
+      pipeline.rs   retrieve -> assemble -> generate, contracts
+      compile.rs    entity + source pages, quality gate, synthesis
+      state.rs      knowledge state machine and cascade
+      lint.rs       L1 gardener
+      acl.rs        ACL / multi-tenancy
+      mcp.rs        JSON-RPC over stdio
+      studio.rs     brief / mindmap exports
+      main.rs       command-line interface
+    examples/       runnable snippets quoted in this README
+    tests/          17 integration suites (122 tests)
+  docs/             design baseline, i18n layout, parity audit
+  i18n/             this README in Chinese and Japanese
 ```
 
 ## Docs
 
-- `docs/KoiosBase设计文档v1.3.md` — full design baseline (Chinese)
+- `docs/KoiosBase设计文档v1.3.md` — design baseline (Chinese); the v1.4 header
+  notes where the shipped Rust binary deviates from it
 - `docs/i18n.md` — translation layout (see `i18n/`)
 - `AGENTS.md` — the contract written into every vault
 

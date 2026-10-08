@@ -10,7 +10,8 @@ use std::path::PathBuf;
 
 use koios::connect;
 
-const RAW: &str = "---\ntitle: Report\n---\n# 财务分析\n## 负债分析\n负债合计 18 亿元，营收 32 亿元。\n";
+const RAW: &str =
+    "---\ntitle: Report\n---\n# 财务分析\n## 负债分析\n负债合计 18 亿元，营收 32 亿元。\n";
 
 fn vault(name: &str) -> PathBuf {
     let p = std::env::temp_dir().join(format!("koios-api-{}-{}", name, std::process::id()));
@@ -51,8 +52,9 @@ fn caller_supplied_llm_is_still_contract_checked() {
     );
 
     // One that cites properly passes the same gate.
-    let honest =
-        |_q: &str, _ctx: &str| -> Result<String, String> { Ok("- x [[raw/r.md#财务分析/负债分析/1]]".to_string()) };
+    let honest = |_q: &str, _ctx: &str| -> Result<String, String> {
+        Ok("- x [[raw/r.md#财务分析/负债分析/1]]".to_string())
+    };
     let res = koios::pipeline::full_query_with(&conn, "营收", 5, None, Some(&honest));
     assert!(
         !res.violations.contains_key("citation"),
@@ -151,13 +153,15 @@ fn raw_sources_rank_as_high_confidence() {
 #[test]
 fn studio_can_render_a_faq_export() {
     let _: BTreeSet<String> = BTreeSet::new();
-    let qa: Vec<(String, String, Vec<koios::pipeline::Ev>)> = vec![
-        ("营收多少？".to_string(), "32 亿元。".to_string(), vec![]),
-    ];
+    let qa: Vec<(String, String, Vec<koios::pipeline::Ev>)> =
+        vec![("营收多少？".to_string(), "32 亿元。".to_string(), vec![])];
     let out = koios::studio::render_faq("FAQ", &qa, "2026-01-01");
     assert!(out.starts_with("---\ntype: faq\n"), "{out}");
     assert!(out.contains("## 营收多少？"), "{out}");
-    assert!(out.contains("依据：（无）"), "empty evidence renders （无）:\n{out}");
+    assert!(
+        out.contains("依据：（无）"),
+        "empty evidence renders （无）:\n{out}"
+    );
     // Empty input renders the placeholder rather than a blank document.
     let empty: Vec<(String, String, Vec<koios::pipeline::Ev>)> = vec![];
     assert!(koios::studio::render_faq("FAQ", &empty, "2026-01-01").contains("（无问答）"));
@@ -185,7 +189,9 @@ fn legacy_vault_without_later_columns_still_opens() {
     // connect() must ALTER the old tables rather than fail with "no such column".
     let conn = connect(&p).unwrap();
     let n: i64 = conn
-        .query_row("SELECT COUNT(*) FROM blocks WHERE layer='raw'", [], |r| r.get(0))
+        .query_row("SELECT COUNT(*) FROM blocks WHERE layer='raw'", [], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert_eq!(n, 1, "legacy rows survive and get the new columns");
     let _ = fs::remove_dir_all(&p);

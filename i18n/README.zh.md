@@ -15,6 +15,11 @@ $ koios search "revenue" -p myvault
     2024 Annual Report > Financials > Revenue
     ACME Corp revenue in 2024 was 3.2 billion yuan, up 12 percent.
 [1] sources/report.md#2024 Annual Report/覆盖章节/1
+    2024 Annual Report > 2024 Annual Report > 覆盖章节
+    - Financials (`report.md#Financials`) - Revenue (`report.md#Financials/Revenue`)
+[2] sources/report.md#2024 Annual Report/导读摘要/1
+    2024 Annual Report > 2024 Annual Report > 导读摘要
+    ACME Corp revenue in 2024 was 3. 2 billion yuan, up 12 percent.
 ```
 
 每条命中都带上自己的块地址和完整面包屑，因此你可以用 `[[wikilink]]` 形式引用它，
@@ -85,15 +90,10 @@ flowchart TD
 
 ## 安装
 
-### 方案 A — pip（任意操作系统，需要 Python 3.10+）
+KoiosBase 是单个 Rust 二进制，**无运行时依赖**——不需要 Python、不需要解释器、
+不需要 PyMuPDF。SQLite 通过 `rusqlite` 的 bundled feature 静态编译进二进制。
 
-```bash
-pip install -e ".[test]"     # editable, from a clone
-```
-
-SQLite 的 FTS5 已随 CPython 内置，因此没有其它需要安装的东西。
-
-### 方案 B — 预编译二进制（无需 Python）
+### 方案 A — 预编译二进制
 
 每个 [release](https://github.com/DeepTrial/KoiosBase/releases) 附带两个二进制：
 
@@ -108,13 +108,28 @@ chmod +x koios-linux-x86_64
 ./koios-linux-x86_64 --help
 ```
 
-### 验证
+### 方案 B — 从源码构建
 
 ```bash
-koios init demo && koios index demo && koios lint demo
-# initialized KoiosBase vault at demo
-# indexed 0 blocks from demo       <- empty vault, correct
-# ---- lint: 0 finding(s)
+git clone https://github.com/DeepTrial/KoiosBase && cd KoiosBase
+cargo build --release --manifest-path rust-cli/Cargo.toml
+./rust-cli/target/release/koios --help
+```
+
+`mupdf-sys` 从源码编译 MuPDF，因此构建需要 libclang 供 bindgen 使用：
+`sudo apt-get install clang libclang-dev`（Debian/Ubuntu）。
+
+### 验证
+
+```console
+$ koios init demo && koios index demo && koios lint demo
+initialized KoiosBase vault at demo
+indexed 0 blocks from demo
+---- lint: 0 finding(s)
+```
+
+```bash
+cargo test --release --manifest-path rust-cli/Cargo.toml   # 122 tests, green
 ```
 
 ---
@@ -196,7 +211,7 @@ koios compile -p myvault
 koios studio brief  -p myvault -t revenue   --groups finance-team
 # wrote myvault/wiki/synthesis/brief-revenue.md
 koios studio mindmap -p myvault -t Financials --groups finance-team
-# wrote myvault/wiki/synthesis/mindmap-Financials.md
+# wrote myvault/wiki/synthesis/mindmap-financials.md
 ```
 
 注意这些标志：`-t/--topic` 设定主题，动词在前。这些写入落在 `wiki/synthesis/`。
@@ -221,35 +236,49 @@ koios mcp
 
 若要改为生成散文式回答，请传入一个可调用对象。它接收已组装好的上下文并返回文本：
 
-```python
-from koiosbase.index.schema import connect
-from koiosbase.query.pipeline import query
+```rust
+// Rust 库 API —— 可调用对象就是普通闭包。
+use koios::pipeline::{full_query_with, QueryResult};
+use koios::connect;
 
-def my_llm(question: str, context: str) -> str:
-    return call_your_model(context)      # OpenAI, Anthropic, local, anything
-
-conn = connect("myvault/.index")
-result = query(conn, "revenue", top=8, principal_groups={"finance-team"}, llm=my_llm)
-print(result.answer)
-print(result.violations)                 # {} when the contracts hold
+let conn = connect(std::path::Path::new("myvault")).unwrap();
+let my_llm = |question: &str, context: &str| -> Result<String, String> {
+    Ok(call_your_model(context))     // OpenAI、Anthropic、本地模型，任意
+};
+let result: QueryResult =
+    full_query_with(&conn, "revenue", 8, Some(&["finance-team".into()]), Some(&my_llm));
+println!("{}", result.answer);
+println!("{:?}", result.violations);   // 契约成立时为空
 ```
 
-可调用对象的契约是 `llm(question, context) -> str`，代码库中没有任何 provider
-适配器或 API-key 配置——可调用对象由你提供，因此不会把任何厂商写死进去。
+可调用对象的契约是 `Fn(&str, &str) -> Result<String, String>`（别名为
+`koios::pipeline::LlmFn`），代码库中没有任何 provider 适配器或 API-key
+配置——可调用对象由你提供，因此不会把任何厂商写死进去。
 
 ### 护栏依然生效
 
 这一点值得了解：**契约同样作用于你模型的输出**，而不只作用于内置生成器。给
 KoiosBase 接上一个 LLM 并不意味着它可以凭空编造。
 
-```python
+```rust
 result.violations
-# {}                                              cited its sources
-# {'citation': '0/1 sentences cited'}             model omitted citations
-# {'refusal': 'answered without evidence'}        answered with zero blocks
+// 空 HashMap            cited its sources
+// {"citation": "0/5 sentences cited"}   可调用对象漏了引用
+// {"refusal": "answered without evidence"}   零证据却作答
 ```
 
-检索保持权威地位——受限文档在模型看到任何东西之前就已经被剔除，所以 `llm()`
+真实输出，来自 `examples/readme_llm_snippet.rs`（单文档 vault）：
+
+```console
+$ cargo run --release --manifest-path rust-cli/Cargo.toml \
+    --example readme_llm_snippet -- myvault
+[sources/report.md#Report/导读摘要/1] (Report > Report > 导读摘要)
+revenue in 2024 was 3. 2 billion.
+
+{"citation": "0/5 sentences cited"}
+```
+
+检索保持权威地位——受限文档在模型看到任何东西之前就已经被剔除，所以 `my_llm`
 无法泄漏它从未获得的内容。
 
 ### 升级要解决的问题
@@ -276,10 +305,14 @@ result.violations
 
 当一个事实被证明是错的，请**撤回**它，而不是绕着它编辑：
 
-```bash
-koios retract -p myvault -b "report.md#Financials/Revenue/1" -r "wrong figure"
-# retracted report.md#Financials/Revenue/1; affected pages: 2
-# ['wiki/entities/acme-corp.md', 'wiki/entities/acme.md']
+真实输出：
+
+```console
+$ koios retract -p myvault -b "report.md#Financials/Revenue/1" --reason "wrong figure"
+retracted report.md#Financials/Revenue/1; affected pages: 2
+["wiki/entities/acme-corp.md", "wiki/entities/acme.md"]
+$ cd myvault && koios promote --verified "wiki/entities/acme.md"
+medium
 ```
 
 这做三件事：该块停止回答问题（它从每条检索路径上被过滤掉）、引用它的每一页
@@ -293,16 +326,16 @@ id——那是引用，不是答案。来源已经变化的页面会被降权并
 
 ```bash
 cd myvault          # promote takes a filesystem path, not a vault-relative one
-koios promote --verified "wiki/entities/acme.md"   # promoted: draft -> medium
-koios promote --human    "wiki/entities/acme.md"   # promoted: medium -> high
+koios promote --verified        "wiki/entities/acme.md"   # promoted: draft -> medium
+koios promote --human-confirmed "wiki/entities/acme.md"   # promoted: medium -> high
 ```
 
 `draft → medium → high`。
 
 注意 `promote` 接受的是**相对于当前目录的文件系统路径**，与其它每个命令都不同
-——它没有 `-p` 标志，所以先 `cd` 进 vault。不带标志时它会打印
-`not promoted (still draft): needs --verified or --human` 并以 1 退出。
-晋升在重新编译后会保留。
+——它没有 `-p` 标志，所以先 `cd` 进 vault。它打印结果层级
+（`draft`/`medium`/`high`）；`--verified` 与 `--human-confirmed` 都不给时，
+只是重新报告当前层级。晋升在重新编译后会保留。
 
 ### 日常整理
 
@@ -344,21 +377,32 @@ VLM tier 之所以重要，是因为不做 OCR 的流水线会静默丢失扫描
 
 以接收 **PNG 字节**（而非路径）的可调用对象形式提供：
 
-```python
-from koiosbase.parsers.pdf import parse_pdf
+```rust
+// Rust 库 API —— 可调用对象接收 PNG 字节，而非路径。
+use koios::pdf::extract_pages;
 
-def my_vlm(path: str, image_bytes: bytes) -> str:
-    return vision_model_transcribe(image_bytes)
+let my_vlm = |_path: &str, png: &[u8]| -> Result<String, String> {
+    Ok(vision_model_transcribe(png))
+};
+let pages = extract_pages(std::path::Path::new("scan.pdf"), Some(&my_vlm));
+```
 
-doc = parse_pdf("scan.pdf", vlm=my_vlm)
+真实输出（一份 2 页 PDF；CPU 层已抽出文本，因此 VLM 桩不会被调用——这正是
+两档 tier 设计应有的行为）：
+
+```console
+$ cargo run --release --manifest-path rust-cli/Cargo.toml \
+    --example readme_vlm_snippet -- scan.pdf
+2 page(s) extracted
 ```
 
 两个诚实的提醒，因为这一层很容易被过度承诺：
 
-- **VLM tier 目前仅限库内使用。** `parse_pdf(vlm=...)` 只是一个可调用对象参数，
-  没有 CLI 标志，在 `ingest/` 里也没有调用点——把它接入 `koios index` 需要写
-  代码，而不是改配置。它是一个钩子，不是一个可以打开的特性。
-- **它需要 `pymupdf`** 来光栅化页面。没有它，这一层会被静默跳过。
+- **VLM tier 目前仅限库内使用。** `extract_pages(path, vlm)` 只是一个可调用
+  对象参数，没有 CLI 标志，在 `ingest/` 里也没有调用点——把它接入 `koios index`
+  需要写代码，而不是改配置。它是一个钩子，不是一个可以打开的特性。
+- **光栅化由内置的 MuPDF 提供**，与每次读取 PDF 所用的依赖相同，因此无需额外
+  安装任何东西。
 
 PDF 之外的多模态输入——图像、图表、截图作为一等来源——尚未实现。KoiosBase 是
 Markdown 原生的（P1）；视觉只作为文本抽取失败时的恢复路径参与进来。
@@ -391,19 +435,24 @@ Markdown 原生的（P1）；视觉只作为文本抽取失败时的恢复路径
 
 ---
 
-## 两个 shell，同一个 vault
+## 只有一个 shell
 
-KoiosBase 同时提供 Python 实现与 Rust 实现。两者读写**相同**的 vault 格式，
-因此你可以用任一侧建索引、用任一侧查询。
+KoiosBase 起初是一份 Python 参考实现，后被移植到 Rust。Rust 二进制如今是仓库里
+**唯一**的 shell：相同的 vault 格式、相同的命令面（16 个子命令），且无运行时
+依赖。PDF 层以 AGPL 或商业授权链接 MuPDF —— 这与 PyMuPDF 早已给本项目带来的
+处境相同，因为那曾是它唯一的运行时依赖。支撑这次移植的 Python 代码与差分工具
+作为审计轨迹保留在 `docs/python-rust-parity.md` 中，而不是作为第二个运行时。
 
-Python 是参考实现。Rust 二进制覆盖同样的命令面，并在共享 fixture 上与 Python
-输出逐项比对（块 id、面包屑、生成的页面、MCP 响应均按字节比较）。
+上面每一条 parity 结论都是把两份实现在非空 fixture 上互相差分得出的——
+`docs/python-rust-parity.md` 记录了方法与可复现的命令。
 
-```bash
-# Python CLI, full surface
-koios eval -p myvault              # eval baseline
-koios eval -p myvault --strict     # count known semantic gaps as failures
-koios checkclaim "revenue 3.2bn" "revenue was 3.2 billion yuan"
+`tests/channels_eval.rs` 所用 fixture 上的真实输出：
+
+```console
+$ koios eval -p myvault
+total=5 recall@1=0.600 refusal_acc=1.000 citation_cov=0.348 needs_llm=0
+$ koios checkclaim "revenue 3.2bn" "revenue was 3.2 billion yuan"
+entailed
 ```
 
 ---
@@ -427,28 +476,31 @@ koios checkclaim "revenue 3.2bn" "revenue was 3.2 billion yuan"
 
 ## 目录结构
 
-```
-koiosbase/
-  core/        Block / Section / Document model
-  parsers/     Markdown + PDF adapters
-  ingest/      raw + wiki -> derived index
-  index/       SQLite schema (tree, blocks, FTS, links)
-  retrieval/   BM25, RRF fusion, personalized PageRank
-  generation/  citation + refusal contracts, judge
-  compile/     entity + source pages, quality gate
-  state/       knowledge state machine and cascade
-  lint/        L1 gardener
-  query/       retrieve -> assemble -> generate
-  security/    ACL / multi-tenancy
-  mcp/         JSON-RPC over stdio
-  studio/      brief / mindmap exports
-  cli.py       command-line interface
-rust-cli/      the Rust shell (same vault format)
+```text
+KoiosBase/
+  rust-cli/
+    src/
+      lib.rs        block 模型、解析器、索引器、connect()
+      ingest.rs     raw + wiki -> 派生索引
+      pdf.rs        MuPDF 驱动的 PDF 适配器（CPU + VLM 两档）
+      retrieval.rs  BM25、RRF 融合、个性化 PageRank
+      pipeline.rs   retrieve -> assemble -> generate，契约
+      compile.rs    实体页 + sources 页、质量闸门、synthesis
+      state.rs      知识状态机与级联
+      lint.rs       L1 gardener
+      acl.rs        ACL / 多租户
+      mcp.rs        JSON-RPC over stdio
+      studio.rs     brief / mindmap 导出
+      main.rs       命令行接口
+    examples/       本 README 引用的可运行片段
+    tests/          17 个集成测试套件（122 个用例）
+  docs/             设计基线、i18n 布局、parity 审计
+  i18n/             本 README 的中文与日文版
 ```
 
 ## 文档
 
-- `docs/KoiosBase设计文档v1.3.md` — 完整设计基线（中文）
+- `docs/KoiosBase设计文档v1.3.md` — 完整设计基线（中文）；v1.4 头部注明实装与设计的偏差
 - `docs/i18n.md` — 翻译组织方式（见 `i18n/`）
 - `AGENTS.md` — 写入每个 vault 的维护契约
 

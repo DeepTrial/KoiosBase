@@ -49,14 +49,15 @@ pub fn extract_pages_cpu(path: &Path) -> Vec<String> {
 /// and returns transcribed text, exactly the callable contract Python exposes
 /// as `parse_pdf(..., vlm=...)` — README documents this as the way to handle
 /// scanned PDFs, and Rust had no equivalent until now.
-pub fn extract_pages(
-    path: &Path,
-    vlm: Option<&dyn Fn(&str, &[u8]) -> Result<String, String>>,
-) -> Vec<String> {
+/// A vision tier: receives `(path, PNG bytes)` for a scanned page and returns
+/// the transcribed text. Aliased because writing the full `dyn Fn` inline at
+/// every call site trips clippy's type-complexity lint and buries the intent.
+pub type VlmFn = dyn Fn(&str, &[u8]) -> Result<String, String>;
+
+pub fn extract_pages(path: &Path, vlm: Option<&VlmFn>) -> Vec<String> {
     let cpu_pages = extract_pages_cpu_inner(path);
     let scanned = looks_scanned(&cpu_pages, 40);
-    if (scanned || cpu_pages.is_empty()) && vlm.is_some() {
-        let f = vlm.unwrap();
+    if let Some(f) = vlm.filter(|_| scanned || cpu_pages.is_empty()) {
         return render_pages_png(path)
             .into_iter()
             .enumerate()
@@ -89,13 +90,18 @@ fn render_pages_png(path: &Path) -> Vec<Vec<u8>> {
     for i in 0..n {
         match doc
             .load_page(i)
-            .and_then(|p| p.to_pixmap(&mupdf::Matrix::IDENTITY, &mupdf::Colorspace::device_rgb(), false, true))
+            .and_then(|p| {
+                p.to_pixmap(
+                    &mupdf::Matrix::IDENTITY,
+                    &mupdf::Colorspace::device_rgb(),
+                    false,
+                    true,
+                )
+            })
             .and_then(|pix| {
                 let mut buf: Vec<u8> = Vec::new();
-                pix.write_to(&mut buf, mupdf::ImageFormat::PNG)
-                    .map(|_| buf)
-            })
-        {
+                pix.write_to(&mut buf, mupdf::ImageFormat::PNG).map(|_| buf)
+            }) {
             Ok(bytes) => out.push(bytes),
             Err(e) => {
                 log_skip(&e.to_string());
@@ -250,11 +256,7 @@ pub fn load_cache(path: &Path, cache_dir: &Path) -> Option<serde_json::Value> {
 }
 
 /// Parse-cache write — mirrors koiosbase/parsers/pdf.py save_cache().
-pub fn save_cache(
-    path: &Path,
-    cache_dir: &Path,
-    data: &serde_json::Value,
-) -> std::io::Result<()> {
+pub fn save_cache(path: &Path, cache_dir: &Path, data: &serde_json::Value) -> std::io::Result<()> {
     std::fs::create_dir_all(cache_dir)?;
     let f = cache_dir.join(format!("{}.json", file_sha256(path)));
     std::fs::write(f, crate::json_python_dumps(data))
@@ -300,7 +302,10 @@ pub fn pdf_frontmatter(path: &Path, scanned: bool) -> String {
         "source".into(),
         serde_json::Value::String(path.display().to_string()),
     );
-    map.insert("parser".into(), serde_json::Value::String(parser.to_string()));
+    map.insert(
+        "parser".into(),
+        serde_json::Value::String(parser.to_string()),
+    );
     map.insert(
         "doc_hash".into(),
         serde_json::Value::String(format!("sha256:{}", file_sha256(path))),

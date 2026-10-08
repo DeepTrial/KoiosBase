@@ -332,7 +332,10 @@ fn mark_syntheses_stale_no_dir_is_empty() {
     let v = vault("nodir");
     let conn = connect(&v.p).unwrap();
     let touched = mark_syntheses_stale(&conn, &v.p, None).unwrap();
-    assert!(touched.is_empty(), "missing synthesis dir -> nothing touched");
+    assert!(
+        touched.is_empty(),
+        "missing synthesis dir -> nothing touched"
+    );
 }
 
 #[test]
@@ -340,9 +343,12 @@ fn topics_are_trimmed_and_empty_entries_dropped() {
     let v = vault("trim");
     touch(&v.p, "finance.md");
     let conn = connect(&v.p).unwrap();
-    let touched =
-        mark_syntheses_stale(&conn, &v.p, Some(&["  finance  ".to_string(), "  ".to_string()]))
-            .unwrap();
+    let touched = mark_syntheses_stale(
+        &conn,
+        &v.p,
+        Some(&["  finance  ".to_string(), "  ".to_string()]),
+    )
+    .unwrap();
     assert_eq!(touched, vec!["wiki/synthesis/finance.md"]);
 }
 
@@ -372,8 +378,7 @@ fn recompile_writes_page_and_clears_stale() {
     assert!(needs_recompile(&conn, &v.p, "finance"));
 
     let facts = [("营收 32 亿".to_string(), "r.md#财务分析/1".to_string())];
-    let target =
-        recompile_synthesis(&conn, &v.p, "finance", &s(&["acme"]), &facts).unwrap();
+    let target = recompile_synthesis(&conn, &v.p, "finance", &s(&["acme"]), &facts).unwrap();
     assert_eq!(
         target,
         v.p.join("wiki").join("synthesis").join("finance.md")
@@ -384,7 +389,10 @@ fn recompile_writes_page_and_clears_stale() {
     );
 
     let text = fs::read_to_string(&target).unwrap();
-    assert!(text.contains("[[raw/r.md#财务分析/1]]"), "must cite raw (P6)");
+    assert!(
+        text.contains("[[raw/r.md#财务分析/1]]"),
+        "must cite raw (P6)"
+    );
     assert!(text.contains("[[entities/acme]]"));
     assert!(text.contains("stale: false"));
     // identical to what Python's recompile writes for the same inputs
@@ -432,7 +440,10 @@ fn lazy_synthesis_lifecycle() {
 
     assert!(!needs_recompile(&conn, &v.p, "finance"));
     mark_syntheses_stale(&conn, &v.p, None).unwrap();
-    assert!(needs_recompile(&conn, &v.p, "finance"), "lazy update not flagged");
+    assert!(
+        needs_recompile(&conn, &v.p, "finance"),
+        "lazy update not flagged"
+    );
 
     recompile_synthesis(
         &conn,

@@ -10,7 +10,8 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-const DOC: &str = "---\ntitle: Report\n---\n# 财务分析\n## 负债分析\n负债合计 18 亿元，营收 32 亿元。\n";
+const DOC: &str =
+    "---\ntitle: Report\n---\n# 财务分析\n## 负债分析\n负债合计 18 亿元，营收 32 亿元。\n";
 
 fn vault(name: &str) -> PathBuf {
     let p = std::env::temp_dir().join(format!("koios-search-fmt-{}-{}", name, std::process::id()));
@@ -59,8 +60,7 @@ fn search_stdout_uses_the_python_three_line_form() {
     assert_eq!(lines.len() % 3, 0, "stdout is not triples:\n{stdout}");
     for (n, triple) in lines.chunks(3).enumerate() {
         assert!(
-            triple[0].starts_with(&format!("[{n}] "))
-                && triple[0].matches("] ").count() == 1,
+            triple[0].starts_with(&format!("[{n}] ")) && triple[0].matches("] ").count() == 1,
             "line {} must be `[i] id` once — got {:?}\n{stdout}",
             n * 3,
             triple[0]

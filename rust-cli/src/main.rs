@@ -106,10 +106,7 @@ enum Cmd {
     /// The Python CLI spells this `checkclaim`. Clap would otherwise rename the
     /// variant to `check-claim`, silently breaking host scripts ported from it.
     #[command(name = "checkclaim")]
-    CheckClaim {
-        claim: String,
-        evidence: String,
-    },
+    CheckClaim { claim: String, evidence: String },
     /// retract a block and cascade staleness to citing pages (§8.3)
     Retract {
         /// Python spells this `-b/--block`; accept that flag as well as the
@@ -171,8 +168,6 @@ enum Cmd {
     Mcp,
 }
 
-/// Insert spaces between CJK characters — mirrors Python's cjk_pad().
-
 fn cmd_init(path: &Path) -> std::io::Result<()> {
     // Delegates to lib::init_vault so the binary and integration tests exercise
     // the SAME scaffolding — the two copies used to drift (the bin wrote a
@@ -182,28 +177,7 @@ fn cmd_init(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Minimal Markdown splitter: headings become sections, blank-line separated
-/// paragraphs become blocks. Tables/code are kept whole (P2).
-/// Index one Markdown document. PDFs go through `index_pdf` instead (§5.1:
-/// a new format = one new adapter, never a special case inside this function).
-
-/// Collect (rel_path, title, raw blocks) + per-doc sections for every Markdown
-/// file in raw/. Shared by `index` and `compile` so both see the same inputs.
-///
-/// This exists because `index` must REGENERATE sources/ before the wiki walk —
-/// otherwise the first pass counts only the raw blocks and the second counts the
-/// derived ones too, making the command look non-idempotent (the Python side had
-/// exactly this bug; see build_index's "Derived pages are generated BEFORE the
-/// wiki walk" comment).
-
-/// Same walk, but accepting every format an adapter handles (§5.1).
-
-/// Index a PDF: one Section per page, Blocks tagged with page_range (§4.1).
-///
-/// `page_range` lives in the blocks.page_range column as a JSON pair, matching
-/// `json.dumps(b.page_range)` on the Python side.
-
-/// Split a `--groups a,b` value into principals (mirrors cli.parse_groups).
+/// Split a `--groups a,b` value into principals (§9.2).
 fn parse_groups(raw: Option<&str>) -> Option<Vec<String>> {
     raw.map(|g| {
         g.split(',')
@@ -436,7 +410,7 @@ fn cmd_eval(path: &Path, strict: bool) -> rusqlite::Result<()> {
                 format!(
                     "[refusal] {q} -> {} evidence blocks, answer={}",
                     res.evidence.len(),
-                    &res.answer.chars().take(40).collect::<String>()
+                    res.answer.chars().take(40).collect::<String>()
                 )
             };
             if strict || !needs_llm {
@@ -463,10 +437,7 @@ fn cmd_eval(path: &Path, strict: bool) -> rusqlite::Result<()> {
                 .map(|s| format!("'{s}'"))
                 .collect::<Vec<_>>()
                 .join(", ");
-            failures.push((
-                format!("[factual] {q} -> got [{got}], want {want}"),
-                false,
-            ));
+            failures.push((format!("[factual] {q} -> got [{got}], want {want}"), false));
         }
         // §10.2: coverage is measured on the ANSWER, not the assembled context.
         // Python made this change deliberately (harness comment) because
