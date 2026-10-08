@@ -666,18 +666,27 @@ fn cmd_compile(vault: &Path) -> rusqlite::Result<()> {
     let mut docs: Vec<(String, String, Vec<pipeline::Ev>)> = Vec::new();
     let mut sections_by_doc: HashMap<String, Vec<(String, String)>> = HashMap::new();
     for rel in &doc_paths {
-        // Route through the adapter: a PDF in raw/ parsed as Markdown would
-        // produce garbage, so non-Markdown sources are skipped (§5.1).
+        // Same adapter rule as collect_raw_docs: keep non-Markdown raw docs.
+        // compile_vault() reaches them through parse_any(), so skipping here
+        // made `koios compile` ignore PDFs that Python compiled — different
+        // entity counts and missing sources/ pages from the same vault.
         let p = vault.join("raw").join(rel);
-        if p.extension().and_then(|x| x.to_str()) != Some("md") {
-            continue;
-        }
-        let text = match fs::read_to_string(&p) {
-            Ok(t) => t,
-            Err(_) => continue,
+        let title: String = if p.extension().and_then(|x| x.to_str()) == Some("md") {
+            match fs::read_to_string(&p) {
+                Ok(t) => {
+                    let (fm, _) = split_frontmatter(&t);
+                    fm_title(&fm).unwrap_or_else(|| rel.clone())
+                }
+                Err(_) => rel.clone(),
+            }
+        } else {
+            conn.query_row(
+                "SELECT COALESCE(NULLIF(title,''),?) FROM documents WHERE path=?",
+                params![rel, rel],
+                |r| r.get(0),
+            )
+            .unwrap_or_else(|_| rel.clone())
         };
-        let (fm, _body) = split_frontmatter(&text);
-        let title = fm_title(&fm).unwrap_or_else(|| rel.clone());
         let mut blocks: Vec<pipeline::Ev> = Vec::new();
         let mut sections: Vec<(String, String)> = Vec::new();
         {
@@ -731,9 +740,11 @@ fn cmd_compile(vault: &Path) -> rusqlite::Result<()> {
     let n_pages = compile::write_entity_pages(vault, &entities, &stamp).unwrap_or(0);
     let n_sources =
         compile::write_source_pages(vault, &docs, &stamp, &sections_by_doc).unwrap_or(0);
+    // koiosbase/cli.py cmd_compile prints `"compiled: " + " ".join(f"{k}={v}")`,
+    // NOT JSON. Rust emitted a JSON object, so any script parsing this line had
+    // to special-case the Rust shell.
     println!(
-        "{{\"entities\": {}, \"entity_pages\": {n_pages}, \"source_pages\": {n_sources}, \
-         \"affected_pages\": {touched}, \"stamp\": \"{stamp}\"}}",
+        "compiled: entities={} entity_pages={n_pages} source_pages={n_sources} affected_pages={touched} stamp={stamp}",
         entities.len()
     );
     Ok(())
