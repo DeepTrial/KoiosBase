@@ -99,7 +99,7 @@ KoiosBase 是单个 Rust 二进制，**无运行时依赖**——不需要 Pytho
 
 | 文件 | 平台 |
 | --- | --- |
-| `koios-linux-x86_64` | Linux，musl 静态——任何环境都能跑 |
+| `koios-linux-x86_64` | Linux x86-64（glibc） |
 | `koios-windows-x86_64.exe` | Windows x86-64 |
 
 ```bash

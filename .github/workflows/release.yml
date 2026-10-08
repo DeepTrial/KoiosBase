@@ -17,12 +17,15 @@ jobs:
       matrix:
         include:
           - name: linux-x86_64
-            target: x86_64-unknown-linux-musl
+            target: x86_64-unknown-linux-gnu
             asset: koios-linux-x86_64
             bin: koios
-            # musl needs the static libc toolchain; rusqlite is `bundled`, so
-            # SQLite is compiled from source by cc-rs and needs no system lib.
-            pre: sudo apt-get update && sudo apt-get install -y musl-tools
+            # glibc, not musl. MuPDF compiles a C++ translation unit
+            # (source/fitz/tessocr.cpp) through the generic %.cpp rule, so the
+            # build needs a C++ compiler for the target. musl-tools ships only
+            # the C toolchain — there is no musl C++ cross-compiler in the
+            # Ubuntu repos — so the musl job died with
+            # "x86_64-linux-musl-g++: not found". The runner already has g++.
           - name: windows-x86_64
             target: x86_64-pc-windows-gnu
             asset: koios-windows-x86_64.exe

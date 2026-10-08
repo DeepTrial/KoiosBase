@@ -106,7 +106,7 @@ PyMuPDF も不要。SQLite は `rusqlite` の bundled feature で静的に組み
 
 | ファイル | プラットフォーム |
 | --- | --- |
-| `koios-linux-x86_64` | Linux、musl 静的——どこでも動作 |
+| `koios-linux-x86_64` | Linux x86-64（glibc） |
 | `koios-windows-x86_64.exe` | Windows x86-64 |
 
 ```bash

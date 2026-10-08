@@ -106,7 +106,7 @@ binaries:
 
 | File | Platform |
 | --- | --- |
-| `koios-linux-x86_64` | Linux, static musl — runs anywhere |
+| `koios-linux-x86_64` | Linux x86-64 (glibc) |
 | `koios-windows-x86_64.exe` | Windows x86-64 |
 
 ```bash
