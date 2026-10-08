@@ -148,6 +148,49 @@ PYTHONPATH=. .venv/bin/python -c "from koiosbase.cli import main; main(['index',
     "ocr": false}` 与 Python 逐字节一致。
     加锁：`tests/pdf_source_parity.rs`（3 个用例）。
 
+## Python-only 库能力的迁移（2026-10-08，commit `c922be4` / `46d130e` / `cddcb64`）
+
+前面的差分能保证"已实现的部分逐字节一致"，但保证不了"没漏实现"。对这两个
+_once cone也只有 Python 才有的能力_做了专项核查——`rust-cli/src/*.rs` 里
+`Fn`/`impl Fn`/`dyn Fn` 曾**零命中**：
+
+14. **`query(..., llm=callable)`**（README §237 承诺）。Rust `full_query` 无此参数。
+    新增 `full_query_with(conn, q, top, groups, Option<&dyn Fn>)`，且回调产出
+    **同样过 `check_contracts` 闸门**（§6.5：给 KoiosBase 一个模型，不等于让它编造）。
+    `QueryResult` 同时补齐 `violations` 与 `trace`（§6.2 Self-Route 面包屑）。
+15. **`parse_pdf(..., vlm=callable)`**（README §369 承诺，扫描件 OCR）：
+    `pdf::extract_pages(path, vlm)` 实现 §5.1 两档-tier（CPU 无文本→PNG 交给 VLM），
+    并补上 `load_cache`/`save_cache` 解析缓存。
+16. **`_migrate()` 旧库迁移**：Rust 无 ALTER 路径，故 layer/ordinal 之前的 vault
+    在 Rust 侧直接打不开。现 `connect()` 自动补列。
+17. **`build_page_confidence` + 加权图**：Rust `hybrid_search` 用的是**未加权**图，
+    导致 §6.6 权威阶梯是死代码——草稿页的引用和人肉核验过的权重相同。
+18. **`blocks.hash`**：Rust 写的是 `""`，Python 写 content_hash 前 16 位。
+    这是增量重建的信号，两壳全表比对时若漏掉这一列就会漏掉它。
+19. **synthesis 懒编译层**（§4.3/§8.3）：`render_synthesis` /
+    `mark_syntheses_stale` / `needs_recompile` / `recompile_synthesis` 全缺，
+    Rust 之前**完全没有** synthesis 这一层。
+20. **CLI 面/输出对齐**：`retract -b`、`studio -t`、`answer`(top=5)、
+    `retract/answer/studio` 的输出文案、`render_faq` 模板、`compile` 输出格式。
+
+### 可复现的工具
+
+```bash
+cargo test --release --manifest-path rust-cli/Cargo.toml   # 20 suites
+.venv/bin/python -m pytest -q                              # 65
+# synthesis 层的跨壳生命周期差分（Python 实跑 vs Rust 实跑）
+.venv/bin/python -u tools/synth_diff.py   # 期望 RESULT: IDENTICAL ✔
+# 重新生成 synthesis 的 PY_* 常量（必须靠实跑 Python，不能靠读源码）
+.venv/bin/python tools/gen_synthesis_fixture.py
+```
+
+[实验] `tools/synth_diff.py` 在非空语料上：13/13 生命周期答案一致、生成的
+synthesis 页 338 bytes 逐字节相同、`page_state` 3 行一致 → `RESULT: IDENTICAL ✔`。
+`tools/gen_synthesis_fixture.py` 的 fixture 来自**真正执行**
+`koiosbase/compile/synthesis.py`，验证过幂等。
+
+> **永远问"Rust 能不能做这件事"，而不是只问"做对了没有"。**
+> 上面的差分法只能发现后者；14–20 全是得靠前者才挖出来的。
 
 ## eval 指标差分法（2026-10-02 新增）
 

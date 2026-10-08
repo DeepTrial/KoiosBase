@@ -50,7 +50,8 @@ use koios::compile::{mark_syntheses_stale, needs_recompile, recompile_synthesis}
 use std::path::Path;
 
 fn main() {
-    let v = Path::new(&std::env::args().nth(1).unwrap());
+    let arg = std::env::args().nth(1).unwrap();
+    let v = Path::new(&arg);
     let conn = koios::connect(v).unwrap();
     let sdir = v.join("wiki").join("synthesis");
     std::fs::create_dir_all(&sdir).unwrap();
@@ -196,9 +197,29 @@ def main() -> int:
     )
 
     # --- diff 1: lifecycle answers -------------------------------------------
+    def norm(x: str) -> str:
+        # Python reprs bools as True/False, Rust as true/false — same value.
+        return {
+            "True": "true",
+            "False": "false",
+            "None": "null",
+        }.get(x.strip(), x)
+
     fails = 0
     for k in sorted(py_out):
-        p, s = py_out[k], rs_out.get(k, "<MISSING>")
+        p, s = norm(py_out[k]), norm(rs_out.get(k, "<MISSING>"))
+        # list-of-paths fields: compare the parsed content, not Rust's Debug repr
+        if p.startswith("[") and "wiki/" in p:
+            import ast
+
+            p = str(ast.literal_eval(p))
+            s = str(
+                [
+                    x.strip().strip('"')
+                    for x in s.strip("[]").split(",")
+                    if x.strip()
+                ]
+            )
         if p != s:
             fails += 1
             print(f"MISMATCH {k}:\n   PY {p}\n   RS {s}")
