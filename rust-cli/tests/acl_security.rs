@@ -87,7 +87,9 @@ fn tree_and_full_channels_respect_principal() {
     let tree = koios::retrieval::tree_search(&conn, "薪酬", 3).unwrap_or_default();
     let anon_tree = koios::pipeline::filter_chain(
         &conn,
-        tree.iter().filter_map(|i| koios::pipeline::get_block(&conn, i)).collect(),
+        tree.iter()
+            .filter_map(|i| koios::pipeline::get_block(&conn, i))
+            .collect(),
         None,
     );
     assert!(
@@ -98,7 +100,9 @@ fn tree_and_full_channels_respect_principal() {
     let ids = koios::retrieval::full_corpus(&conn, 200_000).unwrap_or_default();
     let anon_full = koios::pipeline::filter_chain(
         &conn,
-        ids.iter().filter_map(|i| koios::pipeline::get_block(&conn, i)).collect(),
+        ids.iter()
+            .filter_map(|i| koios::pipeline::get_block(&conn, i))
+            .collect(),
         None,
     );
     assert!(
@@ -108,7 +112,9 @@ fn tree_and_full_channels_respect_principal() {
     // The other half: an entitled caller still gets it through the same door.
     let fin_full = koios::pipeline::filter_chain(
         &conn,
-        ids.iter().filter_map(|i| koios::pipeline::get_block(&conn, i)).collect(),
+        ids.iter()
+            .filter_map(|i| koios::pipeline::get_block(&conn, i))
+            .collect(),
         Some(&groups(&["finance-team"])),
     );
     assert!(

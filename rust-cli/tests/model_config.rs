@@ -15,7 +15,7 @@ fn vault(name: &str) -> PathBuf {
     p
 }
 
-fn seed(v: &PathBuf) {
+fn seed(v: &std::path::Path) {
     fs::write(
         v.join("raw").join("report.md"),
         "---\ntitle: Report\n---\n\n# Financials\n\n## Revenue\n\nACME revenue in 2024 was 3.2 billion yuan.\n",

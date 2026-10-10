@@ -170,29 +170,11 @@ stateDiagram-v2
 La confiance ne monte que sur des preuves extérieures au générateur (§5.4 —
 jamais sur un compte de citations) : `draft → medium → high`.
 
-## Lacunes connues
-
-- **Le modèle n'écrit que les réponses.** L'extraction d'entités, le Grader et
-  le juge L2 restent déterministes ; configurer un modèle ne les améliore pas.
-- **Le juge L2 est une ébauche** : il ne tranche que les relations numériques et
-  renvoie `unknown` pour tout le reste.
-- **Les pages obsolètes ne sont pas recompilées automatiquement** — elles sont
-  rétrogradées et signalées.
-- **Le binaire Windows n'est vérifié que structurellement** (PE32+ valide, sans
-  exécution sur un runner disponible).
-
-```console
-$ koios eval -p myvault
-total=5 recall@1=0.600 refusal_acc=0.500 citation_cov=0.434 needs_llm=1
-  SKIP [needs-llm] 公司是否披露了季度分红政策？ -> keyword evidence cannot decide this in v0.1 (2 blocks)
-$ koios checkclaim "revenue 3.2bn" "revenue was 3.2 billion yuan"
-entailed
-```
-
 ## Documentation
 
 - `docs/KoiosBase设计文档v1.3.md` — référence de conception
 - `docs/python-rust-parity.md` — la piste d'audit du portage
+- `docs/known-gaps.md` — lacunes connues et limites
 - `docs/i18n.md` — convention de traduction
 - `AGENTS.md` — le contrat écrit dans chaque vault
 

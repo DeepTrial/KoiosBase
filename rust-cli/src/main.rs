@@ -718,9 +718,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             parse_groups(groups.as_deref()),
             channel.as_deref(),
         )?,
-        Cmd::Tree { query, path, groups } => {
-            cmd_tree(&path, &query.join(" "), parse_groups(groups.as_deref()).as_deref())?
-        }
+        Cmd::Tree {
+            query,
+            path,
+            groups,
+        } => cmd_tree(
+            &path,
+            &query.join(" "),
+            parse_groups(groups.as_deref()).as_deref(),
+        )?,
         Cmd::Full {
             path,
             max_chars,
@@ -1004,11 +1010,18 @@ fn cmd_compile(vault: &Path) -> rusqlite::Result<()> {
     let n_pages = compile::write_entity_pages(vault, &entities, &stamp).unwrap_or(0);
     let n_sources =
         compile::write_source_pages(vault, &docs, &stamp, &sections_by_doc).unwrap_or(0);
+    // §8.3 reconciliation: the write side flags pages stale, this is what clears
+    // the flag. Without it a page could only leave the stale set one topic at a
+    // time via an explicit per-page command, so "never auto-recompiled" was not
+    // a policy — nothing was ever asked. Rebuilding here rather than on the read
+    // path keeps `search`/`query` free of writes, so a search can never mutate
+    // the vault behind your back.
+    let n_refreshed = compile::reconcile_stale_syntheses(&conn, vault, &stamp);
     // koiosbase/cli.py cmd_compile prints `"compiled: " + " ".join(f"{k}={v}")`,
     // NOT JSON. Rust emitted a JSON object, so any script parsing this line had
     // to special-case the Rust shell.
     println!(
-        "compiled: entities={} entity_pages={n_pages} source_pages={n_sources} affected_pages={touched} stamp={stamp}",
+        "compiled: entities={} entity_pages={n_pages} source_pages={n_sources} affected_pages={touched} refreshed={n_refreshed} stamp={stamp}",
         entities.len()
     );
     Ok(())

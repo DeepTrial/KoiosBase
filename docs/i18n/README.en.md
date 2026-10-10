@@ -170,28 +170,11 @@ stateDiagram-v2
 Confidence rises only on evidence from outside the generator (§5.4 — never
 citation counts): `draft → medium → high`.
 
-## Known gaps
-
-- **The model only writes answers.** Entity extraction, the Grader and the L2
-  judge stay deterministic; configuring a model does not upgrade them.
-- **The L2 judge is a placeholder**: it decides only numeric relations and
-  returns `unknown` for everything else.
-- **Stale pages are not auto-recompiled** — they are down-ranked and flagged.
-- **The Windows binary is verified structurally only** (valid PE32+, but no
-  runner was available to execute it).
-
-```console
-$ koios eval -p myvault
-total=5 recall@1=0.600 refusal_acc=0.500 citation_cov=0.434 needs_llm=1
-  SKIP [needs-llm] 公司是否披露了季度分红政策？ -> keyword evidence cannot decide this in v0.1 (2 blocks)
-$ koios checkclaim "revenue 3.2bn" "revenue was 3.2 billion yuan"
-entailed
-```
-
 ## Docs
 
 - `docs/KoiosBase设计文档v1.3.md` — design baseline
 - `docs/python-rust-parity.md` — the port's audit trail
+- `docs/known-gaps.md` — known gaps and limitations
 - `docs/i18n.md` — translation convention
 - `AGENTS.md` — the contract written into every vault
 

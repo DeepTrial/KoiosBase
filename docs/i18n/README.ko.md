@@ -168,28 +168,11 @@ stateDiagram-v2
 신뢰도는 생성기 외부의 증거로만 올라갑니다(§5.4 — 인용 개수로는 절대 올리지
 않습니다): `draft → medium → high`.
 
-## 알려진 한계
-
-- **모델은 답변만 작성합니다.** 개체 추출, Grader, L2 심판은 결정론적이며,
-  모델을 설정해도 이들이 개선되지 않습니다.
-- **L2 심판은 placeholder 구현입니다**: 숫자 관계만 판정하고 나머지는
-  `unknown`을 반환합니다.
-- **stale 페이지는 자동 재컴파일되지 않습니다** — 순위가 내려가고 표시만 됩니다.
-- **Windows 바이너리는 구조적으로만 검증되었습니다**(유효한 PE32+이지만,
-  실행 검증할 runner가 없었습니다).
-
-```console
-$ koios eval -p myvault
-total=5 recall@1=0.600 refusal_acc=0.500 citation_cov=0.434 needs_llm=1
-  SKIP [needs-llm] 公司是否披露了季度分红政策？ -> keyword evidence cannot decide this in v0.1 (2 blocks)
-$ koios checkclaim "revenue 3.2bn" "revenue was 3.2 billion yuan"
-entailed
-```
-
 ## 문서
 
 - `docs/KoiosBase设计文档v1.3.md` — 설계 기준선
 - `docs/python-rust-parity.md` — 포팅 감사 추적
+- `docs/known-gaps.md` — 알려진 한계와 제약
 - `docs/i18n.md` — 번역 규칙
 - `AGENTS.md` — 모든 vault에 기록되는 계약
 

@@ -170,29 +170,11 @@ stateDiagram-v2
 La confianza solo sube con evidencia externa al generador (§5.4 — nunca contando
 citas): `draft → medium → high`.
 
-## Lagunas conocidas
-
-- **El modelo solo escribe respuestas.** La extracción de entidades, el Grader y
-  el juez L2 siguen siendo deterministas; configurar un modelo no los mejora.
-- **El juez L2 es un placeholder**: solo decide relaciones numéricas y devuelve
-  `unknown` para todo lo demás.
-- **Las páginas obsoletas no se recompilan automáticamente** — se degradan y se
-  marcan.
-- **El binario de Windows está verificado solo estructuralmente** (PE32+ válido,
-  sin runner disponible para ejecutarlo).
-
-```console
-$ koios eval -p myvault
-total=5 recall@1=0.600 refusal_acc=0.500 citation_cov=0.434 needs_llm=1
-  SKIP [needs-llm] 公司是否披露了季度分红政策？ -> keyword evidence cannot decide this in v0.1 (2 blocks)
-$ koios checkclaim "revenue 3.2bn" "revenue was 3.2 billion yuan"
-entailed
-```
-
 ## Documentación
 
 - `docs/KoiosBase设计文档v1.3.md` — base de diseño
 - `docs/python-rust-parity.md` — la traza de auditoría del port
+- `docs/known-gaps.md` — lagunas conocidas y limitaciones
 - `docs/i18n.md` — convención de traducción
 - `AGENTS.md` — el contrato escrito en cada vault
 

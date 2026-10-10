@@ -176,11 +176,7 @@ pub fn retrieve_channel(
 /// Three call sites previously hand-rolled a subset of it (`cmd_tree`,
 /// `cmd_full`, and the §4 escalation below), which is exactly how an anonymous
 /// caller read the restricted blocks directly. One function, no variations.
-pub fn filter_chain(
-    conn: &Connection,
-    blocks: Vec<Ev>,
-    groups: Option<&[String]>,
-) -> Vec<Ev> {
+pub fn filter_chain(conn: &Connection, blocks: Vec<Ev>, groups: Option<&[String]>) -> Vec<Ev> {
     let out = crate::acl::filter_blocks(conn, blocks, groups);
     let out = crate::state::filter_visible(conn, out);
     crate::state::apply_disposition(conn, out, false)

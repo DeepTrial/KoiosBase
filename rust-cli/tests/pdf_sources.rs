@@ -27,7 +27,7 @@ fn minimal_pdf(text: &str) -> Vec<u8> {
         .replace('(', r"\(")
         .replace(')', r"\)");
     let content = format!("BT /F1 12 Tf 72 720 Td ({esc}) Tj ET\n");
-    let objs = vec![
+    let objs = [
         "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
         "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
         "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] \

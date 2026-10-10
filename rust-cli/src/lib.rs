@@ -736,6 +736,9 @@ pub fn cmd_index(path: &Path) -> rusqlite::Result<()> {
     // Wrap the whole ingest in ONE transaction. Without it every INSERT is its
     // own implicit transaction and fsyncs, which dominated the runtime.
     let tx = conn.unchecked_transaction()?;
+    // Snapshot BEFORE ingest: afterwards the index already holds the new
+    // content, so there is nothing left to diff it against.
+    let before_fp = raw_doc_fingerprints(&conn);
     // links are DERIVED from Markdown (§5.2), so a rebuild must start from an
     // empty edge set — otherwise deleted wikilinks keep polluting the graph.
     conn.execute("DELETE FROM links", [])?;
@@ -830,6 +833,80 @@ pub fn cmd_index(path: &Path) -> rusqlite::Result<()> {
         [],
     )?;
     tx.commit()?;
+    // §8.3 write side: an edited raw document invalidates the synthesis pages
+    // built from it. Nothing wired this up, so `page_state` stayed empty no
+    // matter how many times the vault was edited — which is why the read side
+    // (apply_disposition, the （待更新） marker) had nothing to act on.
+    // Only documents whose block hashes actually moved are reported; re-indexing
+    // an untouched vault must invalidate nothing. A brand-new vault in
+    // particular has no fingerprint history, and flagging every synthesis page
+    // on the first `index` would be noise, not signal.
+    let after_fp = raw_doc_fingerprints(&conn);
+    let changed = if before_fp.is_empty() {
+        Vec::new()
+    } else {
+        changed_raw_docs(&before_fp, &after_fp)
+    };
+    let flagged = if changed.is_empty() {
+        Vec::new()
+    } else {
+        let topics = compile::syntheses_citing(path, &changed);
+        if topics.is_empty() {
+            Vec::new()
+        } else {
+            compile::mark_syntheses_stale(&conn, path, Some(&topics)).unwrap_or_default()
+        }
+    };
     println!("indexed {total} blocks from {}", path.display());
+    if !flagged.is_empty() {
+        println!(
+            "stale: {} synthesis page(s) — run `koios compile` to refresh",
+            flagged.len()
+        );
+    }
     Ok(())
+}
+
+/// Per-raw-document fingerprint: one sha256 over every block's own hash.
+///
+/// `documents.hash` is written empty by `upsert_document`, and comparing a
+/// whole-file digest against nothing is how the first attempt at this failed.
+/// The per-block hashes are authoritative, so fold those instead — ordering by
+/// `ordinal` so a section that merely moved does not read as an edit.
+fn raw_doc_fingerprints(conn: &Connection) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT doc_path, group_concat(hash, '|') FROM \
+         (SELECT doc_path, hash FROM blocks WHERE layer='raw' ORDER BY doc_path, ordinal) \
+         GROUP BY doc_path",
+    ) else {
+        return out;
+    };
+    let Ok(m) = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1).unwrap_or_default(),
+        ))
+    }) else {
+        return out;
+    };
+    for r in m.flatten() {
+        out.insert(r.0, r.1);
+    }
+    out
+}
+
+/// Raw docs whose fingerprint differs between two snapshots — i.e. the ones an
+/// ingest actually changed. Comparing before and after is the only honest way:
+/// afterwards the index already holds the new content, so there is nothing left
+/// to diff it against.
+fn changed_raw_docs(
+    before: &std::collections::HashMap<String, String>,
+    after: &std::collections::HashMap<String, String>,
+) -> Vec<String> {
+    let keys: std::collections::BTreeSet<&String> = before.keys().chain(after.keys()).collect();
+    keys.into_iter()
+        .filter(|k| before.get(*k) != after.get(*k))
+        .cloned()
+        .collect()
 }

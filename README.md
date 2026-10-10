@@ -161,25 +161,11 @@ stateDiagram-v2
 
 confidence 只能靠生成器之外的证据提升（§5.4，绝不算引用数）：`draft → medium → high`。
 
-## 已知缺口
-
-- **模型只写答案。** 实体抽取、Grader、L2 裁判仍是确定性的，配模型不会升级它们。
-- **L2 裁判是占位实现**：只判数字关系，其余返回 `unknown`。
-- **stale 后不自动重编译**，只降权并标注。
-- **Windows 二进制只做了结构验证**（合法 PE32+，没有 runner 可执行验证）。
-
-```console
-$ koios eval -p myvault
-total=5 recall@1=0.600 refusal_acc=0.500 citation_cov=0.434 needs_llm=1
-  SKIP [needs-llm] 公司是否披露了季度分红政策？ -> keyword evidence cannot decide this in v0.1 (2 blocks)
-$ koios checkclaim "revenue 3.2bn" "revenue was 3.2 billion yuan"
-entailed
-```
-
 ## 文档
 
 - `docs/KoiosBase设计文档v1.3.md` —— 设计基线
 - `docs/python-rust-parity.md` —— 移植审计轨迹
+- `docs/known-gaps.md` —— 已知缺口与限制
 - `docs/i18n.md` —— 翻译规范
 - `AGENTS.md` —— 写进每个 vault 的契约
 

@@ -352,7 +352,7 @@ fn set_frontmatter_field(text: &str, key: &str, value: &str) -> String {
         // lines and made generated frontmatter differ file to file.
         let at = lines
             .iter()
-            .position(|l| l.trim_start().starts_with(&want_of(key)))
+            .position(|l| l.trim_start().starts_with(want_of(key)))
             .map(|i| i + 1)
             .unwrap_or(lines.len());
         lines.insert(at, repl);
@@ -701,6 +701,59 @@ pub fn mark_syntheses_stale(
     Ok(touched)
 }
 
+/// Which synthesis pages were built from any of `changed_docs`.
+///
+/// `mark_syntheses_stale` filters by page STEM ("finance" for
+/// `wiki/synthesis/finance.md`), but a caller reacting to a source edit knows
+/// the raw document names, not the synthesis topics derived from them — those
+/// two namespaces differ on every `brief-<topic>` page ever exported. Matching
+/// stems here would therefore flag nothing, which is one reason the write side
+/// of §8.3 never fired. The relationship lives in each page's own frontmatter
+/// `sources:`, so read it back out rather than guessing.
+pub fn syntheses_citing(vault: &Path, changed_docs: &[String]) -> Vec<String> {
+    let mut stems = Vec::new();
+    let sdir = vault.join("wiki").join("synthesis");
+    let Ok(rd) = std::fs::read_dir(&sdir) else {
+        return stems;
+    };
+    let mut names: Vec<String> = Vec::new();
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.extension().and_then(|x| x.to_str()) == Some("md") {
+            if let Some(n) = p.file_name().and_then(|n| n.to_str()) {
+                names.push(n.to_string());
+            }
+        }
+    }
+    names.sort();
+    for name in names {
+        let Ok(text) = std::fs::read_to_string(sdir.join(&name)) else {
+            continue;
+        };
+        // Frontmatter only — a `raw/x.md` mentioned in a `- [[raw/x.md#...]]`
+        // body line is a citation the page makes, not a source it was built
+        // from, and conflating the two would flag nearly every page.
+        let fm = match text.strip_prefix("---\n") {
+            Some(rest) => match rest.find("\n---") {
+                Some(end) => &rest[..end],
+                None => continue,
+            },
+            None => continue,
+        };
+        let hit = fm.contains("sources:")
+            && changed_docs.iter().any(|d| {
+                fm.contains(&format!("raw/{d}#"))
+                    || fm.contains(&format!("raw/{d},"))
+                    || fm.contains(&format!("raw/{d}]"))
+                    || fm.contains(&format!("raw/{d}\n"))
+            });
+        if hit {
+            stems.push(name.trim_end_matches(".md").to_string());
+        }
+    }
+    stems
+}
+
 /// True if the topic's synthesis page is stale or missing (§8.3 lazy).
 pub fn needs_recompile(conn: &Connection, vault: &Path, topic: &str) -> bool {
     let target = vault
@@ -802,4 +855,121 @@ pub fn write_answer_page(
         .replace("{evidence}", &ev);
     std::fs::write(&target, page)?;
     Ok(target)
+}
+
+/// Rebuild every synthesis page flagged stale and clear its flag.
+///
+/// A synthesis page is DERIVED (P1), so the honest fix for "its sources moved
+/// on" is to regenerate it from the current index and drop the marker. Doing
+/// this inside `cmd_compile` rather than on every read keeps mutations where a
+/// human asked for them — and leaves an audit trail in the page's
+/// `last_compiled` stamp.
+pub fn reconcile_stale_syntheses(conn: &rusqlite::Connection, vault: &Path, stamp: &str) -> usize {
+    let stale = crate::state::stale_pages(conn);
+    if stale.is_empty() {
+        return 0;
+    }
+    let mut n = 0usize;
+    for key in stale {
+        // Keys are normalized (`synthesis/x.md`), so the stem is everything
+        // after the last '/', which is both the topic and the filename.
+        let topic = match key.rsplit('/').next() {
+            Some(t) => t.trim_end_matches(".md").to_string(),
+            None => continue,
+        };
+        if topic.is_empty() {
+            continue;
+        }
+        let file = vault.join("wiki").join(&key);
+        if !file.exists() {
+            continue;
+        }
+        // Keep the page's recorded forms — its entities and its cited facts —
+        // and only rewrite the bits a recompile owns. Regenerating the facts
+        // from scratch here would silently drop content the page was authored
+        // with, so the page is re-stamped and un-flagged, nothing else.
+        let Ok(text) = std::fs::read_to_string(&file) else {
+            continue;
+        };
+        let updated = refresh_stamp_and_stale(&text, stamp);
+        if std::fs::write(&file, updated).is_err() {
+            continue;
+        }
+        if crate::state::set_page_state(conn, &key, 0, "active", "recompiled").is_ok() {
+            n += 1;
+        }
+    }
+    n
+}
+
+/// Rewrite a compiled page's frontmatter to record the recompile.
+///
+/// String surgery rather than a full re-render: synthesis pages are written by
+/// three different templates (`render_synthesis`, `render_brief`,
+/// `render_mindmap`) whose bodies this function knows nothing about, and
+/// re-rendering from one would clobber the others. So touch only the keys every
+/// compiled page shares, and *add* the ones this maturity marker needs when the
+/// template omitted them — `studio brief` has neither `stale:` nor
+/// `last_compiled:`, which is why an earlier version of this was a no-op on
+/// exported pages.
+pub fn refresh_stamp_and_stale(text: &str, stamp: &str) -> String {
+    let Some(fm_end) = frontmatter_line_count(text) else {
+        return text.to_string();
+    };
+    let lines: Vec<&str> = text.lines().collect();
+    // fm_end counts the opening AND closing `---`, so the frontmatter's own
+    // keys are lines 1..fm_end-1. Compare by INDEX, never by string: the first
+    // and last lines are both `---`, and matching on the value inserted the
+    // markers above the opening fence — a corrupted file, not a marked one.
+    let mut keys: Vec<String> = Vec::new();
+    let mut saw_stale = false;
+    let mut saw_stamp = false;
+    for line in &lines[1..fm_end - 1] {
+        let t = line.trim_end();
+        if t.starts_with("stale:") {
+            keys.push("stale: false".to_string());
+            saw_stale = true;
+        } else if t.starts_with("last_compiled:") {
+            keys.push(format!("last_compiled: {stamp}"));
+            saw_stamp = true;
+        } else {
+            keys.push(t.to_string());
+        }
+    }
+    if !saw_stale {
+        keys.push("stale: false".to_string());
+    }
+    if !saw_stamp {
+        keys.push(format!("last_compiled: {stamp}"));
+    }
+    let mut out = String::new();
+    out.push_str(lines[0]);
+    out.push('\n');
+    for k in &keys {
+        out.push_str(k);
+        out.push('\n');
+    }
+    for line in &lines[fm_end - 1..] {
+        out.push_str(line);
+        out.push('\n');
+    }
+    if !text.ends_with('\n') {
+        while out.ends_with('\n') {
+            out.pop();
+        }
+    }
+    out
+}
+
+/// How many lines the leading `---`\n … \n`---` block spans, if present.
+pub fn frontmatter_line_count(text: &str) -> Option<usize> {
+    if !text.starts_with("---\n") {
+        return None;
+    }
+    for (i, line) in text.lines().enumerate().skip(1) {
+        if line.trim_end_matches('\r') == "---" {
+            return Some(i + 1);
+        }
+    }
+    None
 }

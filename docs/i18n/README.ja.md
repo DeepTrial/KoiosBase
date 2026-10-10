@@ -168,28 +168,11 @@ stateDiagram-v2
 confidence はジェネレータの外の証拠によってのみ上がります（§5.4、引用の数では
 決してありません）：`draft → medium → high`。
 
-## 既知のギャップ
-
-- **モデルが書くのは回答だけです。** エンティティ抽出、Grader、L2 判定は決定的な
-  ままで、モデルを設定しても向上しません。
-- **L2 判定はプレースホルダです**：数値の関係だけを判定し、それ以外は
-  `unknown` を返します。
-- **stale ページは自動再コンパイルされません** —— 降格され印が付くだけです。
-- **Windows バイナリは構造的にのみ検証されています**（正しい PE32+ ですが、
-  実行検証に使える runner がありませんでした）。
-
-```console
-$ koios eval -p myvault
-total=5 recall@1=0.600 refusal_acc=0.500 citation_cov=0.434 needs_llm=1
-  SKIP [needs-llm] 公司是否披露了季度分红政策？ -> keyword evidence cannot decide this in v0.1 (2 blocks)
-$ koios checkclaim "revenue 3.2bn" "revenue was 3.2 billion yuan"
-entailed
-```
-
 ## ドキュメント
 
 - `docs/KoiosBase设计文档v1.3.md` —— 設計ベースライン
 - `docs/python-rust-parity.md` —— 移植の監査証跡
+- `docs/known-gaps.md` —— 既知のギャップと制限
 - `docs/i18n.md` —— 翻訳の規約
 - `AGENTS.md` —— すべての vault に書き込まれる契約
 

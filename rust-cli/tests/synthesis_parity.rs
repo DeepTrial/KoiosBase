@@ -458,7 +458,10 @@ fn recompile_preserves_a_disputed_state() {
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .unwrap();
-    assert_eq!(stale, 0, "recompile clears the staleness flag; rows={all:?}");
+    assert_eq!(
+        stale, 0,
+        "recompile clears the staleness flag; rows={all:?}"
+    );
     assert_eq!(
         state, "disputed",
         "recompile must not silently clear a human's lifecycle state; rows={all:?}"

@@ -232,6 +232,30 @@ pub fn is_stale(conn: &Connection, page_path: &str) -> bool {
     .unwrap_or(false)
 }
 
+/// Every page currently flagged stale, normalized keys, sorted.
+///
+/// The reconciliation step needs this to close the §8.3 loop: flagging happens
+/// on write (`mark_stale`, cascade), un-flagging happens in `recompile_synthesis`
+/// for ONE topic at a time, and nothing in between could enumerate what was
+/// still outstanding — so "stale pages are never recompiled" was not a policy
+/// but a missing read. Sorted because callers report the list to stdout and a
+/// stable order keeps that output diffable across runs.
+pub fn stale_pages(conn: &Connection) -> Vec<String> {
+    let mut out: Vec<String> = conn
+        .prepare("SELECT page_path FROM page_state WHERE stale<>0")
+        .and_then(|mut s| {
+            s.query_map([], |r| r.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .unwrap_or_default();
+    for p in &mut out {
+        *p = normalize_page_key(p);
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 pub fn cascade_retraction(
     conn: &Connection,
     block_id: &str,
