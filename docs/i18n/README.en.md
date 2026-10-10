@@ -1,13 +1,13 @@
 [![CI](https://github.com/DeepTrial/KoiosBase/actions/workflows/ci.yml/badge.svg)](https://github.com/DeepTrial/KoiosBase/actions/workflows/ci.yml)
 [![GitHub Release](https://img.shields.io/github/v/release/DeepTrial/KoiosBase)](https://github.com/DeepTrial/KoiosBase/releases)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](../../LICENSE)
 
-[中文](README.md) | [English](docs/i18n/README.en.md) | [Français](docs/i18n/README.fr.md) | [Español](docs/i18n/README.es.md) | [日本語](docs/i18n/README.ja.md) | [한국어](docs/i18n/README.ko.md)
+[中文](../../README.md) | [English](README.en.md) | [Français](README.fr.md) | [Español](README.es.md) | [日本語](README.ja.md) | [한국어](README.ko.md)
 
 # KoiosBase
 
-一个 Markdown 原生的 LLM 知识库。你写 Markdown，KoiosBase 建索引，
-每个答案都指回它出自的那个块。
+A Markdown-native knowledge base for LLMs. You write Markdown, KoiosBase indexes
+it, and every answer points back at the block it came from.
 
 ```console
 $ koios search "revenue" -p myvault
@@ -25,29 +25,31 @@ $ koios search "revenue" -p myvault
     ACME Corp revenue in 2024 was 3. 2 billion yuan, up 12 percent. Operating cash flow was positive for the year.
 ```
 
-- **Markdown 就是事实本身。** 索引是构建产物，删掉会逐字节重建。
-- **知识有生命周期。** 一个块被 `retracted`，所有引用它的页面标记 stale 并停止作答。
+- **Markdown is the truth.** The index is a build artifact — delete it and it
+  rebuilds byte-for-byte.
+- **Knowledge has a lifecycle.** Retract a block and every page citing it is
+  marked stale and stops answering.
 
 ```mermaid
 flowchart LR
-    A["raw/<br/>(你编写)"] --> B["koios index"]
-    B --> C[".index/<br/>(构建产物)"]
-    C --> D["检索 / 回答"]
-    D --> E["答案 + 引用"]
-    B --> F["wiki/<br/>(编译页)"]
+    A["raw/<br/>(you write)"] --> B["koios index"]
+    B --> C[".index/<br/>(build artifact)"]
+    C --> D["search / answer"]
+    D --> E["answer + citation"]
+    B --> F["wiki/<br/>(compiled pages)"]
     F --> D
     style A fill:#e8f4ea,stroke:#4a7c59
     style F fill:#fff6e5,stroke:#8a6d3b
 ```
 
-## 安装
+## Install
 
-单个 Rust 二进制，**无运行时依赖**。
+A single Rust binary with **no runtime dependencies**.
 
 ```bash
 curl -LO https://github.com/DeepTrial/KoiosBase/releases/latest/download/koios-linux-x86_64
 chmod +x koios-linux-x86_64
-# 或从源码构建（MuPDF bindgen 需要 libclang）
+# or build from source (MuPDF's bindgen needs libclang)
 git clone https://github.com/DeepTrial/KoiosBase && cd KoiosBase
 cargo build --release --manifest-path rust-cli/Cargo.toml
 ```
@@ -59,19 +61,22 @@ indexed 0 blocks from demo
 ---- lint: 0 finding(s)
 ```
 
-### 接入 LLM（可选）
+### Connect an LLM (optional)
 
-不配置也能用：内置生成器只返回带引用的检索块，从不编造。想接模型就写
-`koios config --init -p myvault`，然后填 `koios.toml`：
+It works without one: the built-in generator returns only cited retrieved blocks
+and never fabricates. To add a model, run `koios config --init -p myvault` and
+fill in `koios.toml`:
 
 ```toml
 [model]
 base_url = "https://api.openai.com/v1"
 model = "gpt-4o-mini"
-api_key_env = "OPENAI_API_KEY"     # 环境变量的「名字」，不是密钥本身
+api_key_env = "OPENAI_API_KEY"     # the NAME of the env var, never the key
 ```
 
-闸门对你的模型一样生效——缺引用会被报告而不是静默接受，模型失败是错误而不是编造的答案：
+The guardrails apply to your model too — missing citations are reported rather
+than silently accepted, and a failing model is an error rather than a fabricated
+answer:
 
 ```console
 $ koios query "revenue" -p myvault --llm-cmd 'printf "%s" "Revenue was 3.2 billion yuan."'
@@ -80,13 +85,13 @@ Revenue was 3.2 billion yuan.
 [contracts] citation=0/1 sentences cited
 ```
 
-## 用法
+## Usage
 
 ```console
-$ koios init myvault                            # 建 vault
-$ koios index myvault                           # 每次编辑 raw/ 后跑
-$ koios search "revenue" -p myvault             # 检索
-$ koios query  "revenue" -p myvault             # 完整管线 + verdict
+$ koios init myvault                            # create a vault
+$ koios index myvault                           # after every raw/ edit
+$ koios search "revenue" -p myvault             # search
+$ koios query  "revenue" -p myvault             # full pipeline + verdict
 verdict: enough  hits: 4  escalated: false
 [0] report.md#Financials/Revenue/1
     ACME Corp revenue in 2024 was 3.2 billion yuan, up 12 percent.
@@ -100,47 +105,50 @@ verdict: enough  hits: 4  escalated: false
 - 关于「
 [3] sources/report.md#2024 Annual Report/导读摘要/1
     ACME Corp revenue in 2024 was 3. 2 billion yuan, up 12 percent. Operating cash flow was positive for the year.
-$ koios compile -p myvault                      # 编译出结构化页面
+$ koios compile -p myvault                      # compile structured pages
 compiled: entities=2 entity_pages=2 source_pages=1 affected_pages=5 stamp=2026-10-10
-$ koios studio brief -p myvault -t revenue      # 导出
+$ koios studio brief -p myvault -t revenue      # export
 wrote myvault/wiki/synthesis/brief-revenue.md
-$ koios mcp --install codex                     # 接 MCP 宿主
+$ koios mcp --install codex                     # register with an MCP host
 ```
 
-检索会按问题选通道，并在作答前先问证据够不够：
+Retrieval picks a channel per question and asks whether the evidence suffices
+before answering:
 
 ```mermaid
 flowchart TD
-    Q[问题] --> C{"选择通道"}
-    C -->|①| T["tree<br/>沿标题"]
-    C -->|②| B25["BM25<br/>词项"]
+    Q[question] --> C{"choose channel"}
+    C -->|①| T["tree<br/>follow headings"]
+    C -->|②| B25["BM25<br/>term match"]
     C -->|③| G["graph<br/>PPR"]
-    C -->|④| F["全语料"]
-    T --> Gr{"证据够吗"}
+    C -->|④| F["full corpus"]
+    T --> Gr{"evidence enough?"}
     B25 --> Gr
     G --> Gr
     F --> Gr
-    Gr -->|enough| An["答案 + [[引用]]"]
-    Gr -->|"evidence_absent"| Esc["升级到 ④"]
+    Gr -->|enough| An["answer + [[citation]]"]
+    Gr -->|"evidence_absent"| Esc["escalate to ④"]
     Esc --> Gr
-    Gr -->|still absent| R[拒绝回答]
+    Gr -->|still absent| R[refuse]
     style An fill:#e8f4ea,stroke:#4a7c59
     style R fill:#fdecea,stroke:#a94442
 ```
 
-**ACL**：`--groups finance-team` 设定你的主体；不给就是匿名，受限文档对你不可见——这是设计。
+**ACL**: `--groups finance-team` sets your principal; without it you are
+anonymous and restricted documents are invisible — by design.
 
-**vault 结构**：`raw/`（你写）、`wiki/`（生成，要提交）、`.index/`（构建产物，别提交）。
+**Vault layout**: `raw/` (you write), `wiki/` (generated, commit it),
+`.index/` (build artifact, never commit).
 
-## 维护
+## Maintenance
 
-| 任务 | 命令 |
+| Task | Command |
 | --- | --- |
-| 编辑 `raw/` 后 | `koios index myvault` |
-| 健康检查 | `koios lint myvault` |
-| 升级后 | `koios index myvault --full` |
-| 事实错了 | `koios retract -p myvault -b "块id" --reason "..."` |
-| 提升置信度 | `koios promote --human-confirmed "wiki/entities/acme.md"` |
+| After editing `raw/` | `koios index myvault` |
+| Health check | `koios lint myvault` |
+| After upgrading | `koios index myvault --full` |
+| A fact is wrong | `koios retract -p myvault -b "block-id" --reason "..."` |
+| Raise confidence | `koios promote --human-confirmed "wiki/entities/acme.md"` |
 
 ```console
 $ koios retract -p myvault -b "report.md#Financials/Revenue/1" --reason "wrong figure"
@@ -159,14 +167,18 @@ stateDiagram-v2
     retracted --> [*]: filtered from retrieval
 ```
 
-confidence 只能靠生成器之外的证据提升（§5.4，绝不算引用数）：`draft → medium → high`。
+Confidence rises only on evidence from outside the generator (§5.4 — never
+citation counts): `draft → medium → high`.
 
-## 已知缺口
+## Known gaps
 
-- **模型只写答案。** 实体抽取、Grader、L2 裁判仍是确定性的，配模型不会升级它们。
-- **L2 裁判是占位实现**：只判数字关系，其余返回 `unknown`。
-- **stale 后不自动重编译**，只降权并标注。
-- **Windows 二进制只做了结构验证**（合法 PE32+，没有 runner 可执行验证）。
+- **The model only writes answers.** Entity extraction, the Grader and the L2
+  judge stay deterministic; configuring a model does not upgrade them.
+- **The L2 judge is a placeholder**: it decides only numeric relations and
+  returns `unknown` for everything else.
+- **Stale pages are not auto-recompiled** — they are down-ranked and flagged.
+- **The Windows binary is verified structurally only** (valid PE32+, but no
+  runner was available to execute it).
 
 ```console
 $ koios eval -p myvault
@@ -176,11 +188,11 @@ $ koios checkclaim "revenue 3.2bn" "revenue was 3.2 billion yuan"
 entailed
 ```
 
-## 文档
+## Docs
 
-- `docs/KoiosBase设计文档v1.3.md` —— 设计基线
-- `docs/python-rust-parity.md` —— 移植审计轨迹
-- `docs/i18n.md` —— 翻译规范
-- `AGENTS.md` —— 写进每个 vault 的契约
+- `docs/KoiosBase设计文档v1.3.md` — design baseline
+- `docs/python-rust-parity.md` — the port's audit trail
+- `docs/i18n.md` — translation convention
+- `AGENTS.md` — the contract written into every vault
 
-MIT —— 见 [LICENSE](LICENSE)。
+MIT — see [LICENSE](../../LICENSE).
