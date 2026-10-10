@@ -389,10 +389,21 @@ fn cmd_config(path: &Path, init: bool) -> Result<(), Box<dyn std::error::Error>>
             if let Some(cmd) = m.command.as_deref() {
                 println!("  command: {cmd}");
             } else {
+                // Show the wire format too. "Which dialect is actually going
+                // out?" is otherwise unanswerable without reading the code, and
+                // guessing wrong produces a 404 or an auth rejection that looks
+                // like a bad key rather than a mismatched endpoint.
+                let kind = match koios::llm::provider_of(m) {
+                    Ok(p) => p.as_str().to_string(),
+                    Err(_) => format!("{} (invalid)", m.kind.as_deref().unwrap_or("")),
+                };
                 println!(
-                    "  chat: {} @ {}",
+                    "  chat: {} @ {}  [wire: {kind}]",
                     m.model.as_deref().unwrap_or("(none)"),
-                    m.base_url.as_deref().unwrap_or("https://api.openai.com/v1")
+                    m.base_url.as_deref().unwrap_or(match kind.as_str() {
+                        "anthropic" => "https://api.anthropic.com/v1",
+                        _ => "https://api.openai.com/v1",
+                    })
                 );
                 if let Some(k) = m.api_key_env.as_deref() {
                     println!(
@@ -423,11 +434,21 @@ const STARTER: &str = r#"# KoiosBase model configuration.
 # it, so this file is safe to commit.
 
 [model]
-# Any OpenAI-compatible endpoint: OpenAI, a local llama.cpp / vLLM / Ollama,
-# or a corporate proxy.
+# Wire format. "openai" covers anything speaking POST /chat/completions:
+# OpenAI, Ollama, vLLM, llama.cpp, DeepSeek, Moonshot, Groq, LiteLLM — and
+# gateways proxying Claude, which present that shape regardless of the model.
+# Use "anthropic" ONLY for Anthropic's own endpoint, whose /v1/messages API
+# differs in URL, auth header (x-api-key) and response shape (content[0].text).
+kind = "openai"
 base_url = "https://api.openai.com/v1"
 model = "gpt-4o-mini"
 api_key_env = "OPENAI_API_KEY"
+
+# Anthropic's own endpoint instead:
+# kind = "anthropic"
+# base_url = "https://api.anthropic.com/v1"
+# model = "claude-sonnet-4-20250514"
+# api_key_env = "ANTHROPIC_API_KEY"
 
 # Optional: scanned PDF pages (§5.1 vision tier). Without this, pages with no
 # extractable text are skipped rather than guessed at.

@@ -1,14 +1,27 @@
 //! Model access: a config file, resolved once, used by every command.
 //!
-//! KoiosBase ships no vendor adapter and hardcodes no provider — what it does
-//! ship is an **OpenAI-compatible client** and a small config file. Anything
-//! that speaks that shape works: a hosted API, a local llama.cpp or vLLM
-//! server, Ollama, a corporate proxy.
+//! KoiosBase ships no vendor SDK and hardcodes no provider — what it does ship
+//! is a **wire-format adapter** and a small config file.
+//!
+//! Wire formats are not interchangeable, and pretending they are is how an
+//! integration half-works: the request URL, the auth header and the response
+//! shape all differ between OpenAI and Anthropic. So both are implemented:
+//!
+//! | `kind` | endpoint | auth | answer read from |
+//! | --- | --- | --- | --- |
+//! | `openai` (default) | `POST {base}/chat/completions` | `Authorization: Bearer` | `choices[0].message.content` |
+//! | `anthropic` | `POST {base}/messages` | `x-api-key` + `anthropic-version` | `content[0].text` |
+//!
+//! `openai` also covers everything else that speaks it: OpenAI itself, Ollama,
+//! vLLM, llama.cpp, DeepSeek, Moonshot, Groq, Together, LiteLLM and most
+//! corporate gateways — including those proxying Claude, which present the
+//! OpenAI shape regardless of the model behind them. Only Anthropic's own
+//! `/v1/messages` needs `kind = "anthropic"`.
 //!
 //! ```toml
 //! # <vault>/koios.toml
 //! [model]
-//! kind   = "chat"                       # chat | vision | command
+//! kind   = "openai"                     # openai | anthropic
 //! base_url = "https://api.openai.com/v1"
 //! model  = "gpt-4o-mini"
 //! api_key_env = "OPENAI_API_KEY"        # name of the env var, never the key
@@ -153,12 +166,109 @@ pub fn has_vision(cfg: &Config) -> bool {
 /// `system` is where the §6.5 contracts are stated to the model: cite every
 /// factual sentence, and refuse when the evidence does not contain the answer.
 /// The contract is still *checked* afterwards — prompting is not enforcement.
-pub fn chat(cfg: &ModelConfig, question: &str, context: &str) -> Result<String, String> {
-    let Some(model) = cfg.model.as_deref() else {
-        return Err("config has no model.model".into());
-    };
+/// Anything that speaks one of the supported provider wire formats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Provider {
+    /// `POST {base}/chat/completions`, Bearer auth, answer at
+    /// `choices[0].message.content`. Also what Ollama, vLLM, llama.cpp,
+    /// Together, Groq, DeepSeek, Moonshot and most gateways speak.
+    #[default]
+    Openai,
+    /// `POST {base}/messages` with `x-api-key` / `anthropic-version` headers,
+    /// `system` hoisted OUT of the messages array, and the answer at
+    /// `content[0].text`. Anthropic's own API is not OpenAI-compatible, so this
+    /// is a genuinely different request builder, not a URL tweak.
+    Anthropic,
+}
 
-    // The escape hatch first: an explicit command beats any HTTP assumption.
+impl Provider {
+    fn from_str(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "openai" | "chat" | "" => Some(Self::Openai),
+            "anthropic" | "claude" => Some(Self::Anthropic),
+            _ => None,
+        }
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Openai => "openai",
+            Self::Anthropic => "anthropic",
+        }
+    }
+}
+
+/// Pick the wire format from `kind =`, falling back on the base URL.
+///
+/// `kind` is authoritative because guessing gets it wrong in both directions:
+/// `api.anthropic.com` is detectable, but every gateway that proxies Claude
+/// presents an OpenAI shape at a URL mentioning neither name.
+pub fn provider_of(cfg: &ModelConfig) -> Result<Provider, String> {
+    if let Some(k) = cfg.kind.as_deref() {
+        return Provider::from_str(k).ok_or_else(|| {
+            format!(
+                "unknown model.kind = {k:?} — expected \"openai\" or \"anthropic\". \
+                 An OpenAI-compatible gateway proxying Claude still speaks openai; \
+                 only Anthropic's own /v1/messages endpoint needs anthropic."
+            )
+        });
+    }
+    let url = cfg
+        .base_url
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    Ok(if url.contains("anthropic.com") {
+        Provider::Anthropic
+    } else {
+        Provider::Openai
+    })
+}
+
+/// Pull the text out of a provider's response — the two shapes share nothing.
+pub fn extract_content(json: &serde_json::Value, provider: Provider) -> Option<String> {
+    let text = match provider {
+        // choices[0].message.content
+        Provider::Openai => json
+            .get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("message"))
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_str())
+            .map(|s| s.to_string()),
+        // content[] blocks, each {"type": "text", "text": ...}
+        Provider::Anthropic => {
+            let blocks = json.get("content").and_then(|c| c.as_array())?;
+            let parts: Vec<&str> = blocks
+                .iter()
+                .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
+                .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                .collect();
+            if parts.is_empty() {
+                None
+            } else {
+                Some(parts.join(""))
+            }
+        }
+    }?;
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+/// Ask the configured model to answer `question` from `context`.
+///
+/// `system` is where the §6.5 contracts are stated to the model: cite every
+/// factual sentence, and refuse when the evidence does not contain the answer.
+/// The contract is still *checked* afterwards — prompting is not enforcement.
+pub fn chat(cfg: &ModelConfig, question: &str, context: &str) -> Result<String, String> {
+    // The escape hatch FIRST: an explicit command beats any HTTP assumption,
+    // and needs no endpoint, no key and no model name. It used to sit behind
+    // the `model` check below, so `--llm-cmd` on a vault with no koios.toml
+    // failed with "config has no model.model" — the one entry point that
+    // promised to need no configuration was the one that demanded it.
     if let Some(cmd) = cfg.command.as_deref().filter(|c| !c.trim().is_empty()) {
         return run_command(
             cmd,
@@ -167,10 +277,22 @@ pub fn chat(cfg: &ModelConfig, question: &str, context: &str) -> Result<String, 
         );
     }
 
+    let Some(model) = cfg.model.as_deref() else {
+        return Err(
+            "config has no model.model (and no model.command) — set one, or use \
+             `koios query --llm-cmd` to pipe the evidence through your own program"
+                .into(),
+        );
+    };
+
+    let provider = provider_of(cfg)?;
     let base = cfg
         .base_url
         .as_deref()
-        .unwrap_or("https://api.openai.com/v1")
+        .unwrap_or(match provider {
+            Provider::Openai => "https://api.openai.com/v1",
+            Provider::Anthropic => "https://api.anthropic.com/v1",
+        })
         .trim_end_matches('/');
     let key = api_key(cfg)?;
 
@@ -181,14 +303,27 @@ pub fn chat(cfg: &ModelConfig, question: &str, context: &str) -> Result<String, 
                   exactly 资料中未涉及 and nothing else; (3) never add facts \
                   that are not in the evidence.";
 
-    let mut body = serde_json::json!({
-        "model": model,
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": format!(
-                "EVIDENCE:\n{context}\n\nQUESTION: {question}")}
-        ],
-    });
+    let user = format!("EVIDENCE:\n{context}\n\nQUESTION: {question}");
+
+    let body = match provider {
+        Provider::Openai => serde_json::json!({
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user}
+            ],
+        }),
+        // Anthropic takes `system` as a top-level field; sending it inside
+        // messages is rejected, which is the whole reason this is a branch.
+        Provider::Anthropic => serde_json::json!({
+            "model": model,
+            "system": system,
+            "messages": [{"role": "user", "content": user}],
+            // Max_tokens is REQUIRED on Anthropic; OpenAI treats it as optional.
+            "max_tokens": 2000,
+        }),
+    };
+    let mut body = body;
     if let Some(obj) = body.as_object_mut() {
         for (k, v) in &cfg.options {
             // Skip the fields we already know, so `flatten` cannot re-insert
@@ -202,10 +337,19 @@ pub fn chat(cfg: &ModelConfig, question: &str, context: &str) -> Result<String, 
         }
     }
 
-    let mut req =
-        ureq::post(&format!("{base}/chat/completions")).header("Content-Type", "application/json");
+    let url = match provider {
+        Provider::Openai => format!("{base}/chat/completions"),
+        Provider::Anthropic => format!("{base}/messages"),
+    };
+    let mut req = ureq::post(&url).header("Content-Type", "application/json");
     if !key.is_empty() {
-        req = req.header("Authorization", &format!("Bearer {key}"));
+        req = match provider {
+            Provider::Openai => req.header("Authorization", &format!("Bearer {key}")),
+            // Anthropic refuses `Authorization: Bearer` outright.
+            Provider::Anthropic => req
+                .header("x-api-key", &key)
+                .header("anthropic-version", "2023-06-01"),
+        };
     }
 
     let resp = req
@@ -216,21 +360,17 @@ pub fn chat(cfg: &ModelConfig, question: &str, context: &str) -> Result<String, 
         .read_json()
         .map_err(|e| format!("model returned unreadable JSON: {e}"))?;
 
-    json.get("choices")
-        .and_then(|c| c.get(0))
-        .and_then(|c| c.get("message"))
-        .and_then(|m| m.get("content"))
-        .and_then(|c| c.as_str())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| {
-            let err = json
-                .get("error")
-                .and_then(|e| e.get("message"))
-                .and_then(|m| m.as_str())
-                .unwrap_or("unknown shape");
-            format!("model response had no content: {err}")
-        })
+    extract_content(&json, provider).ok_or_else(|| {
+        let err = json
+            .get("error")
+            .map(|e| {
+                e.get("message")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or_else(|| e.as_str().unwrap_or("unknown shape"))
+            })
+            .unwrap_or("unknown shape");
+        format!("model response had no {} content: {err}", provider.as_str())
+    })
 }
 
 /// One call to an OpenAI-compatible vision endpoint for a rasterized page.
@@ -289,13 +429,10 @@ pub fn vision(cfg: &Config, png: &[u8]) -> Result<String, String> {
         .into_body()
         .read_json()
         .map_err(|e| format!("vision response unreadable: {e}"))?;
-    json.get("choices")
-        .and_then(|c| c.get(0))
-        .and_then(|c| c.get("message"))
-        .and_then(|m| m.get("content"))
-        .and_then(|c| c.as_str())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+    // Same reader as `chat`: if Anthropic support is added to the vision tier,
+    // its answer shape has to be understood here too, and duplicating the
+    // extraction is how one path silently drifts from the other.
+    extract_content(&json, Provider::Openai)
         .ok_or_else(|| "vision response had no content".to_string())
 }
 

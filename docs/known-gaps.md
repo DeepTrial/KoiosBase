@@ -10,6 +10,23 @@ it has been fixed. Verify before removing an entry.
 
 ---
 
+## 0. Two wire formats are supported: OpenAI-shape and Anthropic
+
+`kind = "openai"` (default) covers **every** endpoint speaking
+`POST {base}/chat/completions` with Bearer auth — OpenAI, Ollama, vLLM,
+llama.cpp, DeepSeek, Moonshot, Groq, Together, LiteLLM, and corporate gateways
+*including those proxying Claude*, which present the OpenAI shape regardless of
+the model behind them.
+
+`kind = "anthropic"` targets Anthropic's own `/v1/messages`, which differs in
+all three respects — path, auth header (`x-api-key` + `anthropic-version`, not
+Bearer), and response shape (`content[0].text`, not
+`choices[0].message.content`). Anything else (Google Gemini, Bedrock, ...) is
+not implemented; use `--llm-cmd` or a gateway that translates for you.
+
+Verified against a local mock for both protocols — see
+`rust-cli/tests/llm_wire.rs`.
+
 ## 1. The model only writes answers
 
 **What**: configuring a model changes nothing except the answer text. Entity

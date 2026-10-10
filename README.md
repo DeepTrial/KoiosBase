@@ -71,6 +71,8 @@ model = "gpt-4o-mini"
 api_key_env = "OPENAI_API_KEY"     # 环境变量的「名字」，不是密钥本身
 ```
 
+任何支持 OpenAI 协议的服务都能用（`kind = "openai"`，默认）：OpenAI、Ollama、vLLM、DeepSeek、Moonshot、LiteLLM，以及代理 Claude 的网关。只有 Anthropic 自己的端点要填 `kind = "anthropic"`。
+
 闸门对你的模型一样生效——缺引用会被报告而不是静默接受，模型失败是错误而不是编造的答案：
 
 ```console

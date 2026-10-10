@@ -74,6 +74,12 @@ model = "gpt-4o-mini"
 api_key_env = "OPENAI_API_KEY"     # el NOMBRE de la variable de entorno, nunca la clave
 ```
 
+Cualquier endpoint que hable el protocolo OpenAI funciona (`kind = "openai"`,
+predeterminado): OpenAI, Ollama, vLLM, DeepSeek, Moonshot, LiteLLM — y las
+pasarelas que proxifican Claude, que exponen esa misma forma independientemente
+del modelo detrás. Solo el endpoint propio de Anthropic necesita
+`kind = "anthropic"`.
+
 Las barreras de seguridad también se aplican a tu modelo: las citas faltantes se
 reportan en lugar de aceptarse en silencio, y un modelo que falla es un error y
 no una respuesta fabricada:

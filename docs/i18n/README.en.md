@@ -74,6 +74,11 @@ model = "gpt-4o-mini"
 api_key_env = "OPENAI_API_KEY"     # the NAME of the env var, never the key
 ```
 
+Any endpoint speaking the OpenAI protocol works (`kind = "openai"`, the default):
+OpenAI, Ollama, vLLM, DeepSeek, Moonshot, LiteLLM — and gateways proxying Claude,
+which present that shape regardless of the model behind them. Only Anthropic's own
+endpoint needs `kind = "anthropic"`.
+
 The guardrails apply to your model too — missing citations are reported rather
 than silently accepted, and a failing model is an error rather than a fabricated
 answer:

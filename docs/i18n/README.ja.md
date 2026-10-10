@@ -74,6 +74,8 @@ model = "gpt-4o-mini"
 api_key_env = "OPENAI_API_KEY"     # 環境変数の「名前」であって、キー自体ではない
 ```
 
+OpenAI プロトコルを話すエンドポイントなら何でも使えます（`kind = "openai"`、既定値）：OpenAI、Ollama、vLLM、DeepSeek、Moonshot、LiteLLM —— および Claude をプロキシするゲートウェイ（背後のモデルに関係なくこの形式を提示します）。Anthropic 自身のエンドポイントのみ `kind = "anthropic"` が必要です。
+
 ガードレールはあなたのモデルにも適用されます —— 引用漏れは黙認されず報告され、
 モデルの失敗は捏造された回答ではなくエラーになります：
 

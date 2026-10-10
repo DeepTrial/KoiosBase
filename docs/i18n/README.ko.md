@@ -74,6 +74,8 @@ model = "gpt-4o-mini"
 api_key_env = "OPENAI_API_KEY"     # 환경 변수의 '이름'이며, 키 자체가 아닙니다
 ```
 
+OpenAI 프로토콜을 말하는 모든 엔드포인트를 쓸 수 있습니다(`kind = "openai"`, 기본값): OpenAI, Ollama, vLLM, DeepSeek, Moonshot, LiteLLM — 그리고 Claude를 프록시하는 게이트웨이(뒤의 모델과 무관하게 이 형식을 제공합니다). Anthropic 자체 엔드포인트만 `kind = "anthropic"`이 필요합니다.
+
 안전장치는 사용자의 모델에도 적용됩니다 — 인용 누락은 조용히 수용되지 않고
 보고되며, 모델 실패는 지어낸 답변이 아니라 오류입니다:
 
