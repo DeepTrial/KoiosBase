@@ -208,14 +208,22 @@ fn tool_search(args: &Value) -> Result<Value, String> {
         .iter()
         .filter_map(|i| crate::pipeline::get_block(&conn, i))
         .collect();
+    // Same triple as `koios_ask` (§8.3). This used to stop after
+    // `filter_visible`, so a stale page ranked identically through the two MCP
+    // read tools while `koios_ask` down-ranked it — two exits, two answers.
     blocks = crate::acl::filter_blocks(&conn, blocks, groups_of(args).as_deref());
     blocks = crate::state::filter_visible(&conn, blocks);
+    blocks = crate::state::apply_disposition(&conn, blocks, false);
     let mut out = blocks_to_json(&conn, &blocks);
-    // attach score in retrieval order — Python does this inside the row loop
-    for (item, (bid, score)) in out.iter_mut().zip(rows.iter()) {
+    // attach score in retrieval order — Python does this inside the row loop,
+    // so `score` stays the LAST key even though the block list is re-ordered
+    // by disposition below it.
+    for item in out.iter_mut() {
         if let Value::Object(m) = item {
-            if m.get("id").and_then(|v| v.as_str()) == Some(bid.as_str()) {
-                m.insert("score".to_string(), json!(score));
+            if let Some(bid) = m.get("id").and_then(|v| v.as_str()) {
+                if let Some((_, score)) = rows.iter().find(|(b, _)| b == bid) {
+                    m.insert("score".to_string(), json!(score));
+                }
             }
         }
     }

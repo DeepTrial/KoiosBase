@@ -169,6 +169,31 @@ pub fn retrieve_channel(
     crate::state::apply_disposition(conn, out, false)
 }
 
+/// The retrieval filter chain, as one callable.
+///
+/// Every read path must run this exact triple — ACL (§9.2), state (§8.2),
+/// disposition (§8.3) — before a block can reach a context or a printed list.
+/// Three call sites previously hand-rolled a subset of it (`cmd_tree`,
+/// `cmd_full`, and the §4 escalation below), which is exactly how an anonymous
+/// caller read the restricted blocks directly. One function, no variations.
+pub fn filter_chain(
+    conn: &Connection,
+    blocks: Vec<Ev>,
+    groups: Option<&[String]>,
+) -> Vec<Ev> {
+    let out = crate::acl::filter_blocks(conn, blocks, groups);
+    let out = crate::state::filter_visible(conn, out);
+    crate::state::apply_disposition(conn, out, false)
+}
+
+/// Every block in the corpus, after the filter chain. Used by channel ④ and by
+/// the §4 escalation, both of which were reading the corpus raw.
+pub fn visible_corpus(conn: &Connection, groups: Option<&[String]>) -> Vec<Ev> {
+    let ids = full_corpus(conn, 200_000).unwrap_or_default();
+    let all: Vec<Ev> = ids.iter().filter_map(|i| get_block(conn, i)).collect();
+    filter_chain(conn, all, groups)
+}
+
 /// Grader verdict over ALL evidence joined, first 2000 chars, lowercased.
 pub fn grade(question: &str, blocks: &[Ev]) -> &'static str {
     if blocks.is_empty() {
@@ -363,6 +388,13 @@ pub fn full_query_with(
             .take(top * 5)
             .filter_map(|i| get_block(conn, i))
             .collect();
+        // Escalation is still retrieval, so it still runs the full chain. Taking
+        // the top of the raw corpus here meant a restricted block reached the
+        // context (and therefore the answer) on exactly the inputs the normal
+        // channel would have rejected.
+        let cand = crate::acl::filter_blocks(conn, cand, groups);
+        let cand = crate::state::filter_visible(conn, cand);
+        let cand = crate::state::apply_disposition(conn, cand, false);
         if !cand.is_empty() && has_terms(question, &cand) {
             blocks = cand;
             trace["escalated"] = serde_json::json!("full");

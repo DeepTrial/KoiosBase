@@ -1,11 +1,22 @@
 //! Ingest pipeline: raw/ + wiki/ → .index/ (§5) — mirrors ingest/pipeline.py.
 //!
-//! Two invariants from the Python side are load-bearing:
-//!   * derived pages (sources/, entities/) are NEVER indexed — indexing them
-//!     feeds the compiler's own output back in and the block count grows on
-//!     every rebuild instead of staying idempotent;
+//! Two invariants:
 //!   * graph edges are derived purely from Markdown wikilinks (§5.2), never
-//!     from the db.
+//!     from the db;
+//!   * **derived pages ARE indexed.** Earlier drafts of this module claimed the
+//!     opposite ("derived pages are NEVER indexed"), but `cmd_index` walks
+//!     `wiki/` wholesale, so `sources/` and `entities/` rows land in the block
+//!     table alongside everything else. The "never" rule was once correct as a
+//!     guard against self-feeding, and the fear behind it still is — but the
+//!     self-feeding is now prevented where it actually belongs: the compiler's
+//!     input set is pinned to `layer='raw'` (see `compile`), so indexing the
+//!     compiler's output cannot grow the corpus. Content hashes make ingest
+//!     idempotent regardless (measured: consecutive rebuilds are stable).
+//!     Excluding derived pages instead starved channel ① (§6.1, wiki-first) of
+//!     the wiki rows it exists to prefer, and made the two shells disagree on
+//!     block counts. When behaviour and the docstring disagree, the docstring
+//!     is the bug — but fix BOTH, because a reader who finds this file first
+//!     will otherwise re-break it.
 
 use once_cell::sync::Lazy;
 use regex::Regex;

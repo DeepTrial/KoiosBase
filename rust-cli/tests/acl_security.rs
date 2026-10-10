@@ -75,6 +75,78 @@ fn search_respects_principal() {
     let _ = fs::remove_dir_all(&v);
 }
 
+/// The three command surfaces that print retrieval output must agree with
+/// `retrieve_channel` — one "correct" implementation is worthless when three
+/// callers bypass it. Found by measurement: `query`, `tree` and `full` each
+/// printed raw blocks while `search` filtered correctly.
+#[test]
+fn tree_and_full_channels_respect_principal() {
+    let v = vault("channels");
+    let conn = koios::connect(&v).unwrap();
+
+    let tree = koios::retrieval::tree_search(&conn, "薪酬", 3).unwrap_or_default();
+    let anon_tree = koios::pipeline::filter_chain(
+        &conn,
+        tree.iter().filter_map(|i| koios::pipeline::get_block(&conn, i)).collect(),
+        None,
+    );
+    assert!(
+        anon_tree.iter().all(|b| !b.raw.contains("500 万")),
+        "anonymous `koios tree` printed restricted prose"
+    );
+
+    let ids = koios::retrieval::full_corpus(&conn, 200_000).unwrap_or_default();
+    let anon_full = koios::pipeline::filter_chain(
+        &conn,
+        ids.iter().filter_map(|i| koios::pipeline::get_block(&conn, i)).collect(),
+        None,
+    );
+    assert!(
+        anon_full.iter().all(|b| !b.raw.contains("500 万")),
+        "anonymous `koios full` printed restricted prose"
+    );
+    // The other half: an entitled caller still gets it through the same door.
+    let fin_full = koios::pipeline::filter_chain(
+        &conn,
+        ids.iter().filter_map(|i| koios::pipeline::get_block(&conn, i)).collect(),
+        Some(&groups(&["finance-team"])),
+    );
+    assert!(
+        fin_full.iter().any(|b| b.raw.contains("500 万")),
+        "entitled caller saw nothing on channel ④"
+    );
+    let _ = fs::remove_dir_all(&v);
+}
+
+/// Anonymous × restricted × §4 escalation — the empty cell in the old matrix.
+///
+/// The deterministic generator was reachable with no model configured, and the
+/// escalation branch took the top of the *raw* corpus, so a restricted block
+/// reached the answer text itself. Masking afterwards is not enough (acl.rs
+/// says so): the check has to sit before generation.
+#[test]
+fn escalated_answer_excludes_restricted_blocks() {
+    let v = vault("escalated");
+    let conn = koios::connect(&v).unwrap();
+    let res = koios::pipeline::full_query(&conn, "薪酬", 8, None);
+    assert!(
+        !res.answer.contains("500 万"),
+        "restricted figure reached the answer via escalation: {}",
+        res.answer
+    );
+    assert!(
+        res.evidence.iter().all(|b| !b.raw.contains("500 万")),
+        "restricted block reached the evidence set"
+    );
+
+    let fin = koios::pipeline::full_query(&conn, "薪酬", 8, Some(&groups(&["finance-team"])));
+    assert!(
+        fin.evidence.iter().any(|b| b.raw.contains("500 万")),
+        "entitled caller lost the right evidence"
+    );
+    let _ = fs::remove_dir_all(&v);
+}
+
 #[test]
 fn studio_export_respects_principal() {
     let v = vault("studio");

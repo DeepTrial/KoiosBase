@@ -127,8 +127,12 @@ fn lint_reports_stale_pages() {
         .find(|(k, _)| *k == "stale_pages")
         .map(|(_, v)| v.clone())
         .unwrap_or_default();
+    // The key is stored normalised (`entities/a.md`, no `wiki/` prefix) so the
+    // writer's shape and the reader's `doc_path` meet — see
+    // `state::normalize_page_key`. Reporting the raw key here is what let the
+    // cascade write rows nobody could find.
     assert!(
-        stale.iter().any(|s| s.contains("wiki/entities/a.md")),
+        stale.iter().any(|s| s.contains("entities/a.md")),
         "gardener must surface stale pages; got {stale:?}"
     );
 }

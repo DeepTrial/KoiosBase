@@ -185,7 +185,7 @@ _once cone也只有 Python 才有的能力_做了专项核查——`rust-cli/src
 > 才能让本节的结论可复现。
 
 ```bash
-cargo test --release --manifest-path rust-cli/Cargo.toml   # 20 suites, 122 tests
+cargo test --release --manifest-path rust-cli/Cargo.toml   # 20 suites, 146 tests
 git show 0098f7d:tools/synth_diff.py > /tmp/synth_diff.py
 git show 0098f7d:tools/gen_synthesis_fixture.py > /tmp/gen_synthesis_fixture.py
 # synthesis 层的跨壳生命周期差分（Python 实跑 vs Rust 实跑）
@@ -210,7 +210,9 @@ PYTHONPATH=. .venv/bin/python -c "from koiosbase.cli import main; main(['eval','
 ```
 
 预期两壳都是 `total=5 recall@1=0.600 refusal_acc=1.000 citation_cov=0.348`。
-实测当前 Rust 二进制正是这一行（见 README 的 One shell 一节）。
+实测当前 Rust 二进制正是这一行（见 README 的 Known gaps 一节，那里用的是
+`tests/channels_eval.rs` 的 fixture，因此数值为 refusal_acc=0.500 / citation_cov=0.434；
+本节的 fixture 不同，两者都真实）。
 
 这个方法一次性挖出三个真实 Rust 缺口（均已修）：
 
@@ -233,7 +235,7 @@ PYTHONPATH=. .venv/bin/python -c "from koiosbase.cli import main; main(['eval','
 ```bash
 # Rust —— 仓库里现在唯一的一套
 cargo build --release --manifest-path rust-cli/Cargo.toml
-cargo test --release --manifest-path rust-cli/Cargo.toml   # 20 suites, 122 tests
+cargo test --release --manifest-path rust-cli/Cargo.toml   # 20 suites, 146 tests
 # Python —— 需要先把当时的源文件从历史里取回来（已被删除）
 git show cddcb64:koiosbase/cli.py > /tmp/koios_cli.py      # 依此类推
 ```

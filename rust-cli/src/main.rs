@@ -72,6 +72,9 @@ enum Cmd {
         query: Vec<String>,
         #[arg(short = 'p', long = "path", default_value = ".")]
         path: PathBuf,
+        /// principal groups for ACL (§9.2), comma separated
+        #[arg(long)]
+        groups: Option<String>,
     },
     /// channel ④ full-corpus (empty when over the threshold)
     Full {
@@ -79,6 +82,9 @@ enum Cmd {
         path: PathBuf,
         #[arg(long, default_value_t = 200_000)]
         max_chars: usize,
+        /// principal groups for ACL (§9.2), comma separated
+        #[arg(long)]
+        groups: Option<String>,
     },
     /// full query with Grader verdict (§6.2)
     Query {
@@ -259,13 +265,13 @@ fn cmd_search(
     // no way to reach channels ①/③/④ at all.
     let ev = if let Some(ch) = channel {
         let ids = channel_ids(&conn, ch, query, top);
-        let mut out: Vec<pipeline::Ev> = ids
+        let out: Vec<pipeline::Ev> = ids
             .iter()
             .filter_map(|i| pipeline::get_block(&conn, i))
             .collect();
-        out = acl::filter_blocks(&conn, out, groups.as_deref());
-        out = state::filter_visible(&conn, out);
-        state::apply_disposition(&conn, out, false)
+        // Same triple as retrieve_channel, so `--channel` cannot pick the one
+        // door the ACL forgot to lock.
+        pipeline::filter_chain(&conn, out, groups.as_deref())
     } else {
         pipeline::retrieve_channel(&conn, query, top, groups.as_deref())
     };
@@ -301,21 +307,52 @@ fn print_blocks(conn: &Connection, ids: &[String]) -> rusqlite::Result<()> {
     Ok(())
 }
 
-fn cmd_tree(path: &Path, query: &str) -> rusqlite::Result<()> {
-    let conn = connect(path)?;
-    let ids = retrieval::tree_search(&conn, query, 3)?;
-    print_blocks(&conn, &ids)
+/// `tree`/`full` rendering, kept byte-identical to `print_blocks` so existing
+/// scripts keep parsing them after the filter landed.
+fn print_evs(_conn: &Connection, ev: &[pipeline::Ev]) -> rusqlite::Result<()> {
+    if ev.is_empty() {
+        println!("(no hits)");
+        return Ok(());
+    }
+    for (i, b) in ev.iter().enumerate() {
+        let snippet: String = b.raw.chars().take(110).collect();
+        println!("[{i}] {}\n    {snippet}", b.id);
+    }
+    Ok(())
 }
 
-fn cmd_full(path: &Path, max_chars: usize) -> rusqlite::Result<()> {
+/// `koios tree` — channel ①, but NOT outside the retrieval chain.
+///
+/// This printed raw `tree_search` output straight to stdout, so an anonymous
+/// caller read blocks declared `acl: [finance-team]` verbatim while
+/// `koios search -c tree` filtered the same corpus correctly. Same capability,
+/// two entries, one of them unsafe — so routing through `filter_chain` here.
+fn cmd_tree(path: &Path, query: &str, groups: Option<&[String]>) -> rusqlite::Result<()> {
+    let conn = connect(path)?;
+    let ids = retrieval::tree_search(&conn, query, 3)?;
+    let blocks: Vec<pipeline::Ev> = ids
+        .iter()
+        .filter_map(|i| pipeline::get_block(&conn, i))
+        .collect();
+    let kept = pipeline::filter_chain(&conn, blocks, groups);
+    print_evs(&conn, &kept)
+}
+
+/// `koios full` — channel ④. Same story as `tree`: the whole corpus, unfiltered.
+fn cmd_full(path: &Path, max_chars: usize, groups: Option<&[String]>) -> rusqlite::Result<()> {
     let conn = connect(path)?;
     let ids = retrieval::full_corpus(&conn, max_chars)?;
     if ids.is_empty() {
         println!("(corpus over threshold — refusing to pretend a full read happened)");
         return Ok(());
     }
-    println!("full corpus: {} blocks", ids.len());
-    print_blocks(&conn, &ids)
+    let blocks: Vec<pipeline::Ev> = ids
+        .iter()
+        .filter_map(|i| pipeline::get_block(&conn, i))
+        .collect();
+    let kept = pipeline::filter_chain(&conn, blocks, groups);
+    println!("full corpus: {} blocks", kept.len());
+    print_evs(&conn, &kept)
 }
 
 /// `koios query` — full pipeline with the Grader verdict (§6.2).
@@ -454,32 +491,35 @@ fn cmd_query(
     }
 
     let rows = retrieval::hybrid_search(&conn, query, top, true)?;
-    let ids: Vec<String> = rows.iter().map(|(i, _)| i.clone()).collect();
-    let first: String = ids
-        .first()
-        .and_then(|id| {
-            conn.query_row("SELECT raw FROM blocks WHERE id=?", params![id], |r| {
-                r.get::<_, String>(0)
-            })
-            .ok()
-        })
-        .unwrap_or_default();
-    let joined = first;
+    let ids_all: Vec<String> = rows.iter().map(|(i, _)| i.clone()).collect();
+    // The no-model path still has to answer "as this principal". It previously
+    // called hybrid_search and printed whatever came back, so `koios query`
+    // (which users reasonably assume enforces at least what `search` does)
+    // was the one command where --groups was silently ignored.
+    let mut blocks: Vec<pipeline::Ev> = ids_all
+        .iter()
+        .filter_map(|i| pipeline::get_block(&conn, i))
+        .collect();
+    blocks = pipeline::filter_chain(&conn, blocks, groups.as_deref());
+    let ids: Vec<String> = blocks.iter().map(|b| b.id.clone()).collect();
+    let joined: String = blocks
+        .iter()
+        .map(|b| b.raw.clone())
+        .collect::<Vec<_>>()
+        .join(" ");
     let mut verdict = retrieval::grade(query, &joined);
     let mut escalated = false;
     // Self-Route (§6.2): escalate only when the corpus genuinely has a term.
-    if verdict == "evidence_absent" && !joined.is_empty() {
-        let full = retrieval::full_corpus(&conn, 200_000)?;
-        if !full.is_empty() {
+    // The old guard was `verdict == "evidence_absent" && !joined.is_empty()`,
+    // the second conjunct of which was always false — this branch had never
+    // executed under any real input, so nobody noticed it skipped the ACL too.
+    if verdict == "evidence_absent" {
+        let cand = pipeline::visible_corpus(&conn, groups.as_deref());
+        if !cand.is_empty() {
             escalated = true;
-            let j2 = full
+            let j2: String = cand
                 .iter()
-                .filter_map(|id| {
-                    conn.query_row("SELECT raw FROM blocks WHERE id=?", params![id], |r| {
-                        r.get::<_, String>(0)
-                    })
-                    .ok()
-                })
+                .map(|b| b.raw.clone())
                 .collect::<Vec<_>>()
                 .join(" ");
             verdict = retrieval::grade(query, &j2);
@@ -634,7 +674,26 @@ fn cmd_eval(path: &Path, strict: bool) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// `koios full | head` is a normal thing to type, and Rust does not inherit
+/// Unix's default of dying quietly on SIGPIPE — it panics with "failed printing
+/// to stdout". Restoring `SIG_DFL` makes the process exit as the reader asked
+/// instead of printing a panic a human has to learn to ignore.
+///
+/// Spawned children get SIG_IGN back across exec (`llm::run_command`): they are
+/// not writing to the user's terminal, so handing them a fatal SIGPIPE turns a
+/// normal early-close into "my model is broken".
+fn install_sigpipe_default() {
+    // SAFETY: `signal` with SIG_DFL is the documented way to restore the
+    // platform default for one signal; there is nothing to unwind and no
+    // handler data to leak. Windows has no SIGPIPE, hence the cfg.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    install_sigpipe_default();
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Init { path } => cmd_init(&path.unwrap_or_else(|| PathBuf::from(".")))?,
@@ -659,8 +718,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             parse_groups(groups.as_deref()),
             channel.as_deref(),
         )?,
-        Cmd::Tree { query, path } => cmd_tree(&path, &query.join(" "))?,
-        Cmd::Full { path, max_chars } => cmd_full(&path, max_chars)?,
+        Cmd::Tree { query, path, groups } => {
+            cmd_tree(&path, &query.join(" "), parse_groups(groups.as_deref()).as_deref())?
+        }
+        Cmd::Full {
+            path,
+            max_chars,
+            groups,
+        } => cmd_full(&path, max_chars, parse_groups(groups.as_deref()).as_deref())?,
         Cmd::Query {
             query,
             path,
@@ -702,7 +767,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             reason,
             groups,
         } => {
-            let _ = parse_groups(groups.as_deref());
+            // `--groups` used to be parsed and thrown away (`let _ =`), so the
+            // flag advertised an ACL check that never happened. `retract` is
+            // not a read: it is a state transition on a block, and nothing in
+            // §9.2 lets a caller outside the grant retire someone else's
+            // content. Reject rather than silently proceed.
+            let groups = parse_groups(groups.as_deref());
             let block_id = match block_flag.or(block_id) {
                 Some(b) => b,
                 None => {
@@ -712,6 +782,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
             let vault = path.canonicalize().unwrap_or(path.clone());
             let conn = connect(&vault)?;
+            if let Some(b) = pipeline::get_block(&conn, &block_id) {
+                let grants = acl::grants_for(&conn, &b.doc_path);
+                if !acl::allowed(grants.as_ref(), groups.as_deref()) {
+                    eprintln!(
+                        "error: not permitted — {block_id} is restricted; \
+                         pass --groups with a grant you hold"
+                    );
+                    std::process::exit(1);
+                }
+            }
             match state::cascade_retraction(&conn, &block_id, &reason, Some(&vault)) {
                 Ok(pages) => {
                     // koiosbase/cli.py prints a sentence, not JSON — Rust emitted

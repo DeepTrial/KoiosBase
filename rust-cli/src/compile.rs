@@ -250,13 +250,130 @@ pub fn write_entity_pages(
     keys.sort();
     for k in keys {
         let ent = &entities[k];
-        std::fs::write(
-            out_dir.join(format!("{}.md", ent.entity_id)),
-            render_entity_page(ent, stamp),
-        )?;
+        let target = out_dir.join(format!("{}.md", ent.entity_id));
+        // A recompile must not reset the trust ladder (§5.4) or erase what a
+        // human wrote. Measured: `koios promote --human-confirmed` to `medium`
+        // plus a hand-written ⚠ entry both vanished on the next `compile`,
+        // because this used to unconditionally overwrite with a draft page.
+        let prev = read_existing_page(&target);
+        let rendered = render_entity_page(ent, stamp);
+        std::fs::write(&target, carry_forward(&rendered, &prev, stamp))?;
         n += 1;
     }
     Ok(n)
+}
+
+/// The previous rendering of a compiled page, if it is on disk.
+fn read_existing_page(target: &Path) -> Option<String> {
+    std::fs::read_to_string(target).ok()
+}
+
+/// Carry the two things a human can own across a recompile: the promoted
+/// confidence level, and anything written under 「矛盾与未决」.
+///
+/// Everything else is derived and must be regenerated from `raw/` — including
+/// 「关键事实」, which is exactly the part that is supposed to change.
+fn carry_forward(rendered: &str, prev: &Option<String>, stamp: &str) -> String {
+    let mut out = rendered.to_string();
+    if let Some(prev) = prev {
+        if let Some(c) = prev_confidence(prev) {
+            out = set_frontmatter_field(&out, "confidence", &c);
+            // A page carrying a human's confidence carries a human's stamp too;
+            // `last_compiled` alone would claim it was machine-generated.
+            out = set_frontmatter_field(&out, "promoted", stamp);
+        }
+        let conflicts = extract_section(prev, "矛盾与未决");
+        // `- (无)` is the template's placeholder for *no human input*; keeping
+        // it just means the next reader cannot tell "nobody wrote anything"
+        // from "somebody cleared it". Only real content is carried.
+        if conflicts
+            .as_deref()
+            .map(|s| !s.trim().is_empty() && s.trim() != "- (无)")
+            .unwrap_or(false)
+        {
+            out = replace_section(&out, "矛盾与未决", conflicts.as_deref().unwrap());
+        }
+    }
+    out
+}
+
+fn prev_confidence(prev: &str) -> Option<String> {
+    let (fm, _) = crate::split_frontmatter(prev);
+    for line in fm.lines() {
+        if let Some(rest) = line.strip_prefix("confidence:") {
+            let v = rest.trim().to_string();
+            if !v.is_empty() && v != "draft" {
+                return Some(v);
+            }
+        }
+    }
+    None
+}
+
+fn extract_section(text: &str, heading: &str) -> Option<String> {
+    let needle = format!("## {heading}\n");
+    let start = text.find(&needle)? + needle.len();
+    let rest = &text[start..];
+    let end = rest.find("\n## ").unwrap_or(rest.len());
+    Some(rest[..end].trim_end().to_string())
+}
+
+fn replace_section(text: &str, heading: &str, body: &str) -> String {
+    let needle = format!("## {heading}\n");
+    let Some(start) = text.find(&needle) else {
+        return text.to_string();
+    };
+    let body_start = start + needle.len();
+    let end = text[body_start..]
+        .find("\n## ")
+        .map(|i| body_start + i)
+        .unwrap_or(text.len());
+    format!("{}{}{}", &text[..body_start], body, &text[end..])
+}
+
+fn set_frontmatter_field(text: &str, key: &str, value: &str) -> String {
+    let (fm, body) = crate::split_frontmatter(text);
+    // `split_frontmatter` strips the opening `---` but the first line here is
+    // whatever followed that newline — including a leading blank. Splitting
+    // afterwards re-emitted it INSIDE the block, so every promoted page grew a
+    // blank line above `type:` and stopped being valid YAML frontmatter.
+    let mut lines: Vec<String> = fm
+        .lines()
+        .skip_while(|l| l.trim().is_empty())
+        .map(|s| s.to_string())
+        .collect();
+    let want = format!("{key}:");
+    let repl = format!("{key}: {value}");
+    if let Some(i) = lines.iter().position(|l| l.trim_start().starts_with(&want)) {
+        lines[i] = repl;
+    } else {
+        // An absent field goes next to the thing it qualifies rather than after
+        // `type:` — a later insert there scattered new keys across unrelated
+        // lines and made generated frontmatter differ file to file.
+        let at = lines
+            .iter()
+            .position(|l| l.trim_start().starts_with(&want_of(key)))
+            .map(|i| i + 1)
+            .unwrap_or(lines.len());
+        lines.insert(at, repl);
+    }
+    let mut out = String::from("---\n");
+    for l in lines {
+        out.push_str(&l);
+        out.push('\n');
+    }
+    out.push_str("---");
+    out.push_str(&body);
+    out
+}
+
+/// Which existing field a new one belongs under, so the emitted order stays
+/// stable no matter how many callers add fields.
+fn want_of(key: &str) -> &'static str {
+    match key {
+        "promoted" => "confidence",
+        _ => "type",
+    }
 }
 
 // ---------------------------------------------------------------- sources/ --
@@ -607,18 +724,24 @@ pub fn recompile_synthesis(
     let sdir = vault.join("wiki").join("synthesis");
     std::fs::create_dir_all(&sdir)?;
     let target = sdir.join(format!("{topic}.md"));
+    let rel = crate::state::normalize_page_key(&format!("wiki/synthesis/{topic}.md"));
+    let prev_state: String = conn
+        .query_row(
+            "SELECT state FROM page_state WHERE page_path=?",
+            rusqlite::params![rel],
+            |r| r.get::<_, String>(0),
+        )
+        .unwrap_or_else(|_| "active".to_string());
     std::fs::write(
         &target,
         render_synthesis(topic, entities, facts, &stamp_now(), false),
     )?;
     // Clearing the flag is what makes the lazy scheme terminate: without it
     // every read of the page would schedule another recompile.
-    conn.execute(
-        "INSERT OR REPLACE INTO page_state(page_path,stale,state,reason,updated) \
-         VALUES(?,0,'active','recompiled',?)",
-        rusqlite::params![format!("wiki/synthesis/{topic}.md"), crate::state::now()],
-    )
-    .map_err(|e| std::io::Error::other(e.to_string()))?;
+    // Stale is a fact about the page's sources; recompiling does not undo a
+    // human's lifecycle judgement. Preserve whatever state is already there.
+    crate::state::set_page_state(conn, &rel, 0, &prev_state, "recompiled")
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
     Ok(target)
 }
 

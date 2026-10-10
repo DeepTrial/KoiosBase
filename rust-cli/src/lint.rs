@@ -13,6 +13,31 @@ static WIKILINK_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\[\[([^\]]+)\]\]").u
 static NUM_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\d+(?:\.\d+)?").unwrap());
 static TTL_DAYS_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^(\d+)\s*d$").unwrap());
 
+/// Every form a written target can take, so both directions resolve.
+///
+/// `[[raw/open.md]]` is the documented way to cite a document (§6.6 templates
+/// emit exactly that), but `blocks.doc_path` stores the *layer-rooted*
+/// `open.md`. The orphan check stripped the prefix and the broken-link check
+/// did not — two standards in one file, so a template-clean vault reported
+/// broken links on every citation and users learned to ignore the gardener.
+/// One normaliser shared by both.
+fn target_variants(dst: &str) -> Vec<String> {
+    let d = dst.trim().trim_matches('[').trim_matches(']');
+    let bare = d.split('#').next().unwrap_or(d).to_string();
+    let mut out: Vec<String> = Vec::new();
+    for cand in [d.to_string(), bare] {
+        for v in [
+            cand.clone(),
+            cand.strip_prefix("raw/").unwrap_or(&cand).to_string(),
+        ] {
+            if !v.is_empty() && !out.contains(&v) {
+                out.push(v);
+            }
+        }
+    }
+    out
+}
+
 pub fn check_broken_links(conn: &Connection) -> Vec<String> {
     let mut bad = Vec::new();
     let mut stmt = match conn.prepare("SELECT src,dst FROM links WHERE kind='wikilink'") {
@@ -24,14 +49,15 @@ pub fn check_broken_links(conn: &Connection) -> Vec<String> {
         Err(_) => return bad,
     };
     for (src, dst) in rows {
-        let p1 = format!("%{dst}%");
-        let exists: bool = conn
-            .query_row(
+        let exists = target_variants(&dst).iter().any(|v| {
+            let p = format!("%{v}%");
+            conn.query_row(
                 "SELECT 1 FROM blocks WHERE id LIKE ? OR doc_path LIKE ? LIMIT 1",
-                params![p1, p1],
+                params![p, p],
                 |_| Ok(true),
             )
-            .unwrap_or(false);
+            .unwrap_or(false)
+        });
         if !exists {
             bad.push(format!("broken wikilink: {src} -> {dst}"));
         }
@@ -210,34 +236,46 @@ pub fn check_orphan_pages(conn: &Connection) -> Vec<String> {
     // Every target any wikilink resolves to, including the alternate forms a
     // written link can take (`[[raw/b.md#Sec]]` vs stored `b.md`). Without the
     // prefix-stripped variants, inbound citations never match their target and
-    // every page looks orphaned.
+    // every page looks orphaned. Same helper as `check_broken_links`, so the
+    // two directions cannot drift apart again.
     let mut cited: Vec<String> = Vec::new();
     if let Ok(mut s) = conn.prepare("SELECT dst FROM links WHERE kind='wikilink'") {
         if let Ok(m) = s.query_map([], |r| r.get::<_, String>(0)) {
             for dst in m.flatten() {
-                let d = dst.trim().trim_matches('[').trim_matches(']');
-                for cand in [d.to_string(), d.split('#').next().unwrap_or(d).to_string()] {
-                    for v in [
-                        cand.clone(),
-                        cand.strip_prefix("raw/").unwrap_or(&cand).to_string(),
-                    ] {
-                        if !v.is_empty() && !cited.contains(&v) {
-                            cited.push(v);
-                        }
+                for v in target_variants(&dst) {
+                    if !cited.contains(&v) {
+                        cited.push(v);
                     }
                 }
             }
         }
     }
-    for (id, raw, doc_path) in rows {
-        let base = doc_path.split('#').next().unwrap_or(&doc_path);
-        let outbound = raw.contains("[[");
-        let inbound = cited.iter().any(|t| {
-            t == &id || t == base || t.starts_with(&format!("{base}#")) || t.starts_with(base)
+    // Reported once per PAGE, not once per block: "this page is orphaned" is
+    // one fact about one document, and a 4-block page used to print four
+    // identical findings — noise that buries the real ones. Both directions are
+    // also judged over the WHOLE page, so a page whose only wikilink lives in
+    // one block no longer reads as unreferenced.
+    let mut reported: Vec<String> = Vec::new();
+    for row in &rows {
+        let (_, _, doc_path) = row;
+        let base = doc_path.split('#').next().unwrap_or(doc_path);
+        if reported.contains(&base.to_string()) {
+            continue;
+        }
+        let page_rows: Vec<_> = rows
+            .iter()
+            .filter(|(_, _, d)| d.split('#').next().unwrap_or(d) == base)
+            .collect();
+        let outbound = page_rows.iter().any(|(_, r, _)| r.contains("[["));
+        let inbound = page_rows.iter().any(|(id, _, _)| {
+            cited.iter().any(|t| {
+                t == id || t == base || t.starts_with(&format!("{base}#")) || t.starts_with(base)
+            })
         });
         if !outbound && !inbound {
-            out.push(format!("orphan page (no links in or out): {doc_path}"));
+            out.push(format!("orphan page (no links in or out): {base}"));
         }
+        reported.push(base.to_string());
     }
     out
 }

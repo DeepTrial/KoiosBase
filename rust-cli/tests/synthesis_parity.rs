@@ -409,16 +409,60 @@ fn recompile_records_recompiled_reason_and_active_state() {
     let conn = connect(&v.p).unwrap();
     mark_syntheses_stale(&conn, &v.p, None).unwrap();
     recompile_synthesis(&conn, &v.p, "finance", &[], &[]).unwrap();
+    // Normalised key (see `state::normalize_page_key`): the cascade and the
+    // reader must agree on what a page is called, or §8.3 resolves nothing.
     let (stale, state, reason): (i64, String, String) = conn
         .query_row(
             "SELECT stale,state,reason FROM page_state WHERE page_path=?",
-            rusqlite::params!["wiki/synthesis/finance.md"],
+            rusqlite::params![koios::state::normalize_page_key(
+                "wiki/synthesis/finance.md"
+            )],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .unwrap();
     assert_eq!(stale, 0);
+    // Recompiling clears staleness; it does not overwrite a human's lifecycle
+    // state. This page was never disputed, so it reads active.
     assert_eq!(state, "active");
     assert_eq!(reason, "recompiled");
+}
+
+#[test]
+fn recompile_preserves_a_disputed_state() {
+    let v = vault("disputed");
+    touch(&v.p, "finance.md");
+    let conn = connect(&v.p).unwrap();
+    koios::state::set_page_state(
+        &conn,
+        "wiki/synthesis/finance.md",
+        0,
+        "disputed",
+        "human flagged",
+    )
+    .unwrap();
+    mark_syntheses_stale(&conn, &v.p, None).unwrap();
+    recompile_synthesis(&conn, &v.p, "finance", &[], &[]).unwrap();
+    let all: Vec<(String, i64, String)> = conn
+        .prepare("select page_path,stale,state from page_state")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .filter_map(Result::ok)
+        .collect();
+    let (stale, state): (i64, String) = conn
+        .query_row(
+            "SELECT stale,state FROM page_state WHERE page_path=?",
+            rusqlite::params![koios::state::normalize_page_key(
+                "wiki/synthesis/finance.md"
+            )],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(stale, 0, "recompile clears the staleness flag; rows={all:?}");
+    assert_eq!(
+        state, "disputed",
+        "recompile must not silently clear a human's lifecycle state; rows={all:?}"
+    );
 }
 
 #[test]

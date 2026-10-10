@@ -134,7 +134,11 @@ pub fn referencing_pages(
                                         .unwrap_or(&p)
                                         .to_string_lossy()
                                         .to_string();
-                                    pages.push(rel);
+                                    // Stored under the same key shape a reader
+                                    // will look it up by (see
+                                    // `normalize_page_key`) — write-time is the
+                                    // right place to settle that argument.
+                                    pages.push(crate::state::normalize_page_key(&rel));
                                 }
                             }
                         }
@@ -154,19 +158,74 @@ pub fn referencing_pages(
         .unwrap_or_default()
 }
 
+/// Set a page's staleness WITHOUT touching its lifecycle state.
+///
+/// `stale` and `state` are orthogonal (§8.3): one says "its sources moved on",
+/// the other "a human marked it disputed/retracted". The previous
+/// `INSERT OR REPLACE ... 'active'` overwrote whatever state was there, so a
+/// page a reviewer had flagged `disputed` silently became `active` again the
+/// next time a cited source was retracted — measured, hence the read-first.
+/// Callers that genuinely want to set state use `set_page_state`.
 pub fn mark_stale(conn: &Connection, page_path: &str, reason: &str) -> rusqlite::Result<()> {
+    let prev: String = conn
+        .query_row(
+            "SELECT state FROM page_state WHERE page_path=?",
+            params![normalize_page_key(page_path)],
+            |r| r.get::<_, String>(0),
+        )
+        .unwrap_or_else(|_| "active".to_string());
+    connect_page_state(conn, page_path, 1, &prev, reason)
+}
+
+/// Write one `page_state` row explicitly — the only place the row is written,
+/// so every caller gets the same key normalisation (`normalize_page_key`).
+pub fn set_page_state(
+    conn: &Connection,
+    page_path: &str,
+    stale: i64,
+    state: &str,
+    reason: &str,
+) -> rusqlite::Result<()> {
+    connect_page_state(conn, page_path, stale, state, reason)
+}
+
+fn connect_page_state(
+    conn: &Connection,
+    page_path: &str,
+    stale: i64,
+    state: &str,
+    reason: &str,
+) -> rusqlite::Result<()> {
+    let path = normalize_page_key(page_path);
     conn.execute(
         "INSERT OR REPLACE INTO page_state(page_path,stale,state,reason,updated) \
-         VALUES(?,1,'active',?,?)",
-        params![page_path, reason, now()],
+         VALUES(?,?,?,?,?)",
+        params![path, stale, state, reason, now()],
     )?;
     Ok(())
+}
+
+/// The canonical `page_state` key.
+///
+/// Two writers used two shapes — the cascade wrote the vault-relative
+/// `wiki/synthesis/x.md` while a wiki block's `doc_path` is the wiki-rooted
+/// `synthesis/x.md` — so `apply_disposition` looked up every page under a key
+/// nobody had written and reported "use" for all of them. The last kilometre
+/// of §8.3 never fired: flagged pages were neither down-ranked nor marked
+/// （待更新）. One normaliser, applied on write and on read, is the contract.
+pub fn normalize_page_key(path: &str) -> String {
+    let p = path.replace('\\', "/");
+    let p = p.strip_prefix("./").unwrap_or(&p);
+    match p.strip_prefix("wiki/") {
+        Some(rest) if !rest.is_empty() => rest.to_string(),
+        _ => p.to_string(),
+    }
 }
 
 pub fn is_stale(conn: &Connection, page_path: &str) -> bool {
     conn.query_row(
         "SELECT stale FROM page_state WHERE page_path=?",
-        params![page_path],
+        params![normalize_page_key(page_path)],
         |r| r.get::<_, i64>(0),
     )
     .map(|v| v != 0)
@@ -222,7 +281,7 @@ pub fn disposition_for(conn: &Connection, page_path: &str, high_risk: bool) -> &
     let row: Option<(i64, String)> = conn
         .query_row(
             "SELECT stale,state FROM page_state WHERE page_path=?",
-            params![page_path],
+            params![normalize_page_key(page_path)],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .ok();
@@ -243,6 +302,12 @@ pub fn page_dispositions(
         out.insert(p.clone(), disposition_for(conn, p, false));
     }
     out
+}
+
+/// The disposition of a block's own page — normalised through
+/// `normalize_page_key`, so the cascade's key and the reader's key meet.
+pub fn disposition_for_doc(conn: &Connection, doc_path: &str) -> &'static str {
+    disposition_for(conn, doc_path, false)
 }
 
 /// §8.3 on the read path: stale pages sink, retracted pages vanish.
@@ -272,7 +337,16 @@ pub fn apply_disposition(
     let mut keep: Vec<crate::pipeline::Ev> = Vec::new();
     let mut stale: Vec<crate::pipeline::Ev> = Vec::new();
     for b in blocks {
-        match disp.get(&b.doc_path).copied().unwrap_or("use") {
+        // The map above was keyed on the *given* `doc_path`, whose shape has
+        // historically disagreed with the key the writer used. Normalising on
+        // both sides is what closes the gap (`normalize_page_key`).
+        let key = normalize_page_key(&b.doc_path);
+        let d = disp
+            .get(&b.doc_path)
+            .or_else(|| disp.get(&key))
+            .copied()
+            .unwrap_or_else(|| disposition_for(conn, &b.doc_path, false));
+        match d {
             "hard_filter" => continue,
             "downrank_and_async_recompile" | "refuse_or_recompile" => stale.push(b),
             _ => keep.push(b),

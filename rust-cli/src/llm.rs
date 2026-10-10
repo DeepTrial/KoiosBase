@@ -299,19 +299,65 @@ pub fn vision(cfg: &Config, png: &[u8]) -> Result<String, String> {
         .ok_or_else(|| "vision response had no content".to_string())
 }
 
+/// Temporarily park SIGPIPE's disposition, restoring the *previous* handler on
+/// drop rather than assuming one.
+///
+/// Needed because `main` puts SIGPIPE back to SIG_DFL (so `koios full | head`
+/// exits quietly rather than panicking). Under SIG_DFL a `write` to a closed
+/// pipe does NOT return `ErrorKind::BrokenPipe` — it raises the signal and the
+/// process dies before the error can be observed. Writing the payload to a
+/// model command that never reads stdin hit exactly that, so one broken page
+/// killed the whole `index` run.
+#[cfg(unix)]
+struct SigpipeGuard(libc::sighandler_t);
+
+#[cfg(unix)]
+impl SigpipeGuard {
+    unsafe fn ignoring() -> Self {
+        Self(libc::signal(libc::SIGPIPE, libc::SIG_IGN))
+    }
+}
+
+#[cfg(unix)]
+impl Drop for SigpipeGuard {
+    fn drop(&mut self) {
+        unsafe { libc::signal(libc::SIGPIPE, self.0) };
+    }
+}
+
 /// The escape hatch: run a program. stdin carries the payload, stdout the reply.
 fn run_command(cmd: &str, stdin: &[u8], env: &[(&str, &str)]) -> Result<String, String> {
     use std::io::Write;
-    let mut child = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(cmd)
-        .envs(env.iter().copied())
+    let mut c = std::process::Command::new("sh");
+    c.arg("-c").arg(cmd).envs(env.iter().copied());
+    // The child inherits the parent's SIGPIPE disposition, and `main` sets it
+    // to SIG_DFL so `koios full | head` exits quietly instead of panicking.
+    // Handing that default to a user model command is wrong: many commands
+    // legitimately finish by writing output the reader has stopped taking, and
+    // under SIG_DFL they die mid-write — which is indistinguishable from a
+    // broken model. Give the child back SIG_IGN across exec.
+    #[cfg(unix)]
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        c.pre_exec(|| {
+            libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+            Ok(())
+        });
+    }
+    let mut child = c
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| format!("failed to spawn model command: {e}"))?;
     if let Some(mut s) = child.stdin.take() {
+        // See `SigpipeGuard`: this write must not be able to kill us. A model
+        // command that exits without reading its payload (`exit 7`, or any
+        // mis-piped tool) closes the pipe under us, and that is the command's
+        // verdict — `wait_with_output` reports it. One broken page must not
+        // take the whole `index` run with it.
+        #[cfg(unix)]
+        let _guard = unsafe { SigpipeGuard::ignoring() };
         let _ = s.write_all(stdin);
     }
     let out = child

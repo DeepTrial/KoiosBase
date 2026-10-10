@@ -40,3 +40,8 @@ sha2 = "0.10.9"
 ureq = { version = "3", default-features = false, features = ["json", "rustls"] }
 toml = "1.1.7"
 serde = { version = "1.0.229", features = ["derive"] }
+# Only for restoring SIGPIPE's platform default (see main::install_sigpipe_default)
+# and for undoing it in spawned model children (see llm::run_command).
+# Unix-only so the Windows release target does not link it.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
