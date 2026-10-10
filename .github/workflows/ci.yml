@@ -28,6 +28,10 @@ jobs:
         run: cargo test --release --manifest-path rust-cli/Cargo.toml
 
   # Clippy warnings used to accumulate unnoticed; fail on any new one.
+# `--all-targets` covers tests/ and examples/ too — without it twelve lints
+# lived in the test files for months, invisible to CI, and only surfaced when
+# someone happened to run clippy locally with a wider scope. Wider is slower but
+# the alternative is debt you cannot see.
   lint:
     runs-on: ubuntu-latest
     steps:
@@ -42,4 +46,13 @@ jobs:
       - name: Format check
         run: cargo fmt --manifest-path rust-cli/Cargo.toml -- --check
       - name: Clippy
-        run: cargo clippy --release --manifest-path rust-cli/Cargo.toml -- -D warnings
+        run: cargo clippy --release --manifest-path rust-cli/Cargo.toml --all-targets -- -D warnings
+      - name: File permissions
+        run: python3 docs/check_permissions.py
+      # Skipped rather than failed when node is unavailable: the mermaid check
+      # bootstraps its own npm sandbox, which is slow and needs network. The
+      # diagrams change rarely, so pay that cost when you edit them, not on
+      # every push.
+      - name: Diagrams render
+        run: python3 docs/check_diagrams.py
+        continue-on-error: true

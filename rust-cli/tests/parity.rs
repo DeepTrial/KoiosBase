@@ -1,12 +1,14 @@
 //! Cross-shell parity for §8.3 disposition and §4.4 init contract.
 //!
 //! Both behaviours were MISSING from the Rust shell:
+//!
 //!   * §8.3 apply_disposition — Python's query/pipeline.py retrieve() applies it
 //!     after filter_visible, so `koios retract` changed nothing here: a
 //!     retracted page's evidence kept answering questions.
 //!   * §4.4 AGENTS.md — init wrote a one-line stub instead of the four-rule
 //!     maintenance contract, so a Rust-initialised vault silently lost three
 //!     rules the Python side writes.
+//!
 //! The Python suite tests only the Python shell, so neither gap could be caught
 //! from there.
 

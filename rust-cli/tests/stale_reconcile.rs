@@ -10,7 +10,7 @@
 //! This exercises the real `cmd_index` + `cmd_compile` pair against a real vault.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use koios::compile::reconcile_stale_syntheses;
 use koios::{cmd_index, connect};
@@ -26,7 +26,7 @@ fn vault(name: &str) -> PathBuf {
     d
 }
 
-fn staleness(v: &PathBuf, key: &str) -> Option<i64> {
+fn staleness(v: &Path, key: &str) -> Option<i64> {
     let Ok(conn) = connect(v) else { return None };
     conn.query_row(
         "SELECT stale FROM page_state WHERE page_path=?",

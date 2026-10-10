@@ -21,9 +21,14 @@ fn ev_or_empty(empty: bool) -> Vec<Ev> {
     }]
 }
 
+/// One golden case: the answer text, whether evidence is empty, and the
+/// violations Python reports. Named because the nested tuple is what made this
+/// `Vec` too complex for clippy to read at a glance.
+type ContractCase<'a> = (&'a str, bool, Vec<(&'a str, &'a str)>);
+
 #[test]
 fn contracts_match_python() {
-    let cases: Vec<(&str, bool, Vec<(&str, &str)>)> = vec![
+    let cases: Vec<ContractCase> = vec![
         ("营收为32亿元 (report.md#a/b/1)。", false, vec![]),
         (
             "营收为32亿元 (report.md#a/b/1)。现金流为正。",

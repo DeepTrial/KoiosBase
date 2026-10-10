@@ -6,7 +6,7 @@
 //! suite could not catch it either — it only tests the Python shell.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use koios::connect;
 
@@ -30,7 +30,7 @@ fn vault(name: &str) -> PathBuf {
     p
 }
 
-fn block_count(vault: &PathBuf) -> i64 {
+fn block_count(vault: &Path) -> i64 {
     let conn = connect(vault).unwrap();
     conn.query_row("SELECT COUNT(*) FROM blocks", [], |r| r.get(0))
         .unwrap()

@@ -5,7 +5,7 @@
 //! replace the Python suite as the oracle rather than merely duplicating it.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use koios::connect;
 
@@ -16,7 +16,7 @@ fn vault(name: &str) -> PathBuf {
     p
 }
 
-fn seed(v: &PathBuf) -> rusqlite::Connection {
+fn seed(v: &Path) -> rusqlite::Connection {
     fs::write(
         v.join("raw").join("r.md"),
         "---\ntitle: T\n---\n# Sec\nACME revenue was 32 yuan.\n",

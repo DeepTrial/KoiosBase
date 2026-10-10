@@ -152,7 +152,7 @@ fn ppr_runs_on_subgraph() {
     koios::cmd_index(&v).unwrap();
     let graph = koios::retrieval::load_graph(&conn).unwrap();
     assert!(!graph.is_empty(), "wikilinks must produce graph edges");
-    let out = koios::retrieval::personalized_pagerank(&vec!["r.md".to_string()], &graph, 0.85, 20);
+    let out = koios::retrieval::personalized_pagerank(&["r.md".to_string()], &graph, 0.85, 20);
     assert!(!out.is_empty(), "PPR must converge on a non-empty result");
 }
 

@@ -1,8 +1,10 @@
 //! ACL regression locks (§9.2) — the Rust side lagged the Python fixes.
 //!
 //! Two real leaks were found here by measurement, not inspection:
+//!
 //!   1. anonymous Studio brief contained a restricted HR figure;
 //!   2. `koios search` bypassed ACL entirely (raw FTS, no filter).
+//!
 //! The "entitled caller sees it" assertions matter as much as the leak ones —
 //! a filter that drops everything also looks clean.
 
