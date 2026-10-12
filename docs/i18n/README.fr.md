@@ -6,8 +6,8 @@
 
 # KoiosBase
 
-Une base de connaissances qui traite le Markdown comme source de vérité. Vous
-écrivez du Markdown, KoiosBase l'indexe, et chaque réponse renvoie au bloc dont
+Base de connaissances qui considère le Markdown comme source de vérité. Vous
+rédigez du Markdown, KoiosBase l'indexe, et chaque réponse renvoie au bloc dont
 elle provient.
 
 ```console
@@ -27,9 +27,9 @@ $ koios search "revenue" -p myvault
 ```
 
 - **Le Markdown est ce qui compte.** L'index peut être supprimé à tout moment et
-  revient identique.
-- **La connaissance périt.** Rétractez un bloc et chaque page qui le cite est
-  marquée obsolète et cesse de répondre.
+  il se reconstruit à l'identique.
+- **La connaissance devient obsolète.** Rétractez un bloc et toutes les pages qui
+  le citent sont marquées obsolètes et cessent de répondre.
 
 ```mermaid
 flowchart LR
@@ -45,12 +45,12 @@ flowchart LR
 
 ## Installation
 
-Un unique binaire Rust. Aucune dépendance à l'exécution.
+Un seul binaire Rust, sans dépendance à l'exécution.
 
 ```bash
 curl -LO https://github.com/DeepTrial/KoiosBase/releases/latest/download/koios-linux-x86_64
 chmod +x koios-linux-x86_64
-# ou depuis les sources (le bindgen de MuPDF nécessite libclang)
+# ou compilation depuis les sources (le bindgen de MuPDF nécessite libclang)
 git clone https://github.com/DeepTrial/KoiosBase && cd KoiosBase
 cargo build --release --manifest-path rust-cli/Cargo.toml
 ```
@@ -64,36 +64,38 @@ indexed 0 blocks from demo
 
 ### Brancher un modèle (optionnel)
 
-Ça marche sans. Le générateur intégré renvoie les blocs retrouvés tels quels,
-avec leurs citations. Il n'invente rien.
+KoiosBase fonctionne sans modèle. Le générateur intégré renvoie alors les blocs
+retrouvés avec leurs citations, sans rien ajouter au-delà du texte source.
 
-Pour en brancher un, `koios config --init -p myvault` écrit un `koios.toml`
-commenté. Il suffit de le modifier :
+Pour en brancher un, exécutez `koios config --init -p myvault`. La commande
+écrit un `koios.toml` commenté ; il suffit d'en modifier les champs utiles :
 
 ```toml
 [model]
-kind = "openai"                          # voir les deux protocoles ci-dessous
+kind = "openai"                          # protocole ; voir le tableau ci-dessous
 base_url = "https://api.openai.com/v1"
 model = "gpt-4o-mini"
 api_key_env = "OPENAI_API_KEY"           # le NOM de la variable d'environnement, jamais la clé
 ```
 
-Une fois ce fichier présent, `koios query` utilise le modèle sans option
-supplémentaire. `kind` prend exactement deux valeurs et décide du protocole :
+Une fois ce fichier en place, `koios query` utilise le modèle sans option
+supplémentaire. `kind` n'accepte que deux valeurs et sélectionne le protocole de
+requête :
 
-| `kind` | requête POST vers | réponse lue depuis |
+| `kind` | endpoint | réponse lue depuis |
 | --- | --- | --- |
 | `openai` (par défaut) | `{base}/chat/completions` | `choices[0].message.content` |
 | `anthropic` | `{base}/messages` | `content[0].text` |
 
-`openai` couvre tout ce qui parle ce protocole : OpenAI, Ollama, vLLM,
-llama.cpp, DeepSeek, Moonshot, LiteLLM — ainsi que les passerelles qui proxifient
-Claude, qui exposent cette forme quel que soit le modèle derrière. Seul
-l'endpoint propre à Anthropic exige `anthropic`. Gemini et Bedrock ne sont pas
-implémentés ; utilisez `--llm-cmd` ci-dessous, ou une passerelle qui traduit.
+`openai` s'applique à tout service parlant ce protocole : OpenAI, Ollama, vLLM,
+llama.cpp, DeepSeek, Moonshot, LiteLLM, ainsi que les passerelles qui proxifient
+Claude — celles-ci exposent cette même forme quel que soit le modèle derrière.
+`anthropic` n'est nécessaire que pour l'endpoint propre à Anthropic. Gemini et
+Bedrock ne sont pas couverts ; utilisez `--llm-cmd` ci-dessous, ou une
+passerelle qui traduit pour vous.
 
-Pour un essai ponctuel sans éditer de fichier, `--llm-cmd` prend la priorité sur
-la configuration :
+Pour un essai ponctuel sans modifier le fichier de configuration, `--llm-cmd`
+prend la priorité sur `koios.toml` :
 
 ```console
 $ koios query "revenue" -p myvault --llm-cmd 'printf "%s" "Revenue was 3.2 billion yuan."'
@@ -102,10 +104,10 @@ Revenue was 3.2 billion yuan.
 [contracts] citation=0/1 sentences cited
 ```
 
-La réponse du modèle passe par la même barrière. Une citation manquante est
-signalée, pas acceptée en silence, et un modèle en panne est une erreur plutôt
-qu'une réponse fabriquée. L'exemple ci-dessus est précisément recadré pour ça :
-il ne porte aucune citation.
+Les contrats de citation s'appliquent également à la sortie du modèle. Une
+citation manquante est consignée et signalée au lieu d'être ignorée, et un appel
+en échec renvoie une erreur au lieu de substituer un texte généré. L'exemple
+ci-dessus est signalé précisément parce qu'il ne porte aucune citation.
 
 ## Utilisation
 
@@ -128,14 +130,14 @@ verdict: enough  hits: 4  escalated: false
 [3] sources/report.md#2024 Annual Report/导读摘要/1
     ACME Corp revenue in 2024 was 3. 2 billion yuan, up 12 percent. Operating cash flow was positive for the year.
 $ koios compile -p myvault                      # compiler les pages structurées
-compiled: entities=2 entity_pages=2 source_pages=1 affected_pages=5 stamp=2026-10-10
+compiled: entities=2 entity_pages=2 source_pages=1 affected_pages=5 refreshed=0 stamp=2026-10-12
 $ koios studio brief -p myvault -t revenue      # exporter
 wrote myvault/wiki/synthesis/brief-revenue.md
 $ koios mcp --install codex                     # enregistrer auprès d'un hôte MCP
 ```
 
-La recherche choisit un canal par question et demande si les preuves suffisent
-avant de répondre :
+La recherche choisit un canal par question et détermine si les preuves sont
+suffisantes avant de répondre :
 
 ```mermaid
 flowchart TD
@@ -156,21 +158,21 @@ flowchart TD
     style R fill:#fdecea,stroke:#a94442
 ```
 
-**ACL** : `--groups finance-team` indique à quel groupe vous appartenez. Sans
-l'option vous êtes anonyme et les documents restreints restent invisibles. C'est
-voulu.
+**ACL** : `--groups finance-team` déclare le groupe de l'appelant. Sans cette
+option, l'appelant est anonyme et les documents restreints par ACL restent
+invisibles. C'est le comportement attendu.
 
-**Structure du vault** : `raw/` est à vous, `wiki/` est généré et doit être
-commité, `.index/` est un artefact de build et ne doit pas l'être.
+**Structure du vault** : `raw/` contient ce que vous écrivez, `wiki/` les pages
+générées (à commiter), `.index/` un artefact de build (à ne pas commiter).
 
 ## Maintenance
 
 | Tâche | Commande |
 | --- | --- |
-| Après une édition de `raw/` | `koios index myvault` |
+| Après édition de `raw/` | `koios index myvault` |
 | Contrôle de santé | `koios lint myvault` |
-| Après une montée de version | `koios index myvault --full` |
-| Un fait est faux | `koios retract -p myvault -b "block-id" --reason "..."` |
+| Après montée de version | `koios index myvault --full` |
+| Un fait est erroné | `koios retract -p myvault -b "identifiant-du-bloc" --reason "..."` |
 | Élever la confiance | `koios promote --human-confirmed "wiki/entities/acme.md"` |
 
 ```console
@@ -196,8 +198,8 @@ jamais en comptant les citations) : `draft → medium → high`.
 ## Documentation
 
 - `docs/KoiosBase设计文档v1.3.md` — référence de conception
-- `docs/python-rust-parity.md` — la piste d'audit du portage
-- `docs/known-gaps.md` — lacunes connues et limites
+- `docs/python-rust-parity.md` — piste d'audit du portage
+- `docs/known-gaps.md` — limites connues
 - `docs/i18n.md` — convention de traduction
 - `AGENTS.md` — le contrat écrit dans chaque vault
 

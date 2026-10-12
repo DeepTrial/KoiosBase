@@ -62,38 +62,38 @@ indexed 0 blocks from demo
 ---- lint: 0 finding(s)
 ```
 
-### Connect a model (optional)
+### Connecting a model (optional)
 
-It works without one. The built-in generator returns the retrieved blocks
-verbatim with their citations. It does not make things up.
+KoiosBase works without one. In that case the built-in generator returns the
+retrieved blocks with their citations attached, and adds nothing beyond them.
 
-To connect one, `koios config --init -p myvault` writes an annotated
-`koios.toml`. Edit that:
+To connect a model, run `koios config --init -p myvault`. It writes an
+annotated `koios.toml`; edit the fields you need:
 
 ```toml
 [model]
-kind = "openai"                          # see the two protocols below
+kind = "openai"                          # protocol; see the table below
 base_url = "https://api.openai.com/v1"
 model = "gpt-4o-mini"
 api_key_env = "OPENAI_API_KEY"           # the NAME of the env var, never the key
 ```
 
-Once that file exists, `koios query` uses the model with no extra flags.
-`kind` takes exactly two values, and decides which protocol gets spoken:
+Once that file is in place, `koios query` uses the model without extra flags.
+`kind` takes exactly two values and selects the request protocol:
 
-| `kind` | what it POSTs to | where the answer is read from |
+| `kind` | endpoint | answer read from |
 | --- | --- | --- |
 | `openai` (default) | `{base}/chat/completions` | `choices[0].message.content` |
 | `anthropic` | `{base}/messages` | `content[0].text` |
 
-`openai` covers everything that speaks it: OpenAI, Ollama, vLLM, llama.cpp,
-DeepSeek, Moonshot, LiteLLM — plus gateways proxying Claude, which present this
-shape no matter which model sits behind them. Only Anthropic's own endpoint
-needs `anthropic`. Gemini and Bedrock are not implemented; use `--llm-cmd`
-below, or let a gateway translate.
+`openai` applies to every service speaking that protocol: OpenAI, Ollama, vLLM,
+llama.cpp, DeepSeek, Moonshot, LiteLLM, and gateways that proxy Claude — those
+present this same shape regardless of the model behind them. `anthropic` is only
+needed for Anthropic's own endpoint. Gemini and Bedrock are not covered; use
+`--llm-cmd` below, or have a gateway translate for you.
 
-To try something once without editing files, use `--llm-cmd`. It takes
-precedence over the config:
+For a one-off trial without touching the config file, `--llm-cmd` takes
+precedence over `koios.toml`:
 
 ```console
 $ koios query "revenue" -p myvault --llm-cmd 'printf "%s" "Revenue was 3.2 billion yuan."'
@@ -102,10 +102,10 @@ Revenue was 3.2 billion yuan.
 [contracts] citation=0/1 sentences cited
 ```
 
-The model's answer goes through the same gate. Missing citations get reported
-rather than waved through, and a failing model is an error rather than a
-fabricated answer. The example above is being called out for exactly that: it
-carries no citation.
+The citation contracts apply to the model's output too. A missing citation is
+recorded and reported rather than passed over, and a failed call returns an
+error instead of substituting generated text. The example above is flagged for
+carrying no citation at all.
 
 ## Usage
 
@@ -128,14 +128,14 @@ verdict: enough  hits: 4  escalated: false
 [3] sources/report.md#2024 Annual Report/导读摘要/1
     ACME Corp revenue in 2024 was 3. 2 billion yuan, up 12 percent. Operating cash flow was positive for the year.
 $ koios compile -p myvault                      # compile structured pages
-compiled: entities=2 entity_pages=2 source_pages=1 affected_pages=5 stamp=2026-10-10
+compiled: entities=2 entity_pages=2 source_pages=1 affected_pages=5 refreshed=0 stamp=2026-10-12
 $ koios studio brief -p myvault -t revenue      # export
 wrote myvault/wiki/synthesis/brief-revenue.md
 $ koios mcp --install codex                     # register with an MCP host
 ```
 
-Retrieval picks a channel per question and asks whether the evidence suffices
-before answering:
+Retrieval picks a channel per question and decides whether the evidence is
+sufficient before answering:
 
 ```mermaid
 flowchart TD
@@ -144,7 +144,7 @@ flowchart TD
     C -->|②| B25["BM25<br/>term match"]
     C -->|③| G["graph<br/>PPR"]
     C -->|④| F["full corpus"]
-    T --> Gr{"evidence enough?"}
+    T --> Gr{"evidence sufficient?"}
     B25 --> Gr
     G --> Gr
     F --> Gr
@@ -156,12 +156,12 @@ flowchart TD
     style R fill:#fdecea,stroke:#a94442
 ```
 
-**ACL**: `--groups finance-team` says which group you belong to. Leave it off
-and you are anonymous, so restricted documents stay invisible. That is on
-purpose.
+**ACL**: `--groups finance-team` declares the caller's group. Without it the
+caller is anonymous, so documents restricted by ACL stay invisible. This is
+intended behaviour.
 
-**Vault layout**: `raw/` is yours, `wiki/` is generated and meant to be
-committed, `.index/` is a build artifact and should not be.
+**Vault layout**: `raw/` holds what you write, `wiki/` holds generated pages
+(commit it), `.index/` is a build artifact (do not commit).
 
 ## Maintenance
 
@@ -197,7 +197,7 @@ counting citations): `draft → medium → high`.
 
 - `docs/KoiosBase设计文档v1.3.md` — design baseline
 - `docs/python-rust-parity.md` — the port's audit trail
-- `docs/known-gaps.md` — known gaps and limitations
+- `docs/known-gaps.md` — known limitations
 - `docs/i18n.md` — translation convention
 - `AGENTS.md` — the contract written into every vault
 

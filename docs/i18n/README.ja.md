@@ -6,8 +6,9 @@
 
 # KoiosBase
 
-Markdown を事実の源として扱うナレッジベースです。Markdown を書けば KoiosBase
-がインデックスし、答えは必ずその出所のブロックを指し示します。
+Markdown を信頼できる情報源として扱うナレッジベースです。Markdown を記述すると
+KoiosBase がインデックスを作成し、すべての回答はその根拠となったブロックを
+指し示します。
 
 ```console
 $ koios search "revenue" -p myvault
@@ -25,14 +26,14 @@ $ koios search "revenue" -p myvault
     ACME Corp revenue in 2024 was 3. 2 billion yuan, up 12 percent. Operating cash flow was positive for the year.
 ```
 
-- **Markdown こそが本体です。** インデックスはいつでも消せます。作り直せば
-   まったく同じものが戻ります。
-- **知識は古くなります。** ブロックを retract すると、それを引用するページは
-  すべて stale になり、答えに使われなくなります。
+- **Markdown が本体です。** インデックスはビルド成果物であり、いつでも削除
+  でき、再構築すれば同一の内容が復元されます。
+- **知識には寿命があります。** ブロックを retract すると、そのブロックを引用
+  しているページはすべて stale となり、回答に使用されなくなります。
 
 ```mermaid
 flowchart LR
-    A["raw/<br/>(あなたが書く)"] --> B["koios index"]
+    A["raw/<br/>(記述する内容)"] --> B["koios index"]
     B --> C[".index/<br/>(ビルド成果物)"]
     C --> D["検索 / 回答"]
     D --> E["回答 + 引用"]
@@ -44,12 +45,12 @@ flowchart LR
 
 ## インストール
 
-単一の Rust バイナリです。実行時の依存はありません。
+単一の Rust バイナリです。実行時の依存関係はありません。
 
 ```bash
 curl -LO https://github.com/DeepTrial/KoiosBase/releases/latest/download/koios-linux-x86_64
 chmod +x koios-linux-x86_64
-# またはソースからビルド（MuPDF の bindgen に libclang が必要）
+# またはソースからビルド（MuPDF の bindgen には libclang が必要）
 git clone https://github.com/DeepTrial/KoiosBase && cd KoiosBase
 cargo build --release --manifest-path rust-cli/Cargo.toml
 ```
@@ -61,37 +62,39 @@ indexed 0 blocks from demo
 ---- lint: 0 finding(s)
 ```
 
-### モデルをつなぐ（任意）
+### モデルの接続（任意）
 
-なくても動きます。内蔵ジェネレーターは、取得したブロックを引用付きでそのまま
-返します。でっち上げはしません。
+モデルがなくても動作します。その場合、内蔵ジェネレーターは取得したブロックを
+引用付きで返すのみで、原文に存在しない内容を追加することはありません。
 
-つなぐには `koios config --init -p myvault` がコメント入りの `koios.toml` を
-書くので、それを編集します：
+モデルを接続する場合は `koios config --init -p myvault` を実行します。コメント
+付きの `koios.toml` が生成されるので、必要な項目を編集してください：
 
 ```toml
 [model]
-kind = "openai"                          # 後述の2つのプロトコル
+kind = "openai"                          # プロトコル（下記の表を参照）
 base_url = "https://api.openai.com/v1"
 model = "gpt-4o-mini"
 api_key_env = "OPENAI_API_KEY"           # 環境変数の「名前」。キー自体ではない
 ```
 
-このファイルがあれば、`koios query` は追加のオプションなしでモデルを使います。
-`kind` は2種類だけ。どのプロトコルで話すかを決めます：
+このファイルが配置されていれば、`koios query` は追加のオプションなしでモデルを
+使用します。`kind` は 2 種類のみで、リクエストのプロトコルを決定します：
 
-| `kind` | POST 先 | どこから回答を読むか |
+| `kind` | エンドポイント | 回答の読み出し元 |
 | --- | --- | --- |
 | `openai`（既定） | `{base}/chat/completions` | `choices[0].message.content` |
 | `anthropic` | `{base}/messages` | `content[0].text` |
 
-`openai` はこのプロトコルを話すすべてをカバーします：OpenAI、Ollama、vLLM、
-llama.cpp、DeepSeek、Moonshot、LiteLLM — さらに Claude をプロキシするゲートウェイ
-（背後のモデルに関係なくこの形を外に出します）。Anthropic 自身のエンドポイント
-だけが `anthropic` を必要とします。Gemini や Bedrock は未実装です。下の
-`--llm-cmd` を使うか、ゲートウェイに変換させてください。
+`openai` はこのプロトコルに対応するすべてのサービスに適用できます：OpenAI、
+Ollama、vLLM、llama.cpp、DeepSeek、Moonshot、LiteLLM、および Claude を
+プロキシするゲートウェイ（これらは背後のモデルにかかわらず同じ形式を外部に
+公開します）。`anthropic` が必要なのは Anthropic 自身のエンドポイントのみです。
+Gemini と Bedrock は対応していません。後述の `--llm-cmd` を使用するか、
+ゲートウェイに変換させてください。
 
-ファイルを編集せずに一度だけ試すなら、`--llm-cmd` が設定より優先されます：
+設定ファイルを変更せずに一度だけ試す場合は、`--llm-cmd` が `koios.toml` より
+優先されます：
 
 ```console
 $ koios query "revenue" -p myvault --llm-cmd 'printf "%s" "Revenue was 3.2 billion yuan."'
@@ -100,15 +103,15 @@ Revenue was 3.2 billion yuan.
 [contracts] citation=0/1 sentences cited
 ```
 
-モデルの回答も同じゲートを通ります。引用漏れは黙認されず報告され、モデルの
-失敗は作られた回答ではなくエラーになります。上の例はまさにそれで指摘されて
-います。引用が一切ついていないからです。
+引用契約はモデルの出力にも適用されます。引用が欠けている場合は見過ごされず
+記録・報告され、呼び出しが失敗した場合は生成テキストで置き換えるのではなく
+エラーを返します。上記の例は、引用をまったく含んでいないため指摘されています。
 
 ## 使い方
 
 ```console
-$ koios init myvault                            # vault を作る
-$ koios index myvault                           # raw/ を編集するたびに
+$ koios init myvault                            # vault を作成
+$ koios index myvault                           # raw/ を編集するたびに実行
 $ koios search "revenue" -p myvault             # 検索
 $ koios query  "revenue" -p myvault             # 完全なパイプライン + verdict
 verdict: enough  hits: 4  escalated: false
@@ -124,22 +127,22 @@ verdict: enough  hits: 4  escalated: false
 - 关于「
 [3] sources/report.md#2024 Annual Report/导读摘要/1
     ACME Corp revenue in 2024 was 3. 2 billion yuan, up 12 percent. Operating cash flow was positive for the year.
-$ koios compile -p myvault                      # 構造化ページを生成
-compiled: entities=2 entity_pages=2 source_pages=1 affected_pages=5 stamp=2026-10-10
+$ koios compile -p myvault                      # 構造化ページをコンパイル
+compiled: entities=2 entity_pages=2 source_pages=1 affected_pages=5 refreshed=0 stamp=2026-10-12
 $ koios studio brief -p myvault -t revenue      # エクスポート
 wrote myvault/wiki/synthesis/brief-revenue.md
 $ koios mcp --install codex                     # MCP ホストに登録
 ```
 
-検索は質問ごとにチャネルを選び、答える前に証拠が十分かを問いかけます：
+検索は質問ごとにチャネルを選択し、回答前に証拠が十分かどうかを判定します：
 
 ```mermaid
 flowchart TD
-    Q[質問] --> C{"チャネル選択"}
+    Q[質問] --> C{"チャネルの選択"}
     C -->|①| T["tree<br/>見出しをたどる"]
     C -->|②| B25["BM25<br/>語句一致"]
     C -->|③| G["graph<br/>PPR"]
-    C -->|④| F["コーパス全体"]
+    C -->|④| F["全文コーパス"]
     T --> Gr{"証拠は十分か"}
     B25 --> Gr
     G --> Gr
@@ -152,20 +155,21 @@ flowchart TD
     style R fill:#fdecea,stroke:#a94442
 ```
 
-**ACL**: `--groups finance-team` は主体を指定します。指定しない場合は匿名となり、
-制限付きドキュメントは見えなくなります —— 仕様です。
+**ACL**：`--groups finance-team` は呼び出し元のグループを宣言します。指定しない
+場合、呼び出し元は匿名となり、ACL で制限されたドキュメントは参照できません。
+これは仕様どおりの動作です。
 
-**vault の構造**: `raw/` は自分のもの、`wiki/` は生成物でコミットすべき、
-`.index/` はビルド成果物でコミットすべきではない。
+**vault の構成**：`raw/` は記述したドキュメント、`wiki/` は生成されたページ
+（コミットを推奨）、`.index/` はビルド成果物（コミットしないでください）。
 
 ## 保守
 
-| タスク | コマンド |
+| 作業 | コマンド |
 | --- | --- |
-| `raw/` を編集した後 | `koios index myvault` |
-| 健全性チェック | `koios lint myvault` |
-| アップグレード後 | `koios index myvault --full` |
-| 事実が誤っている | `koios retract -p myvault -b "ブロックid" --reason "..."` |
+| `raw/` の編集後 | `koios index myvault` |
+| 状態確認 | `koios lint myvault` |
+| バージョン更新後 | `koios index myvault --full` |
+| 事実の誤りを訂正 | `koios retract -p myvault -b "ブロック ID" --reason "..."` |
 | 信頼度を上げる | `koios promote --human-confirmed "wiki/entities/acme.md"` |
 
 ```console
@@ -185,15 +189,15 @@ stateDiagram-v2
     retracted --> [*]: filtered from retrieval
 ```
 
-confidence はジェネレータの外の証拠によってのみ上がります（§5.4、引用の数では
-決してありません）：`draft → medium → high`。
+信頼度は、ジェネレーターの外部にある証拠によってのみ上がります（§5.4 —
+引用の数は基準にしません）：`draft → medium → high`。
 
 ## ドキュメント
 
-- `docs/KoiosBase设计文档v1.3.md` —— 設計ベースライン
-- `docs/python-rust-parity.md` —— 移植の監査証跡
-- `docs/known-gaps.md` —— 既知のギャップと制限
+- `docs/KoiosBase设计文档v1.3.md` —— 設計の基準
+- `docs/python-rust-parity.md` —— 移植の監査記録
+- `docs/known-gaps.md` —— 既知の制限
 - `docs/i18n.md` —— 翻訳の規約
-- `AGENTS.md` —— すべての vault に書き込まれる契約
+- `AGENTS.md` —— 各 vault に書き込まれる契約
 
 MIT —— [LICENSE](../../LICENSE) を参照してください。
