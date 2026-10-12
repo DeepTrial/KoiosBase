@@ -6,8 +6,8 @@
 
 # KoiosBase
 
-Markdown ネイティブな LLM ナレッジベースです。Markdown を書けば KoiosBase が
-インデックスし、答えは必ずその出所のブロックを指し示します。
+Markdown を事実の源として扱うナレッジベースです。Markdown を書けば KoiosBase
+がインデックスし、答えは必ずその出所のブロックを指し示します。
 
 ```console
 $ koios search "revenue" -p myvault
@@ -25,10 +25,10 @@ $ koios search "revenue" -p myvault
     ACME Corp revenue in 2024 was 3. 2 billion yuan, up 12 percent. Operating cash flow was positive for the year.
 ```
 
-- **Markdown が真実です。** インデックスはビルド成果物で、削除しても
-  バイト単位で再構築されます。
-- **知識にはライフサイクルがあります。** ブロックを retract すると、それを引用する
-  ページは stale とマークされ、回答に使われなくなります。
+- **Markdown こそが本体です。** インデックスはいつでも消せます。作り直せば
+   まったく同じものが戻ります。
+- **知識は古くなります。** ブロックを retract すると、それを引用するページは
+  すべて stale になり、答えに使われなくなります。
 
 ```mermaid
 flowchart LR
@@ -44,7 +44,7 @@ flowchart LR
 
 ## インストール
 
-単一の Rust バイナリで、**実行時依存がありません**。
+単一の Rust バイナリです。実行時の依存はありません。
 
 ```bash
 curl -LO https://github.com/DeepTrial/KoiosBase/releases/latest/download/koios-linux-x86_64
@@ -61,30 +61,48 @@ indexed 0 blocks from demo
 ---- lint: 0 finding(s)
 ```
 
-### LLM を接続する（任意）
+### モデルをつなぐ（任意）
 
-設定なしでも動作します。組み込みジェネレータは引用付きの取得ブロックだけを返し、
-決して作り話をしません。モデルを追加するには `koios config --init -p myvault`
-を実行して `koios.toml` を記入します：
+なくても動きます。内蔵ジェネレーターは、取得したブロックを引用付きでそのまま
+返します。でっち上げはしません。
+
+つなぐには `koios config --init -p myvault` がコメント入りの `koios.toml` を
+書くので、それを編集します：
 
 ```toml
 [model]
+kind = "openai"                          # 後述の2つのプロトコル
 base_url = "https://api.openai.com/v1"
 model = "gpt-4o-mini"
-api_key_env = "OPENAI_API_KEY"     # 環境変数の「名前」であって、キー自体ではない
+api_key_env = "OPENAI_API_KEY"           # 環境変数の「名前」。キー自体ではない
 ```
 
-OpenAI プロトコルを話すエンドポイントなら何でも使えます（`kind = "openai"`、既定値）：OpenAI、Ollama、vLLM、DeepSeek、Moonshot、LiteLLM —— および Claude をプロキシするゲートウェイ（背後のモデルに関係なくこの形式を提示します）。Anthropic 自身のエンドポイントのみ `kind = "anthropic"` が必要です。
+このファイルがあれば、`koios query` は追加のオプションなしでモデルを使います。
+`kind` は2種類だけ。どのプロトコルで話すかを決めます：
 
-ガードレールはあなたのモデルにも適用されます —— 引用漏れは黙認されず報告され、
-モデルの失敗は捏造された回答ではなくエラーになります：
+| `kind` | POST 先 | どこから回答を読むか |
+| --- | --- | --- |
+| `openai`（既定） | `{base}/chat/completions` | `choices[0].message.content` |
+| `anthropic` | `{base}/messages` | `content[0].text` |
+
+`openai` はこのプロトコルを話すすべてをカバーします：OpenAI、Ollama、vLLM、
+llama.cpp、DeepSeek、Moonshot、LiteLLM — さらに Claude をプロキシするゲートウェイ
+（背後のモデルに関係なくこの形を外に出します）。Anthropic 自身のエンドポイント
+だけが `anthropic` を必要とします。Gemini や Bedrock は未実装です。下の
+`--llm-cmd` を使うか、ゲートウェイに変換させてください。
+
+ファイルを編集せずに一度だけ試すなら、`--llm-cmd` が設定より優先されます：
 
 ```console
 $ koios query "revenue" -p myvault --llm-cmd 'printf "%s" "Revenue was 3.2 billion yuan."'
-verdict: enough  hits: 3  escalated: false
+verdict: enough  hits: 4  escalated: false
 Revenue was 3.2 billion yuan.
 [contracts] citation=0/1 sentences cited
 ```
+
+モデルの回答も同じゲートを通ります。引用漏れは黙認されず報告され、モデルの
+失敗は作られた回答ではなくエラーになります。上の例はまさにそれで指摘されて
+います。引用が一切ついていないからです。
 
 ## 使い方
 
@@ -137,8 +155,8 @@ flowchart TD
 **ACL**: `--groups finance-team` は主体を指定します。指定しない場合は匿名となり、
 制限付きドキュメントは見えなくなります —— 仕様です。
 
-**vault の構成**: `raw/`（あなたが書く）、`wiki/`（生成物、コミットする）、
-`.index/`（ビルド成果物、決してコミットしない）。
+**vault の構造**: `raw/` は自分のもの、`wiki/` は生成物でコミットすべき、
+`.index/` はビルド成果物でコミットすべきではない。
 
 ## 保守
 

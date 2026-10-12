@@ -6,8 +6,9 @@
 
 # KoiosBase
 
-Una base de conocimiento LLM nativa de Markdown. Tú escribes Markdown,
-KoiosBase lo indexa y cada respuesta apunta al bloque del que proviene.
+Una base de conocimiento que trata el Markdown como fuente de verdad. Tú
+escribes Markdown, KoiosBase lo indexa y cada respuesta apunta al bloque del que
+proviene.
 
 ```console
 $ koios search "revenue" -p myvault
@@ -25,10 +26,10 @@ $ koios search "revenue" -p myvault
     ACME Corp revenue in 2024 was 3. 2 billion yuan, up 12 percent. Operating cash flow was positive for the year.
 ```
 
-- **Markdown es la verdad.** El índice es un artefacto de compilación: bórralo y
-  se reconstruye byte a byte.
-- **El conocimiento tiene ciclo de vida.** Retrae un bloque y todas las páginas
-  que lo citan se marcan como obsoletas y dejan de responder.
+- **El Markdown es lo que cuenta.** El índice se puede borrar en cualquier
+  momento y vuelve idéntico.
+- **El conocimiento caduca.** Retrae un bloque y todas las páginas que lo citan
+  se marcan como obsoletas y dejan de responder.
 
 ```mermaid
 flowchart LR
@@ -44,7 +45,7 @@ flowchart LR
 
 ## Instalación
 
-Un único binario de Rust, **sin dependencias en tiempo de ejecución**.
+Un único binario de Rust. Sin dependencias en tiempo de ejecución.
 
 ```bash
 curl -LO https://github.com/DeepTrial/KoiosBase/releases/latest/download/koios-linux-x86_64
@@ -61,35 +62,50 @@ indexed 0 blocks from demo
 ---- lint: 0 finding(s)
 ```
 
-### Conectar un LLM (opcional)
+### Conectar un modelo (opcional)
 
-Funciona sin modelo: el generador integrado solo devuelve bloques recuperados y
-citados, nunca inventa. Para añadir un modelo, ejecuta
-`koios config --init -p myvault` y rellena `koios.toml`:
+Funciona sin él. El generador integrado devuelve los bloques recuperados tal
+cual, con sus citas. No inventa nada.
+
+Para conectar uno, `koios config --init -p myvault` escribe un `koios.toml`
+comentado. Edita eso:
 
 ```toml
 [model]
+kind = "openai"                          # ver los dos protocolos más abajo
 base_url = "https://api.openai.com/v1"
 model = "gpt-4o-mini"
-api_key_env = "OPENAI_API_KEY"     # el NOMBRE de la variable de entorno, nunca la clave
+api_key_env = "OPENAI_API_KEY"           # el NOMBRE de la variable de entorno, nunca la clave
 ```
 
-Cualquier endpoint que hable el protocolo OpenAI funciona (`kind = "openai"`,
-predeterminado): OpenAI, Ollama, vLLM, DeepSeek, Moonshot, LiteLLM — y las
-pasarelas que proxifican Claude, que exponen esa misma forma independientemente
-del modelo detrás. Solo el endpoint propio de Anthropic necesita
-`kind = "anthropic"`.
+Una vez que ese archivo existe, `koios query` usa el modelo sin flags extra.
+`kind` acepta exactamente dos valores y decide qué protocolo se habla:
 
-Las barreras de seguridad también se aplican a tu modelo: las citas faltantes se
-reportan en lugar de aceptarse en silencio, y un modelo que falla es un error y
-no una respuesta fabricada:
+| `kind` | a qué hace POST | de dónde se lee la respuesta |
+| --- | --- | --- |
+| `openai` (por defecto) | `{base}/chat/completions` | `choices[0].message.content` |
+| `anthropic` | `{base}/messages` | `content[0].text` |
+
+`openai` cubre todo lo que habla ese protocolo: OpenAI, Ollama, vLLM,
+llama.cpp, DeepSeek, Moonshot, LiteLLM — además de las pasarelas que proxifican
+Claude, que exponen esta forma sin importar qué modelo haya detrás. Solo el
+endpoint propio de Anthropic necesita `anthropic`. Gemini y Bedrock no están
+implementados; usa `--llm-cmd` más abajo, o una pasarela que traduzca.
+
+Para probar algo una vez sin editar archivos, `--llm-cmd` tiene prioridad sobre
+la configuración:
 
 ```console
 $ koios query "revenue" -p myvault --llm-cmd 'printf "%s" "Revenue was 3.2 billion yuan."'
-verdict: enough  hits: 3  escalated: false
+verdict: enough  hits: 4  escalated: false
 Revenue was 3.2 billion yuan.
 [contracts] citation=0/1 sentences cited
 ```
+
+La respuesta del modelo pasa por la misma barrera. Las citas faltantes se
+reportan en lugar de aceptarse en silencio, y un modelo que falla es un error y
+no una respuesta fabricada. El ejemplo de arriba está señalado justo por eso:
+no lleva ninguna cita.
 
 ## Uso
 
@@ -140,11 +156,11 @@ flowchart TD
     style R fill:#fdecea,stroke:#a94442
 ```
 
-**ACL**: `--groups finance-team` define tu principal; sin él eres anónimo y los
-documentos restringidos son invisibles — por diseño.
+**ACL**: `--groups finance-team` indica a qué grupo perteneces. Si lo omites
+eres anónimo y los documentos restringidos no aparecen. Es a propósito.
 
-**Estructura del vault**: `raw/` (tú escribes), `wiki/` (generado, haz commit),
-`.index/` (artefacto de build, nunca hagas commit).
+**Estructura del vault**: `raw/` es tuyo, `wiki/` se genera y conviene
+commitearlo, `.index/` es un artefacto de build y no debería estar en git.
 
 ## Mantenimiento
 
@@ -173,8 +189,8 @@ stateDiagram-v2
     retracted --> [*]: filtered from retrieval
 ```
 
-La confianza solo sube con evidencia externa al generador (§5.4 — nunca contando
-citas): `draft → medium → high`.
+La confianza solo sube con evidencia externa al generador (§5.4 — nunca
+contando citas): `draft → medium → high`.
 
 ## Documentación
 

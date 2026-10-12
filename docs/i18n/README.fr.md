@@ -6,8 +6,9 @@
 
 # KoiosBase
 
-Une base de connaissances LLM native Markdown. Vous écrivez du Markdown,
-KoiosBase l'indexe, et chaque réponse renvoie au bloc dont elle provient.
+Une base de connaissances qui traite le Markdown comme source de vérité. Vous
+écrivez du Markdown, KoiosBase l'indexe, et chaque réponse renvoie au bloc dont
+elle provient.
 
 ```console
 $ koios search "revenue" -p myvault
@@ -25,10 +26,10 @@ $ koios search "revenue" -p myvault
     ACME Corp revenue in 2024 was 3. 2 billion yuan, up 12 percent. Operating cash flow was positive for the year.
 ```
 
-- **Le Markdown est la vérité.** L'index est un artefact de build — supprimez-le
-  et il se reconstruit octet pour octet.
-- **La connaissance a un cycle de vie.** Rétractez un bloc et chaque page qui le
-  cite est marquée obsolète et cesse de répondre.
+- **Le Markdown est ce qui compte.** L'index peut être supprimé à tout moment et
+  revient identique.
+- **La connaissance périt.** Rétractez un bloc et chaque page qui le cite est
+  marquée obsolète et cesse de répondre.
 
 ```mermaid
 flowchart LR
@@ -44,7 +45,7 @@ flowchart LR
 
 ## Installation
 
-Un unique binaire Rust, **sans dépendance à l'exécution**.
+Un unique binaire Rust. Aucune dépendance à l'exécution.
 
 ```bash
 curl -LO https://github.com/DeepTrial/KoiosBase/releases/latest/download/koios-linux-x86_64
@@ -61,34 +62,50 @@ indexed 0 blocks from demo
 ---- lint: 0 finding(s)
 ```
 
-### Brancher un LLM (optionnel)
+### Brancher un modèle (optionnel)
 
-Cela fonctionne sans modèle : le générateur intégré ne renvoie que des blocs
-retrouvés et cités, il n'invente jamais. Pour ajouter un modèle, lancez
-`koios config --init -p myvault` et remplissez `koios.toml` :
+Ça marche sans. Le générateur intégré renvoie les blocs retrouvés tels quels,
+avec leurs citations. Il n'invente rien.
+
+Pour en brancher un, `koios config --init -p myvault` écrit un `koios.toml`
+commenté. Il suffit de le modifier :
 
 ```toml
 [model]
+kind = "openai"                          # voir les deux protocoles ci-dessous
 base_url = "https://api.openai.com/v1"
 model = "gpt-4o-mini"
-api_key_env = "OPENAI_API_KEY"     # le NOM de la variable d'environnement, jamais la clé
+api_key_env = "OPENAI_API_KEY"           # le NOM de la variable d'environnement, jamais la clé
 ```
 
-Tout endpoint parlant le protocole OpenAI fonctionne (`kind = "openai"`, par
-défaut) : OpenAI, Ollama, vLLM, DeepSeek, Moonshot, LiteLLM — et les passerelles
-qui proxifient Claude, lesquelles exposent cette même forme quel que soit le
-modèle derrière. Seul l'endpoint propre à Anthropic exige `kind = "anthropic"`.
+Une fois ce fichier présent, `koios query` utilise le modèle sans option
+supplémentaire. `kind` prend exactement deux valeurs et décide du protocole :
 
-Les garde-fous s'appliquent aussi à votre modèle — les citations manquantes sont
-signalées et non acceptées en silence, et un modèle en panne est une erreur
-plutôt qu'une réponse fabriquée :
+| `kind` | requête POST vers | réponse lue depuis |
+| --- | --- | --- |
+| `openai` (par défaut) | `{base}/chat/completions` | `choices[0].message.content` |
+| `anthropic` | `{base}/messages` | `content[0].text` |
+
+`openai` couvre tout ce qui parle ce protocole : OpenAI, Ollama, vLLM,
+llama.cpp, DeepSeek, Moonshot, LiteLLM — ainsi que les passerelles qui proxifient
+Claude, qui exposent cette forme quel que soit le modèle derrière. Seul
+l'endpoint propre à Anthropic exige `anthropic`. Gemini et Bedrock ne sont pas
+implémentés ; utilisez `--llm-cmd` ci-dessous, ou une passerelle qui traduit.
+
+Pour un essai ponctuel sans éditer de fichier, `--llm-cmd` prend la priorité sur
+la configuration :
 
 ```console
 $ koios query "revenue" -p myvault --llm-cmd 'printf "%s" "Revenue was 3.2 billion yuan."'
-verdict: enough  hits: 3  escalated: false
+verdict: enough  hits: 4  escalated: false
 Revenue was 3.2 billion yuan.
 [contracts] citation=0/1 sentences cited
 ```
+
+La réponse du modèle passe par la même barrière. Une citation manquante est
+signalée, pas acceptée en silence, et un modèle en panne est une erreur plutôt
+qu'une réponse fabriquée. L'exemple ci-dessus est précisément recadré pour ça :
+il ne porte aucune citation.
 
 ## Utilisation
 
@@ -139,11 +156,12 @@ flowchart TD
     style R fill:#fdecea,stroke:#a94442
 ```
 
-**ACL** : `--groups finance-team` définit votre principal ; sans cette option
-vous êtes anonyme et les documents restreints sont invisibles — c'est voulu.
+**ACL** : `--groups finance-team` indique à quel groupe vous appartenez. Sans
+l'option vous êtes anonyme et les documents restreints restent invisibles. C'est
+voulu.
 
-**Structure du vault** : `raw/` (vous écrivez), `wiki/` (généré, à commiter),
-`.index/` (artefact de build, jamais à commiter).
+**Structure du vault** : `raw/` est à vous, `wiki/` est généré et doit être
+commité, `.index/` est un artefact de build et ne doit pas l'être.
 
 ## Maintenance
 
@@ -173,7 +191,7 @@ stateDiagram-v2
 ```
 
 La confiance ne monte que sur des preuves extérieures au générateur (§5.4 —
-jamais sur un compte de citations) : `draft → medium → high`.
+jamais en comptant les citations) : `draft → medium → high`.
 
 ## Documentation
 

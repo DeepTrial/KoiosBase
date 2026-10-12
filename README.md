@@ -6,7 +6,7 @@
 
 # KoiosBase
 
-一个 Markdown 原生的 LLM 知识库。你写 Markdown，KoiosBase 建索引，
+一个把 Markdown 当事实来源的知识库。你写 Markdown，KoiosBase 建索引，
 每个答案都指回它出自的那个块。
 
 ```console
@@ -25,8 +25,8 @@ $ koios search "revenue" -p myvault
     ACME Corp revenue in 2024 was 3. 2 billion yuan, up 12 percent. Operating cash flow was positive for the year.
 ```
 
-- **Markdown 就是事实本身。** 索引是构建产物，删掉会逐字节重建。
-- **知识有生命周期。** 一个块被 `retracted`，所有引用它的页面标记 stale 并停止作答。
+- **Markdown 才是本体。** 索引随时可删，重建出来一模一样。
+- **知识会过期。** 一个块被 `retracted`，引用它的页面全部标记 stale，不再拿它作答。
 
 ```mermaid
 flowchart LR
@@ -42,7 +42,7 @@ flowchart LR
 
 ## 安装
 
-单个 Rust 二进制，**无运行时依赖**。
+单个 Rust 二进制，不带运行时依赖。
 
 ```bash
 curl -LO https://github.com/DeepTrial/KoiosBase/releases/latest/download/koios-linux-x86_64
@@ -59,28 +59,45 @@ indexed 0 blocks from demo
 ---- lint: 0 finding(s)
 ```
 
-### 接入 LLM（可选）
+### 接个模型（可选）
 
-不配置也能用：内置生成器只返回带引用的检索块，从不编造。想接模型就写
-`koios config --init -p myvault`，然后填 `koios.toml`：
+不接也能用。内置生成器只把检索到的块原样带引用返回，不编造。
+
+要接，跑 `koios config --init -p myvault` 会生成一份带注释的 `koios.toml`，
+改它就行：
 
 ```toml
 [model]
+kind = "openai"                          # 见下面两种协议
 base_url = "https://api.openai.com/v1"
 model = "gpt-4o-mini"
-api_key_env = "OPENAI_API_KEY"     # 环境变量的「名字」，不是密钥本身
+api_key_env = "OPENAI_API_KEY"           # 环境变量的「名字」，不是密钥本身
 ```
 
-任何支持 OpenAI 协议的服务都能用（`kind = "openai"`，默认）：OpenAI、Ollama、vLLM、DeepSeek、Moonshot、LiteLLM，以及代理 Claude 的网关。只有 Anthropic 自己的端点要填 `kind = "anthropic"`。
+配好之后 `koios query` 自动走模型，不用加任何参数。`kind` 只有两个值，
+决定用哪种协议说话：
 
-闸门对你的模型一样生效——缺引用会被报告而不是静默接受，模型失败是错误而不是编造的答案：
+| `kind` | 发给谁 | 答案从哪读 |
+| --- | --- | --- |
+| `openai`（默认） | `POST {base}/chat/completions` | `choices[0].message.content` |
+| `anthropic` | `POST {base}/messages` | `content[0].text` |
+
+`openai` 覆盖所有说这套协议的：OpenAI、Ollama、vLLM、llama.cpp、DeepSeek、
+Moonshot、LiteLLM，以及代理 Claude 的网关（它们对外都是这个形状，不管背后
+是哪个模型）。只有 Anthropic 自己的端点要改成 `anthropic`。Gemini、Bedrock
+这类没实现，用下面的 `--llm-cmd` 或让网关转。
+
+临时试一下不想改文件，用 `--llm-cmd`，它优先于配置：
 
 ```console
 $ koios query "revenue" -p myvault --llm-cmd 'printf "%s" "Revenue was 3.2 billion yuan."'
-verdict: enough  hits: 3  escalated: false
+verdict: enough  hits: 4  escalated: false
 Revenue was 3.2 billion yuan.
 [contracts] citation=0/1 sentences cited
 ```
+
+模型说的话照样要过闸门。引用不全会被报出来，不是静默放行；模型挂了是错误，
+不是编一段答案糊过去。上面那个例子就是没带引用，所以被点了名。
 
 ## 用法
 
@@ -130,9 +147,9 @@ flowchart TD
     style R fill:#fdecea,stroke:#a94442
 ```
 
-**ACL**：`--groups finance-team` 设定你的主体；不给就是匿名，受限文档对你不可见——这是设计。
+**ACL**：`--groups finance-team` 指定你属于哪个组。不写就是匿名，受限文档一律看不见，这是故意的。
 
-**vault 结构**：`raw/`（你写）、`wiki/`（生成，要提交）、`.index/`（构建产物，别提交）。
+**vault 结构**：`raw/` 你写，`wiki/` 生成的主要提交进 git，`.index/` 是构建产物别提交。
 
 ## 维护
 
@@ -161,7 +178,7 @@ stateDiagram-v2
     retracted --> [*]: filtered from retrieval
 ```
 
-confidence 只能靠生成器之外的证据提升（§5.4，绝不算引用数）：`draft → medium → high`。
+confidence 只认生成器之外的证据（§5.4，从不数引用条数）：`draft → medium → high`。
 
 ## 文档
 

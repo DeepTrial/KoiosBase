@@ -6,8 +6,9 @@
 
 # KoiosBase
 
-A Markdown-native knowledge base for LLMs. You write Markdown, KoiosBase indexes
-it, and every answer points back at the block it came from.
+A knowledge base that treats Markdown as the source of truth. You write
+Markdown, KoiosBase indexes it, and every answer points back at the block it
+came from.
 
 ```console
 $ koios search "revenue" -p myvault
@@ -25,10 +26,10 @@ $ koios search "revenue" -p myvault
     ACME Corp revenue in 2024 was 3. 2 billion yuan, up 12 percent. Operating cash flow was positive for the year.
 ```
 
-- **Markdown is the truth.** The index is a build artifact — delete it and it
-  rebuilds byte-for-byte.
-- **Knowledge has a lifecycle.** Retract a block and every page citing it is
-  marked stale and stops answering.
+- **Markdown is what counts.** The index can be deleted at any time and comes
+  back identical.
+- **Knowledge goes stale.** Retract a block and every page citing it is marked
+  stale and stops answering.
 
 ```mermaid
 flowchart LR
@@ -44,7 +45,7 @@ flowchart LR
 
 ## Install
 
-A single Rust binary with **no runtime dependencies**.
+A single Rust binary. No runtime dependencies.
 
 ```bash
 curl -LO https://github.com/DeepTrial/KoiosBase/releases/latest/download/koios-linux-x86_64
@@ -61,34 +62,50 @@ indexed 0 blocks from demo
 ---- lint: 0 finding(s)
 ```
 
-### Connect an LLM (optional)
+### Connect a model (optional)
 
-It works without one: the built-in generator returns only cited retrieved blocks
-and never fabricates. To add a model, run `koios config --init -p myvault` and
-fill in `koios.toml`:
+It works without one. The built-in generator returns the retrieved blocks
+verbatim with their citations. It does not make things up.
+
+To connect one, `koios config --init -p myvault` writes an annotated
+`koios.toml`. Edit that:
 
 ```toml
 [model]
+kind = "openai"                          # see the two protocols below
 base_url = "https://api.openai.com/v1"
 model = "gpt-4o-mini"
-api_key_env = "OPENAI_API_KEY"     # the NAME of the env var, never the key
+api_key_env = "OPENAI_API_KEY"           # the NAME of the env var, never the key
 ```
 
-Any endpoint speaking the OpenAI protocol works (`kind = "openai"`, the default):
-OpenAI, Ollama, vLLM, DeepSeek, Moonshot, LiteLLM — and gateways proxying Claude,
-which present that shape regardless of the model behind them. Only Anthropic's own
-endpoint needs `kind = "anthropic"`.
+Once that file exists, `koios query` uses the model with no extra flags.
+`kind` takes exactly two values, and decides which protocol gets spoken:
 
-The guardrails apply to your model too — missing citations are reported rather
-than silently accepted, and a failing model is an error rather than a fabricated
-answer:
+| `kind` | what it POSTs to | where the answer is read from |
+| --- | --- | --- |
+| `openai` (default) | `{base}/chat/completions` | `choices[0].message.content` |
+| `anthropic` | `{base}/messages` | `content[0].text` |
+
+`openai` covers everything that speaks it: OpenAI, Ollama, vLLM, llama.cpp,
+DeepSeek, Moonshot, LiteLLM — plus gateways proxying Claude, which present this
+shape no matter which model sits behind them. Only Anthropic's own endpoint
+needs `anthropic`. Gemini and Bedrock are not implemented; use `--llm-cmd`
+below, or let a gateway translate.
+
+To try something once without editing files, use `--llm-cmd`. It takes
+precedence over the config:
 
 ```console
 $ koios query "revenue" -p myvault --llm-cmd 'printf "%s" "Revenue was 3.2 billion yuan."'
-verdict: enough  hits: 3  escalated: false
+verdict: enough  hits: 4  escalated: false
 Revenue was 3.2 billion yuan.
 [contracts] citation=0/1 sentences cited
 ```
+
+The model's answer goes through the same gate. Missing citations get reported
+rather than waved through, and a failing model is an error rather than a
+fabricated answer. The example above is being called out for exactly that: it
+carries no citation.
 
 ## Usage
 
@@ -139,11 +156,12 @@ flowchart TD
     style R fill:#fdecea,stroke:#a94442
 ```
 
-**ACL**: `--groups finance-team` sets your principal; without it you are
-anonymous and restricted documents are invisible — by design.
+**ACL**: `--groups finance-team` says which group you belong to. Leave it off
+and you are anonymous, so restricted documents stay invisible. That is on
+purpose.
 
-**Vault layout**: `raw/` (you write), `wiki/` (generated, commit it),
-`.index/` (build artifact, never commit).
+**Vault layout**: `raw/` is yours, `wiki/` is generated and meant to be
+committed, `.index/` is a build artifact and should not be.
 
 ## Maintenance
 
@@ -172,8 +190,8 @@ stateDiagram-v2
     retracted --> [*]: filtered from retrieval
 ```
 
-Confidence rises only on evidence from outside the generator (§5.4 — never
-citation counts): `draft → medium → high`.
+Confidence rises only on evidence from outside the generator (§5.4 — never by
+counting citations): `draft → medium → high`.
 
 ## Docs
 
