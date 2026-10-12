@@ -2,7 +2,7 @@
 [![GitHub Release](https://img.shields.io/github/v/release/DeepTrial/KoiosBase)](https://github.com/DeepTrial/KoiosBase/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-[中文](README.md) | [English](docs/i18n/README.en.md) | [Français](docs/i18n/README.fr.md) | [Español](docs/i18n/README.es.md) | [日本語](docs/i18n/README.ja.md) | [한국어](docs/i18n/README.ko.md)
+中文 · [English](docs/i18n/README.en.md) · [Français](docs/i18n/README.fr.md) · [Español](docs/i18n/README.es.md) · [日本語](docs/i18n/README.ja.md) · [한국어](docs/i18n/README.ko.md)
 
 # KoiosBase
 
