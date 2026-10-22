@@ -219,6 +219,37 @@ fn retrieve_channel_tree() {
     assert!(!ids.is_empty(), "named tree channel must return ids");
 }
 
+/// Channel ②'s vector half degrades to empty -- never to an error -- when no
+/// model is installed.
+///
+/// This is the behaviour every test vault and CI job depends on: they have no
+/// `models/` directory, and §5.2.1 must not turn a missing file into a panic in
+/// the middle of unrelated coverage. Real absence of the model is reported on
+/// stderr by warn_if_missing(), not by failing here.
+#[test]
+fn vector_channel_is_empty_without_a_model() {
+    let v = vault("novmodel");
+    assert!(
+        !koios::embed::is_ready(&v),
+        "the fixture vault must not carry a model"
+    );
+    let hits = koios::embed::search_vectors(&v, "营收", 8);
+    assert!(
+        hits.is_empty(),
+        "with no model the vector channel must return nothing, not err"
+    );
+}
+
+/// `vec.db` is created and answers queries even while encoding nothing else,
+/// which is what lets a stale/absent model leave the rest of the vault intact.
+#[test]
+fn vec_db_survives_a_missing_gracefully() {
+    let v = vault("vecdbmissing");
+    let conn = koios::embed::ensure_vec_db(&v);
+    assert!(conn.is_ok(), "vec.db must be creatable: {:?}", conn.err());
+    assert!(v.join(".index").join("vec.db").is_file());
+}
+
 /// test_eval_seed_set_runs
 #[test]
 fn eval_seed_set_runs() {

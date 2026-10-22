@@ -20,7 +20,7 @@ use koios::fm_title;
 use koios::lint;
 use koios::mcp;
 use koios::pipeline;
-use koios::retrieval;
+use koios::retrieval::{self, ALPHA, BETA, RRF_K};
 use koios::split_frontmatter;
 use koios::state;
 use koios::studio;
@@ -256,6 +256,13 @@ fn cmd_search(
     channel: Option<&str>,
 ) -> rusqlite::Result<()> {
     let conn = connect(path)?;
+    // Channel ② is specified as vector + FTS fused; until §5.2.1 landed only
+    // the FTS half ran. The two enter RRF separately rather than being merged
+    // into one list first, which is how two incomparable score scales are meant
+    // to meet (see retrieval::rrf_fuse). With no model installed this list is
+    // empty and the route degrades to exactly its previous behaviour.
+    koios::embed::warn_if_missing(path);
+    let semantic = koios::embed::search_vectors(path, query, top * 3);
     // Route through retrieve_channel so the ACL applies. The previous raw-FTS
     // ladder here bypassed it completely, so `koios search` handed restricted
     // blocks to whoever asked.
@@ -272,8 +279,34 @@ fn cmd_search(
         // Same triple as retrieve_channel, so `--channel` cannot pick the one
         // door the ACL forgot to lock.
         pipeline::filter_chain(&conn, out, groups.as_deref())
-    } else {
+    } else if semantic.is_empty() {
         pipeline::retrieve_channel(&conn, query, top, groups.as_deref())
+    } else {
+        // Fuse, don't append.
+        //
+        // Appending the semantic hits after the lexical ones looked harmless
+        // but inverted the result: for 发动机 the correct block had the best
+        // vector distance yet ranked second, because an irrelevant block the
+        // other channels happened to surface sat ahead of it. §6.1 already
+        // prescribes RRF for exactly this — two channels whose scores are not
+        // comparable — so the same rrf_fuse every other merge uses applies
+        // here rather than a bespoke concatenation.
+        let lexical = pipeline::retrieve_channel(&conn, query, top, groups.as_deref());
+        let lex_list: Vec<(String, f64)> = lexical
+            .iter()
+            .enumerate()
+            .map(|(r, b)| (b.id.clone(), -(r as f64)))
+            .collect();
+        let fused =
+            koios::retrieval::rrf_fuse(&[lex_list, semantic.clone()], &[BETA, ALPHA], RRF_K);
+        let mut out: Vec<pipeline::Ev> = Vec::new();
+        for (id, _) in fused.iter() {
+            if let Some(b) = pipeline::get_block(&conn, id) {
+                out.push(b);
+            }
+        }
+        out.truncate(top);
+        pipeline::filter_chain(&conn, out, groups.as_deref())
     };
     // Byte-identical to koiosbase/cli.py cmd_search()'s three-line form:
     //   [i] id / breadcrumb / snippet

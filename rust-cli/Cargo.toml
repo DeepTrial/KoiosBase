@@ -1,6 +1,6 @@
 [package]
 name = "koios"
-version = "0.9.1"
+version = "0.10.0"
 edition = "2021"
 # LICENSE NOTE (deliberate, reviewed 2026-10-02):
 # KoiosBase itself is MIT (see /LICENSE), but the PDF tier links MuPDF via the
@@ -40,6 +40,9 @@ sha2 = "0.10.9"
 ureq = { version = "3", default-features = false, features = ["json", "rustls"] }
 toml = "1.1.7"
 serde = { version = "1.0.229", features = ["derive"] }
+ort = { version = "2.0.0-rc.15", features = ["download-binaries"] }
+tokenizers = "0.21"
+sqlite-vec = "0.1.9"
 # Only for restoring SIGPIPE's platform default (see main::install_sigpipe_default)
 # and for undoing it in spawned model children (see llm::run_command).
 # Unix-only so the Windows release target does not link it.

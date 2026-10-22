@@ -10,6 +10,7 @@
 
 pub mod acl;
 pub mod compile;
+pub mod embed;
 pub mod ingest;
 pub mod lint;
 pub mod llm;
@@ -847,6 +848,15 @@ pub fn cmd_index(path: &Path) -> rusqlite::Result<()> {
     } else {
         changed_raw_docs(&before_fp, &after_fp)
     };
+    // §5.2.1: the vector index is part of what `index` produces, so it is built
+    // in the same command — but only when the operator actually installed the
+    // model. Indexing must still succeed without it (that is every existing
+    // vault, every test, and CI), so absence is reported once and skipped.
+    // Never a silent BM25 downgrade on the READ side either; see embed::warn.
+    crate::embed::warn_if_missing(path);
+    if crate::embed::is_ready(path) {
+        crate::embed::build_vectors(path, &conn)?;
+    }
     let flagged = if changed.is_empty() {
         Vec::new()
     } else {
