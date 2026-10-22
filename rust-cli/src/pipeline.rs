@@ -10,7 +10,9 @@ use regex::Regex;
 use rusqlite::{params, Connection};
 use std::collections::HashMap;
 
-use crate::retrieval::{full_corpus, hybrid_search, is_cjk};
+use crate::retrieval::{
+    full_corpus, hybrid_search, is_cjk, query_terms, rrf_fuse, tree_search, RRF_K,
+};
 
 pub const REFUSAL: &str = "资料中未涉及";
 
@@ -129,6 +131,29 @@ pub fn get_block(conn: &Connection, id: &str) -> Option<Ev> {
     .ok()
 }
 
+/// Weight of channel ① relative to ②+③ in the default fusion.
+///
+/// Kept slightly below 1.0: the tree channel returns a WHOLE SECTION's blocks,
+/// so it is coarse — it earns a seat in the ranking, not the casting vote.
+const TREE_WEIGHT: f64 = 0.8;
+
+/// Fuse channel ① (unscored ids) with ②+③ (scored) through RRF.
+///
+/// `tree_search` hands back block ids in rank order but carries no score, which
+/// is why it gets a synthetic rank-derived one here rather than being appended
+/// to the front: a section hit is evidence, not a winner.
+fn koios_fuse_tree(tree_ids: &[String], hybrid: &[(String, f64)]) -> Vec<String> {
+    let tree_list: Vec<(String, f64)> = tree_ids
+        .iter()
+        .enumerate()
+        .map(|(r, id)| (id.clone(), 1.0 / (RRF_K + r as f64 + 1.0)))
+        .collect();
+    rrf_fuse(&[tree_list, hybrid.to_vec()], &[TREE_WEIGHT, 1.0], RRF_K)
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect()
+}
+
 /// Channel dispatch — `groups` carries the caller's principal.
 ///
 /// Two filters are applied here and nowhere else, both before context assembly:
@@ -143,14 +168,27 @@ pub fn get_block(conn: &Connection, id: &str) -> Option<Ev> {
 /// entitled caller saw nothing. The principal has to travel with the request,
 /// not be re-derived per call site — that is what makes "filter at retrieval,
 /// never after generation" (§9.2) actually hold.
+/// Channel ①+②+③ fused, then the read filters. The default route (§6.1).
+///
+/// Channel ① (tree) used to be missing here entirely: `retrieve_channel` ran
+/// `hybrid_search` alone, so §6.1's five-channel design shipped as two. A
+/// navigational query could only reach the tree with `--channel tree`, and even
+/// then it never met the other channels in the same ranking. tree_search returns
+/// ids without scores, so it enters the RRF as a list too — RRF is rank-based,
+/// which is exactly why it takes uneven inputs without normalisation.
 pub fn retrieve_channel(
     conn: &Connection,
     question: &str,
     limit: usize,
     groups: Option<&[String]>,
 ) -> Vec<Ev> {
-    let rows = hybrid_search(conn, question, limit, true).unwrap_or_default();
-    let mut ids: Vec<String> = rows.into_iter().map(|(i, _)| i).collect();
+    let tree_ids = tree_search(conn, question, 3).unwrap_or_default();
+    let hybrid = hybrid_search(conn, question, limit, true).unwrap_or_default();
+    let mut ids: Vec<String> = if !tree_ids.is_empty() {
+        koios_fuse_tree(&tree_ids, &hybrid)
+    } else {
+        hybrid.into_iter().map(|(i, _)| i).collect()
+    };
     if ids.is_empty() {
         // harness fallback: `retrieve()` when the named channel yields nothing
         ids = hybrid_search(conn, question, limit, true)
@@ -190,7 +228,46 @@ pub fn visible_corpus(conn: &Connection, groups: Option<&[String]>) -> Vec<Ev> {
     filter_chain(conn, all, groups)
 }
 
+/// Does this query term actually occur in the evidence?
+///
+/// Latin terms are words — exact containment is right for them. A CJK term from
+/// `query_terms` is a whole contiguous run ("现金流为正" is ONE term), so exact
+/// containment would reject evidence that genuinely says "现金流". Comparing by
+/// character bigrams matches how `fts_search` itself falls back to per-character
+/// padding, which keeps the grader and the retriever judging on the same unit.
+fn term_present(term: &str, joined: &str) -> bool {
+    if !term.chars().any(is_cjk) {
+        return joined.contains(term);
+    }
+    let chars: Vec<char> = term.chars().collect();
+    // Bigrams first: they carry word sense, so "现金流" matching "现金流为正"
+    // is a genuine hit rather than a coincidence.
+    if chars.len() >= 2
+        && chars
+            .windows(2)
+            .filter(|w| w[0].is_alphanumeric() || is_cjk(w[0]))
+            .any(|w| {
+                let pair: String = w.iter().collect();
+                joined.contains(&pair)
+            })
+    {
+        return true;
+    }
+    // Short CJK queries ("营收" vs evidence "营业收入") have no bigram to
+    // match. Fall back to requiring ALL characters to be present individually —
+    // stricter than the old per-character ANY that made `missing` unreachable,
+    // loose enough that a two-character abbreviation still finds its expansion.
+    chars.len() < 4 && chars.iter().all(|c| joined.contains(*c))
+}
+
 /// Grader verdict over ALL evidence joined, first 2000 chars, lowercased.
+///
+/// Scored on TERMS, not characters. The previous form counted how many distinct
+/// characters of the question appeared anywhere in the evidence; since almost
+/// any Chinese character turns up somewhere in a 2000-char window, a query whose
+/// meaning had nothing to do with the evidence still graded `enough`. That made
+/// the §6.2 loop's `missing` branch — and therefore every escalation keyed off
+/// it — unreachable in practice.
 pub fn grade(question: &str, blocks: &[Ev]) -> &'static str {
     if blocks.is_empty() {
         return "evidence_absent";
@@ -201,21 +278,19 @@ pub fn grade(question: &str, blocks: &[Ev]) -> &'static str {
         .collect::<Vec<_>>()
         .join(" ");
     let joined: String = joined.chars().take(2000).collect::<String>().to_lowercase();
-    let mut hits = 0usize;
-    let mut seen: Vec<char> = Vec::new();
-    for c in question.chars() {
-        if seen.contains(&c) {
-            continue;
-        }
-        seen.push(c);
-        if c.is_alphanumeric() {
-            if joined.contains(&c.to_lowercase().to_string()) {
-                hits += 1;
-            }
-        } else if is_cjk(c) && joined.contains(c) {
-            hits += 1;
-        }
+    let terms = query_terms(&question.to_lowercase());
+    if terms.is_empty() {
+        return "missing";
     }
+    // A CJK term is one contiguous run of the question: "现金流为正" is a single
+    // term, so exact containment would miss the evidence that says "现金流".
+    // Compare by character bigrams instead — the same granularity fts_search
+    // falls back to (retrieval.rs), so the grader and the retriever disagree as
+    // seldom as possible. Latin terms stay exact: they are already words.
+    let hits = terms
+        .iter()
+        .filter(|t| term_present(t, &joined))
+        .count();
     if hits == 0 {
         "missing"
     } else {

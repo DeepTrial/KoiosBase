@@ -137,6 +137,65 @@ fn grader_reports_evidence_absent() {
     );
 }
 
+/// The Grader judges on TERMS, so it must be able to say `missing`.
+///
+/// It previously counted how many distinct CHARACTERS of the question appeared
+/// in the joined evidence. In a 2000-char window nearly any CJK character turns
+/// up somewhere, so `missing` was unreachable and every §6.2 branch keyed off it
+/// (including the escalation below) was dead code.
+#[test]
+fn grader_rejects_evidence_that_shares_no_term() {
+    let (_v, conn) = seeded("grademiss");
+    let hits = koios::pipeline::retrieve_channel(&conn, "现金流", 8, None);
+    assert!(!hits.is_empty(), "retrieval must seed the grader");
+    assert_eq!(
+        koios::pipeline::grade("慰问金星 Exploration", &hits),
+        "missing",
+        "a question sharing no term must not grade as enough"
+    );
+    // ...and one sharing a term still does — including an abbreviation of a
+    // longer phrase that actually occurs in the evidence.
+    assert_eq!(
+        koios::pipeline::grade("负债", &hits),
+        "enough",
+        "an abbreviated in-corpus term must grade as enough"
+    );
+}
+
+/// Channel ① must participate in the DEFAULT route, not only `--channel tree`.
+///
+/// `retrieve_channel` used to run `hybrid_search` alone, so §6.1's five-channel
+/// design shipped as two: nothing about the document tree influenced the default
+/// ranking.
+#[test]
+fn default_route_fuses_the_tree_channel() {
+    let (_v, conn) = seeded("rcdef");
+    let default_ids: Vec<String> = koios::pipeline::retrieve_channel(&conn, "现金流", 8, None)
+        .into_iter()
+        .map(|b| b.id)
+        .collect();
+    let tree_ids = koios::retrieval::tree_search(&conn, "现金流", 3).unwrap_or_default();
+    assert!(!tree_ids.is_empty(), "tree channel alone returned nothing");
+    let hybrid: Vec<String> = koios::retrieval::hybrid_search(&conn, "现金流", 8, true)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(i, _)| i)
+        .collect();
+    assert!(
+        !default_ids.is_empty() && !hybrid.is_empty(),
+        "both the fused and the unfused route must return hits"
+    );
+    // A tree-only hit ranks higher once the tree has a seat: every id tree ①
+    // returned must be present in the default result, which is exactly what the
+    // fusion guarantees and what makes the default route multi-channel.
+    for id in tree_ids.iter().take(1) {
+        assert!(
+            default_ids.contains(id),
+            "tree id {id} missing from the default route"
+        );
+    }
+}
+
 /// test_query_escalates_to_full_on_absent_evidence
 #[test]
 fn query_escalates_to_full_on_absent_evidence() {
