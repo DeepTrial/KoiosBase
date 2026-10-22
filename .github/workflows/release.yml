@@ -69,14 +69,19 @@ jobs:
       - name: Build
         working-directory: rust-cli
         env:
-          # Windows-only, and the reason it has to be said explicitly:
-          # Rust's msvc targets default to +crt-static, so every Rust-compiled
-          # object expects the STATIC CRT (MT_StaticRelease), while mupdf's
-          # own static library is built against the DYNAMIC one
-          # (MD_DynamicRelease). Linking both into one .exe gave
-          # "LNK2038 ... RuntimeLibrary mismatch" 1036 times over.
-          # This switches Rust to the dynamic CRT so both sides agree.
-          RUSTFLAGS: ${{ matrix.os == 'windows-latest' && '-C target-feature=-crt-static' || '' }}
+          # Windows-only, and narrower than it first looks.
+          #
+          # libmupdf.lib is built against the DYNAMIC CRT (MD_DynamicRelease).
+          # Anything linked beside it must match, but `esaxx-rs` compiles a C
+          # file through the `cc` crate, and `cc` defaults to the STATIC CRT
+          # (MT_StaticRelease) on msvc. Result: LNK2038 RuntimeLibrary
+          # mismatch x1036, then LNK1319, no .exe.
+          #
+          # RUSTFLAGS alone does not fix this: it steers rustc, not how `cc`
+          # invokes the C compiler. /MD has to reach `cc` directly, and CFLAGS
+          # is the channel it reads.
+          CFLAGS: ${{ matrix.os == 'windows-latest' && '/MD /O2' || '' }}
+          CXXFLAGS: ${{ matrix.os == 'windows-latest' && '/MD /O2' || '' }}
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Smoke test (POSIX shell only)
