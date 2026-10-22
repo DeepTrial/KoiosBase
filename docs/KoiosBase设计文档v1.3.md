@@ -295,9 +295,77 @@ Vault 根部的 `AGENTS.md` 定义 agent 维护本库的完整规范：页面模
 | 索引 | 内容 | 服务的查询 |
 |---|---|---|
 | 文档树 | Section 层级 + 导航式摘要 | 汇总型、导航型、"库里有啥" |
-| 向量索引 | Block 级嵌入（breadcrumb+raw） | 语义模糊召回 |
+| 向量索引 | Block 级嵌入（breadcrumb+raw），见 §5.2.1 | 语义模糊召回：同义改写、跨语言表达 |
 | FTS 倒排 | BM25 | 精确匹配：编号、型号、专名 |
 | 链接图 | wikilink + 实体共指 + 结构包含 + 版本链 | 实体扩展、PPR 排序 |
+
+### 5.2.1 向量索引：常驻依赖
+
+**决策：embedding 是常驻依赖，不是可选增强。** `koios index` 必须产出合格的
+`vec.db`；缺此文件的索引判为过期，命令报错而非静默降级为纯 BM25——否则同一套
+语料会存在"有向量/无向量"两种检索形态，评测结果无法跨版本比较。
+
+存储布局：
+
+| 项 | 取值 |
+|---|---|
+| 载体 | `sqlite-vec` 虚表，落 `.index/vec.db` |
+| 表 | `vec_blocks(block_id TEXT PRIMARY KEY, embedding FLOAT[N])` |
+| 主键 | `blocks.id`——与另三条通道同一主键，无需映射即可 RRF 融合 |
+| 嵌入单元 | `breadcrumb + raw`；超 `EMBED_MAX_CHARS` 按 §4.1 分块，不截断 |
+| 维度 N | 512（Qwen3-Embedding-0.6B 经 MRL 截断后的输出维度） |
+
+**模型：`Qwen3-Embedding-0.6B`**（锁定版本，非可替换默认值）。
+
+| 决策项 | 结论 |
+|---|---|
+| 模型 | `Qwen/Qwen3-Embedding-0.6B` → ONNX int8（`onnx-community/Qwen3-Embedding-0.6B-ONNX`） |
+| 推理位置 | 进程内 `ort`（ONNX Runtime），静态编译进二进制 |
+| 权重体积 | `model_int8.onnx` ≈ 613 MB；`model_q4f16.onnx` ≈ 567 MB 作低配备选 |
+| 网络 | 零外部调用；仓库零 provider 适配器、零 API key |
+| 可选性 | 无 `--no-embed` 开关；模型文件缺失即失败，不降级 |
+| 查询侧 | `koios search` 同样加载模型嵌入 query——短文本单次前向，成本远低于入库批处理 |
+
+**选型理由**（相对 v0.9 时期的 bge-small-zh / bge-m3 草案）：
+
+| 维度 | Qwen3-Embedding-0.6B | bge-small-zh-v1.5 | bge-m3 |
+|---|---|---|---|
+| 语言覆盖 | **100+ 语** | 中英为主 | 100+ 语 |
+| 代码检索 | **原生支持** | 否 | 否 |
+| 上下文 | **32K** | 512 | 8192 |
+| 输出维度 | **32–1024 可调（MRL）** | 512 固定 | 1024 固定 |
+| 常驻体积 | 613 MB（int8） | 190 MB | 4.59 GB |
+
+bge-small-zh 的 512 token 上限与中英偏向无法覆盖跨语言/代码召回；bge-m3 的
+4.59 GB（jina-v4 更达 7.89 GB）远超单机常驻预算。
+`google/embeddinggemma-300m` 虽小但为 **gated repo**（须申请授权），默认依赖
+会导致安装即失败，故排除。
+
+**Matryoshka 维度策略**：入库默认取 **512 维**（1.21 GB→ 体积减半，质量损失可
+控），低配档可降至 32/128 维。同一 `vec.db` 内维度必须与元数据一致——见下。
+
+**模型锁定**（防静默漂移）：`vec.db` 元数据区写 `model_id` / `model_sha256` /
+`dim`。三者任一变化自动触发全量重嵌——换模型而不同步重建，等于让新旧向量在
+同一个距离空间里比大小。
+
+**增量路径**：解析已产出节级哈希（§5.1），因此只对哈希变化或首次出现的 Block
+调模型，同 id upsert；Block 消失则删对应行。全量重嵌走 `koios index --embed-full`。
+
+```
+index_file(doc):
+    for block in blocks:
+        if hash_unchanged(block) and row_exists(block.id): continue
+        vec_blocks.upsert(block.id, embed(breadcrumb + raw))
+    for id in vec_blocks.ids - blocks.ids: vec_blocks.delete(id)
+```
+
+代价账（**估算，待实测校正**）：
+
+| 项 | 量级 |
+|---|---|
+| 常驻内存 | Qwen3-Embedding-0.6B int8 ≈ 613 MB；q4f16 档 ≈ 567 MB |
+| 磁盘 | 块数 × 维度 × 4 字节 |
+| 入库延迟 | 批处理异步可接受；单机 5 万文档级见 §12 |
 
 **链接图的边定义**（PPR 的基础，全部从 Markdown 推导）：
 
@@ -365,7 +433,7 @@ ingest_compile(new_doc):
 |---|---|---|
 | ⓪ wiki 优先 | 读 `index.md` → 命中编译页 | 跨文档综合、实体关系、概念解释 |
 | ① 树搜索导航 | LLM 逐层"该子树值得展开吗"判定 | 单文档深挖、已知位置的导航 |
-| ② 混合召回 | ⚠️ 设计是"向量 + FTS，RRF 融合"；**v0.9 实装为纯 FTS（BM25）**，RRF 融合保留用于通道间合并。向量一侧缺位，见 §12 |
+| ② 混合召回 | ⚠️ 设计是"向量 + FTS，RRF 融合"；**v0.9 实装为纯 FTS（BM25）**，RRF 融合保留用于通道间合并。向量一侧按 §5.2.1 定为常驻依赖后补，见 §12 |
 
 | ③ 实体图扩展 | 实体 → 关联实体 → PPR 加成 | 多跳推理 |
 | ④ 全量模式 | 语料 < 阈值（如 20 万 token）时整树注入 | 全局综诉、跨文档比较、高风险精读 |
@@ -407,6 +475,10 @@ query(question):
 final = α·向量相似 + β·BM25 + γ·PPR + δ·时效衰减 + ε·静态权威度
         （γ 建议 0.1~0.15：图信号做加成，不做主导）
 ```
+
+**权重取值（v1.0 定版）**：`α=1.0 / β=1.0 / γ=0.12`，三者经 RRF 而非加权求和
+融合——RRF 是不同量纲分数唯一安全的合并方式（另见 `retrieval.rs` `rrf_fuse`）。
+因 §5.2.1 已将 embedding 定为常驻依赖，α 项恒有值，不存在"缺一侧"的退化分支。
 
 实现：邻接表存 SQLite；只对候选（top 50）及其两跳邻居的子图做幂迭代，numpy 即可，毫秒级。单文档出边权重设上限防刷链。
 
@@ -566,6 +638,20 @@ ACL 写在 frontmatter，**检索前过滤**（不是生成后遮掩），多租
 - 核心指标：答案准确率、**引用覆盖率**（带引用的事实句占比）、拒答正确率、召回归因分布；
 - 每次解析器升级、模型更换、参数调整，跑同一评测集回归。
 
+**向量通道的入门槛**：常驻 embedding（§5.2.1）是一次"用几百 MB 常驻 + 入库
+延迟"换召回的上架决策，因此必须走门自我介绍。评测集须含一组**词汇零交集**用
+例——查询词与卡片文本无字面交集，只能靠语义召回：
+
+| 类别 | 例（卡片写 / 查询问） |
+|---|---|
+| 同义改写 | "引擎" / "发动机" |
+| 跨语言表达 | "营收" / "revenue" |
+| 上下位与描述式 | "马力 250 匹" / "动力参数是多少" |
+
+收录标准：纯 BM25 通道在这组上的召回全部为零（v0.9 实测已确认），接入向量后
+须转正；未转正则 §5.2.1 的依赖不成立，退回重议。该组用例进回归集，每次换
+embedding 模型必跑。
+
 ### 10.3 反自证：验证者多样性（P7 落地）
 
 系统的可信度高发于"判断"环节。若编译、Grader、lint 抽检全部由同一模型家族既生成又判定，则整条链退化为"用 A 检验 A"。按 P7，验证分三级，**能用低层就不用高层**：
@@ -600,8 +686,10 @@ ACL 写在 frontmatter，**检索前过滤**（不是生成后遮掩），多租
 | 存储 | SQLite + FTS5（`rusqlite` bundled，静态编译进二进制） | ✅ | 零部署，一个文件即整个库。**sqlite-vec / 向量维度未引入**——见下方"v0.9 刻意未做的事" |
 | 解析 Markdown | 自研 heading-stack 解析器（`lib.rs` `index_file`） | ✅ | 标题即树；脏文档按行聚合成段落块 |
 | 解析 PDF | MuPDF（CPU 文本层）+ 可插拔 VLM 回调（PNG 字节） | ✅ | 双档回退已落地：`extract_pages(path, vlm)`；扫描件缺 VLM 时跳过而非编造 |
-| Embedding | bge-m3 / bge-small | ⬜ | v0.9 无任何向量依赖，检索全靠 BM25 + 链接图 PPR |
+| Embedding | **Qwen3-Embedding-0.6B**（ONNX int8，MRL 输出 512 维） | ⬜ | **常驻依赖**，进程内 `ort` 推理，见 §5.2.1。静态编译，零网络调用。100+ 语、原生 code retrieval、32K 上下文 |
+| Embedding（精度档） | Qwen3-Embedding-4B（2560 维） | ⬜ | 仅 §13 后期按需启用；需 ≥16GB 内存，非默认 |
 | Reranker | bge-reranker 系列 | ⬜ | 同上；cross-encoder 属情态敏感场景的专项增强 |
+| 向量存储 | `sqlite-vec` 虚表 `.index/vec.db` | ⬜ | 主键对齐 `blocks.id`，与 BM25/PPR 直接 RRF 融合 |
 | LLM/VLM | 可插拔回调：`LlmFn` / `VlmFn` 两个 `dyn Fn` 类型别名 | ✅ | 统一的 callable 契约；**仓库内零 provider 适配器、零 API key 配置** |
 | 服务 | 无——纯本地 CLI + MCP over stdio | ✅ | 单机够用；不需要 HTTP 层就不需要它的部署面 |
 | 版本管理 | Git | ✅ | 原生审计与回滚（`wiki/` 入版本库，`.index/` 永不入） |
@@ -613,6 +701,10 @@ ACL 写在 frontmatter，**检索前过滤**（不是生成后遮掩），多租
   索引"通道在设计里保留，但实现选择先用 BM25+PPR 建立可验证基线——**在无法通过
   评测证明它带来收益之前，不引入一个需要额外 1GB 驻留的依赖**。这是能力的取舍，
   不是违约。
+
+  > **决策更新（本次修订）**：基线已建立，且实测确认纯 BM25 在词汇零交集用例
+  > 上召回为零。故撤回上述"取舍"，embedding 改定为**常驻依赖**，规则见
+  > §5.2.1，验收门槛见 §10.2。此段保留作 v0.9 的历史状态记录。
 - **§7 的"摄入时由 VLM 生成 caption"只做到一半。** 已实装的是"文本层抽不出来时把
   页面交给 VLM 转写"（`extract_pages(path, vlm)`）；caption 向量化、图片描述进
   `assets/` 尚未实装——向量层缺位，caption 无处可去。
@@ -635,6 +727,19 @@ ACL 写在 frontmatter，**检索前过滤**（不是生成后遮掩），多租
 >         libc.so.6     => /lib/x86_64-linux-gnu/libc.so.6
 >         /lib64/ld-linux-x86-64.so.2
 > ```
+
+**常驻 embedding 后的资源账（2026-10-22 修订）**：按 §5.2.1 引入
+Qwen3-Embedding-0.6B int8 后，系统不再是"零模型驻留"，运行足迹重算如下：
+
+| 项 | 量级 |
+|---|---|
+| 二进制本体 | 15 MB + 3 个系统动态库（上表 ldd 输出不变） |
+| embedding 常驻 | **≈ 613 MB**（int8）；低配档 `q4f16` ≈ 567 MB |
+| 索引 | 块数 × 512 维 × 4 字节（+ FTS / 图索引） |
+
+最低可行单机档约为 **1 GB RAM（模型）+ 索引体积**，远低于原先含"双 LLM + NLI +
+reranker"的 16GB 估算——后者仅在同时启用 §12 精度档（4B / 2560 维）与
+cross-encoder reranker 时才需要。
 
 **P7 与单机轻量的兼容性**：异族要求 ≠ 本地双 LLM 驻留。判定角色按优先级这样满足——① 小型 NLI/cross-encoder 模型（数百 MB，与生成 LLM 天然异族异构，可同机驻留）；② 便宜 API（判定类调用输出短，成本极低）；③ 第二 LLM 本地驻留（精度档，非默认）。16GB 估算覆盖：embedding + reranker + 单个本地生成 LLM + NLI 判定小模型。
 
