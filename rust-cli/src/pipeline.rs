@@ -287,10 +287,7 @@ pub fn grade(question: &str, blocks: &[Ev]) -> &'static str {
     // Compare by character bigrams instead — the same granularity fts_search
     // falls back to (retrieval.rs), so the grader and the retriever disagree as
     // seldom as possible. Latin terms stay exact: they are already words.
-    let hits = terms
-        .iter()
-        .filter(|t| term_present(t, &joined))
-        .count();
+    let hits = terms.iter().filter(|t| term_present(t, &joined)).count();
     if hits == 0 {
         "missing"
     } else {
