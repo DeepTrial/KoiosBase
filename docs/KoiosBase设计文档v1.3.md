@@ -312,60 +312,103 @@ Vault 根部的 `AGENTS.md` 定义 agent 维护本库的完整规范：页面模
 | 载体 | `sqlite-vec` 虚表，落 `.index/vec.db` |
 | 表 | `vec_blocks(block_id TEXT PRIMARY KEY, embedding FLOAT[N])` |
 | 主键 | `blocks.id`——与另三条通道同一主键，无需映射即可 RRF 融合 |
-| 嵌入单元 | `breadcrumb + raw`；超 `EMBED_MAX_CHARS` 按 §4.1 分块，不截断 |
-| 维度 N | 512（Qwen3-Embedding-0.6B 经 MRL 截断后的输出维度） |
+| 嵌入单元 | `breadcrumb + raw`；超 `MAX_CHARS`(2000) 时截断 |
+| 维度 N | 1024（Qwen3-Embedding-0.6B 原生输出） |
+
+**实装状态：✅ 已落地（v0.10.0 起）。** 运行前提是下述两个模型文件在位；缺失时
+`koios index` 报错退出——见下「模型安装」。
+
+**决策：embedding 是常驻依赖，不是可选增强。** 模型文件缺失时命令 **报错退出**，
+而非静默降级为纯 BM25——否则同一套语料会存在"有向量/无向量"两种检索形态，
+评测结果无法跨版本比较。
 
 **模型：`Qwen3-Embedding-0.6B`**（锁定版本，非可替换默认值）。
 
 | 决策项 | 结论 |
 |---|---|
-| 模型 | `Qwen/Qwen3-Embedding-0.6B` → ONNX int8（`onnx-community/Qwen3-Embedding-0.6B-ONNX`） |
+| 模型权重 | `janni-t/qwen3-embedding-0.6b-int8-tei-onnx` 的 `model.onnx` — **静态 TEI 导出** |
+| 分词器 | 同一仓库的 `tokenizer.json` |
 | 推理位置 | 进程内 `ort`（ONNX Runtime），静态编译进二进制 |
-| 权重体积 | `model_int8.onnx` ≈ 613 MB；`model_q4f16.onnx` ≈ 567 MB 作低配备选 |
+| 权重体积 | 599 MB（单文件，无外挂 `model.onnx_data`） |
+| 输出维度 | **1024**（模型原生，不做 MRL 截断） |
+| 池化 | **last-token**（取 `<|endoftext|>` 位置）+ L2 归一化 |
+| 查询侧前缀 | `Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery:` |
 | 网络 | 零外部调用；仓库零 provider 适配器、零 API key |
-| 可选性 | 无 `--no-embed` 开关；模型文件缺失即失败，不降级 |
-| 查询侧 | `koios search` 同样加载模型嵌入 query——短文本单次前向，成本远低于入库批处理 |
 
-**选型理由**（相对 v0.9 时期的 bge-small-zh / bge-m3 草案）：
+**模型安装**（一次性，之后离线运行）：
 
-| 维度 | Qwen3-Embedding-0.6B | bge-small-zh-v1.5 | bge-m3 |
-|---|---|---|---|
-| 语言覆盖 | **100+ 语** | 中英为主 | 100+ 语 |
-| 代码检索 | **原生支持** | 否 | 否 |
-| 上下文 | **32K** | 512 | 8192 |
-| 输出维度 | **32–1024 可调（MRL）** | 512 固定 | 1024 固定 |
-| 常驻体积 | 613 MB（int8） | 190 MB | 4.59 GB |
+```console
+$ mkdir -p myvault/models
+$ # 放入 model.onnx 与 tokenizer.json：$KOIOS/models/qwen3-embedding-0.6b-int8-tei.onnx
+$ #                                   $KOIOS/models/tokenizer.json
+$ koios index myvault      # 顺带写 .index/vec.db
+```
 
-bge-small-zh 的 512 token 上限与中英偏向无法覆盖跨语言/代码召回；bge-m3 的
-4.59 GB（jina-v4 更达 7.89 GB）远超单机常驻预算。
-`google/embeddinggemma-300m` 虽小但为 **gated repo**（须申请授权），默认依赖
-会导致安装即失败，故排除。
+**为什么不是 `onnx-community/Qwen3-Embedding-0.6B-ONNX`**（v1.3 原先写的那个）：
+它是 **transformers.js 生成式导出**——`input_ids` 要 float 张量，且必须喂 28 组
+`past_key_values.*` KV-cache 才能前向。**它不能当 embedder 用**。已实测确认：
 
-**Matryoshka 维度策略**：入库默认取 **512 维**（1.21 GB→ 体积减半，质量损失可
-控），低配档可降至 32/128 维。同一 `vec.db` 内维度必须与元数据一致——见下。
+```console
+$ # onnx-community 版：inputs 含 past_key_values.0..27.key/value 共 58 项
+$ # 报错 Unexpected input data type. Actual: (tensor(int64)), expected: (tensor(float))
+```
+
+**为什么池化必须是 last-token**：`Qwen/Qwen3-Embedding-0.6B` 的
+`1_Pooling/config.json` 明确 `pooling_mode_lasttoken: true`，所有 mean 变体为
+false。实测 mean pooling 会让**无关查询的分数高于真同义词**（空调 0.456 vs
+发动机 0.330），通道失去区分度。改用 last-token 后区分恢复：
+
+| query vs 文档 | mean pooling | last-token |
+|---|---|---|
+| `发动机` / “…涡轮增压引擎…” | 0.330 | **0.551** |
+| `revenue` / “…营业收入…” | 0.484 | 0.465（升幅低于别的，仍高于无关词） |
+| `空调`（无关） / 同一批文档 | **0.456** ❌ | **0.214** ✅ |
+
+**实测资源账**（2026-10-22，本机 Linux 6.8 / 2 核 / 3.6 GB RAM）：
+
+| 项 | 实测 |
+|---|---|
+| 常驻内存 | **≈ 950 MB**（含 tokenizer + ORT 运行时，非仅权重的 599 MB） |
+| 索引体积 | 块数 × 1024 × 4 字节 |
+| 编码一个块 | 约 0.1 s（批处理在 `koios index` 内同步跑完） |
+| 首次 `index`（15 块） | 5.7 s（含 1.6 s 模型加载） |
+| 二次 `index`（无改动） | **0.029 s**——哈希命中，零前向 |
+
+**Matryoshka 未启用**：模型原生输出 1024 维。本文档曾写 512（截断），实装时
+选择保留原生维度，省掉自建切片逻辑；日后若索引体积成瓶颈，取 Hidden 前 512
+维即可，不改代码结构。
 
 **模型锁定**（防静默漂移）：`vec.db` 元数据区写 `model_id` / `model_sha256` /
 `dim`。三者任一变化自动触发全量重嵌——换模型而不同步重建，等于让新旧向量在
 同一个距离空间里比大小。
 
-**增量路径**：解析已产出节级哈希（§5.1），因此只对哈希变化或首次出现的 Block
-调模型，同 id upsert；Block 消失则删对应行。全量重嵌走 `koios index --embed-full`。
+**增量路径**（已实装）：§5.1 已产出 Block 级哈希，据此只对「新出现或哈希变化」
+的 Block 跑前向；Block 消失则同时删 `vec_blocks` 与 `vec_src` 行。
 
 ```
-index_file(doc):
+build_vectors(vault, blocks):
     for block in blocks:
-        if hash_unchanged(block) and row_exists(block.id): continue
-        vec_blocks.upsert(block.id, embed(breadcrumb + raw))
-    for id in vec_blocks.ids - blocks.ids: vec_blocks.delete(id)
+        if vec_src[block.id].hash == block.hash:   # 未改动 -> 零前向
+            continue
+        vec_blocks.delete(block.id)                # vec0 不支持 UPSERT
+        vec_blocks.insert(block.id, embed(breadcrumb + raw))
+        vec_src[block.id] = block.hash
+    for id in vec_src.keys() - blocks.ids:         # 块已不存在
+        vec_blocks.delete(id); vec_src.delete(id)
 ```
 
-代价账（**估算，待实测校正**）：
+> 两个来自实装的偏差，都写在这里以免重蹈：
+> - `vec0` 是虚表，**不支持 UPSERT**，「替换」必须是先 DELETE 再 INSERT；
+> - `vec0` 也不能带额外列，因此 content hash 存在旁路表 `vec_src` 而不是
+>   `vec_blocks` 里——否则增量判定无从下手。
+
+代价账（**实测**，2026-10-22 本机）：
 
 | 项 | 量级 |
 |---|---|
-| 常驻内存 | Qwen3-Embedding-0.6B int8 ≈ 613 MB；q4f16 档 ≈ 567 MB |
-| 磁盘 | 块数 × 维度 × 4 字节 |
-| 入库延迟 | 批处理异步可接受；单机 5 万文档级见 §12 |
+| 常驻内存 | ≈ 950 MB（含 tokenizer + ORT 运行时） |
+| 磁盘 | 块数 × 1024 × 4 字节 |
+| 入库延迟 | 同步批处理；15 块首次 5.7 s，无改动重跑 0.029 s |
 
 **链接图的边定义**（PPR 的基础，全部从 Markdown 推导）：
 
@@ -433,16 +476,16 @@ ingest_compile(new_doc):
 |---|---|---|
 | ⓪ wiki 优先 | 读 `index.md` → 命中编译页 | 跨文档综合、实体关系、概念解释 |
 | ① 树搜索导航 | LLM 逐层"该子树值得展开吗"判定 | 单文档深挖、已知位置的导航 |
-| ② 混合召回 | ⚠️ 设计是"向量 + FTS，RRF 融合"；**v0.9 实装为纯 FTS（BM25）**，RRF 融合保留用于通道间合并。向量一侧按 §5.2.1 定为常驻依赖后补，见 §12 |
+| ② 混合召回 | ✅ 向量 + FTS 经 RRF 融合（v0.10.0 起）。向量侧见 §5.2.1；无本地 embedding 时该列表为空并报错，不静默退化 |
 
 | ③ 实体图扩展 | 实体 → 关联实体 → PPR 加成 | 多跳推理 |
 | ④ 全量模式 | 语料 < 阈值（如 20 万 token）时整树注入 | 全局综诉、跨文档比较、高风险精读 |
 
 通道不互斥：Grader 判断一条路没走通就换路或叠加。
 
-**v0.9 落地校正**：此处的 ① 在实现里是**关键词命中 heading 路径**，不是 LLM 逐层
-判定；② 无向量一侧。这两处偏离都记录在 §12。默认形态刻意不包含任何模型调用
-——这是设计选择，不是未做完。
+**落地校正**：① 在实现里是**关键词命中 heading 路径**，不是 LLM 逐层判定；
+② 的向量一侧自 v0.10.0 起已实装（§5.2.1）。① 这处偏离记录在 §12。
+除 embedding 前向外，默认形态不含任何生成式 LLM 调用——这是设计选择。
 
 ### 6.2 Planner–Grader 迭代循环
 
@@ -648,8 +691,16 @@ ACL 写在 frontmatter，**检索前过滤**（不是生成后遮掩），多租
 | 跨语言表达 | "营收" / "revenue" |
 | 上下位与描述式 | "马力 250 匹" / "动力参数是多少" |
 
-收录标准：纯 BM25 通道在这组上的召回全部为零（v0.9 实测已确认），接入向量后
-须转正；未转正则 §5.2.1 的依赖不成立，退回重议。该组用例进回归集，每次换
+**这组门槛已通过**（v0.10.0 实测）：
+
+| 查询 | 卡片原文 | 纯 BM25 | 接入向量后 |
+|---|---|---|---|
+| `发动机` | 涡轮增压引擎 | 零召回 | ✅ 命中，且排首位 |
+| `revenue` | 营业收入 | 零召回 | ✅ 命中，且排首位 |
+| `营业额` | 营业收入 | 零召回 | ✅ 命中，且排首位 |
+| `马力多大` | 最大马力 250 匹 | 零召回 | ✅ 命中 |
+
+无关对照（`空调`）分数低于全部真实召回，排序正确。该组用例进回归集，每次换
 embedding 模型必跑。
 
 ### 10.3 反自证：验证者多样性（P7 落地）
@@ -683,13 +734,13 @@ embedding 模型必跑。
 
 | 组件 | 选型 | 状态 | 理由 |
 |---|---|---|---|
-| 存储 | SQLite + FTS5（`rusqlite` bundled，静态编译进二进制） | ✅ | 零部署，一个文件即整个库。**sqlite-vec / 向量维度未引入**——见下方"v0.9 刻意未做的事" |
+| 存储 | SQLite + FTS5（`rusqlite` bundled）+ `sqlite-vec` 0.1.9 | ✅ | 零部署；`tree.db`（倒排/图）与 `vec.db`（向量）同在 `.index/`，均可重建。选 0.1.9 而非 0.1.10-alpha.4：后者打包缺 `sqlite-vec-diskann.c`，编译即失败（实测） |
 | 解析 Markdown | 自研 heading-stack 解析器（`lib.rs` `index_file`） | ✅ | 标题即树；脏文档按行聚合成段落块 |
 | 解析 PDF | MuPDF（CPU 文本层）+ 可插拔 VLM 回调（PNG 字节） | ✅ | 双档回退已落地：`extract_pages(path, vlm)`；扫描件缺 VLM 时跳过而非编造 |
-| Embedding | **Qwen3-Embedding-0.6B**（ONNX int8，MRL 输出 512 维） | ⬜ | **常驻依赖**，进程内 `ort` 推理，见 §5.2.1。静态编译，零网络调用。100+ 语、原生 code retrieval、32K 上下文 |
-| Embedding（精度档） | Qwen3-Embedding-4B（2560 维） | ⬜ | 仅 §13 后期按需启用；需 ≥16GB 内存，非默认 |
+| Embedding | **Qwen3-Embedding-0.6B** ONNX int8（TEI 静态导出） | ✅ | 已实装（v0.10.0）。100+ 语、原生 code retrieval、32K 上下文；进程内 `ort`，静态编译，零网络调用 |
+| Embedding（精度档） | Qwen3-Embedding-4B（2560 维） | ⬜ | 后期按需启用；需 ≥16GB 内存，非默认 |
 | Reranker | bge-reranker 系列 | ⬜ | 同上；cross-encoder 属情态敏感场景的专项增强 |
-| 向量存储 | `sqlite-vec` 虚表 `.index/vec.db` | ⬜ | 主键对齐 `blocks.id`，与 BM25/PPR 直接 RRF 融合 |
+| 向量存储 | `sqlite-vec` 虚表 `.index/vec.db` | ✅ | 主键对齐 `blocks.id`；content hash 存旁路表 `vec_src` 驱动增量 |
 | LLM/VLM | 可插拔回调：`LlmFn` / `VlmFn` 两个 `dyn Fn` 类型别名 | ✅ | 统一的 callable 契约；**仓库内零 provider 适配器、零 API key 配置** |
 | 服务 | 无——纯本地 CLI + MCP over stdio | ✅ | 单机够用；不需要 HTTP 层就不需要它的部署面 |
 | 版本管理 | Git | ✅ | 原生审计与回滚（`wiki/` 入版本库，`.index/` 永不入） |
@@ -702,9 +753,9 @@ embedding 模型必跑。
   评测证明它带来收益之前，不引入一个需要额外 1GB 驻留的依赖**。这是能力的取舍，
   不是违约。
 
-  > **决策更新（本次修订）**：基线已建立，且实测确认纯 BM25 在词汇零交集用例
-  > 上召回为零。故撤回上述"取舍"，embedding 改定为**常驻依赖**，规则见
-  > §5.2.1，验收门槛见 §10.2。此段保留作 v0.9 的历史状态记录。
+  > **决策更新**：基线已建立，且实测确认纯 BM25 在词汇零交集用例上召回为零。
+  > 故撤回上述"取舍"，embedding 改定为**常驻依赖**。**已于 v0.10.0 实装**
+  > （§5.2.1）。此段仅作历史记录保留。
 - **§7 的"摄入时由 VLM 生成 caption"只做到一半。** 已实装的是"文本层抽不出来时把
   页面交给 VLM 转写"（`extract_pages(path, vlm)`）；caption 向量化、图片描述进
   `assets/` 尚未实装——向量层缺位，caption 无处可去。
@@ -728,18 +779,19 @@ embedding 模型必跑。
 >         /lib64/ld-linux-x86-64.so.2
 > ```
 
-**常驻 embedding 后的资源账（2026-10-22 修订）**：按 §5.2.1 引入
-Qwen3-Embedding-0.6B int8 后，系统不再是"零模型驻留"，运行足迹重算如下：
+**常驻 embedding 后的资源账（2026-10-22 实测修订）**：§5.2.1 已实装，
+Qwen3-Embedding-0.6B int8 常驻后，运行足迹重算如下：
 
-| 项 | 量级 |
+| 项 | 实测量级 |
 |---|---|
 | 二进制本体 | 15 MB + 3 个系统动态库（上表 ldd 输出不变） |
-| embedding 常驻 | **≈ 613 MB**（int8）；低配档 `q4f16` ≈ 567 MB |
-| 索引 | 块数 × 512 维 × 4 字节（+ FTS / 图索引） |
+| embedding 常驻 | **≈ 950 MB**（含 tokenizer + ORT 运行时；纯权重 599 MB） |
+| 索引 | 块数 × 1024 维 × 4 字节（+ FTS / 图索引） |
 
 最低可行单机档约为 **1 GB RAM（模型）+ 索引体积**，远低于原先含"双 LLM + NLI +
 reranker"的 16GB 估算——后者仅在同时启用 §12 精度档（4B / 2560 维）与
-cross-encoder reranker 时才需要。
+cross-encoder reranker 时才需要。文档先前写的 613 MB 只是权重文件体积，漏了
+ORT 运行时与 tokenizer，实测比它高出约 55%。
 
 **P7 与单机轻量的兼容性**：异族要求 ≠ 本地双 LLM 驻留。判定角色按优先级这样满足——① 小型 NLI/cross-encoder 模型（数百 MB，与生成 LLM 天然异族异构，可同机驻留）；② 便宜 API（判定类调用输出短，成本极低）；③ 第二 LLM 本地驻留（精度档，非默认）。16GB 估算覆盖：embedding + reranker + 单个本地生成 LLM + NLI 判定小模型。
 
