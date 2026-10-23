@@ -194,26 +194,29 @@ fn blocks_to_json(conn: &Connection, blocks: &[Ev]) -> Vec<Value> {
         .collect()
 }
 
-fn tool_search(args: &Value) -> Result<Value, String> {
+pub fn tool_search(args: &Value) -> Result<Value, String> {
     let vault = Path::new(&as_str(args, "vault")?).to_path_buf();
     let question = as_str(args, "question")?;
     let top = args.get("top").and_then(|v| v.as_u64()).unwrap_or(8) as usize;
     let conn = crate::connect(&vault).map_err(|e| e.to_string())?;
-    // Python scores via hybrid_search then re-reads each row and attaches
-    // `d["score"] = score`, so `score` is the LAST key in the emitted dict.
-    let rows =
-        crate::retrieval::hybrid_search(&conn, &question, top, true).map_err(|e| e.to_string())?;
-    let ids: Vec<String> = rows.iter().map(|(i, _)| i.clone()).collect();
-    let mut blocks: Vec<Ev> = ids
+    // Same route as the CLI's `koios search`, including the vector half of
+    // channel ② and channel ①.
+    //
+    // This used to call hybrid_search directly, so `koios_search` over MCP ran
+    // a narrower retrieval than the CLI: no tree channel, no vectors. Asking
+    // "revenue" returned the right block from one shell and an empty list from
+    // the other. Retrieval is not per-exit policy — one route (§6.1), one
+    // answer, whichever door you came in through.
+    let mut blocks =
+        crate::pipeline::retrieve_all(&vault, &conn, &question, top, groups_of(args).as_deref());
+    blocks.truncate(top);
+    // Python emits `d["score"]` inside its row loop, so `score` is the LAST key
+    // of each emitted dict. Rank here is position in the fused result.
+    let rows: Vec<(String, f64)> = blocks
         .iter()
-        .filter_map(|i| crate::pipeline::get_block(&conn, i))
+        .enumerate()
+        .map(|(r, b)| (b.id.clone(), -(r as f64)))
         .collect();
-    // Same triple as `koios_ask` (§8.3). This used to stop after
-    // `filter_visible`, so a stale page ranked identically through the two MCP
-    // read tools while `koios_ask` down-ranked it — two exits, two answers.
-    blocks = crate::acl::filter_blocks(&conn, blocks, groups_of(args).as_deref());
-    blocks = crate::state::filter_visible(&conn, blocks);
-    blocks = crate::state::apply_disposition(&conn, blocks, false);
     let mut out = blocks_to_json(&conn, &blocks);
     // attach score in retrieval order — Python does this inside the row loop,
     // so `score` stays the LAST key even though the block list is re-ordered
@@ -314,7 +317,10 @@ fn tool_write_answer(args: &Value) -> Result<Value, String> {
         );
     }
     let conn = crate::connect(&vault).map_err(|e| e.to_string())?;
-    let ev = crate::pipeline::retrieve_channel(&conn, &question, 5, groups_of(args).as_deref());
+    // Same reasoning as tool_search: evidence for a written-back answer must
+    // come from the same route the rest of the system reads through, or a cited
+    // block is missing here for no reason the caller can see.
+    let ev = crate::pipeline::retrieve_all(&vault, &conn, &question, 5, groups_of(args).as_deref());
     let path = crate::compile::write_answer_page(
         &vault,
         &question,

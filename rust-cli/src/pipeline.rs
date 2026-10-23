@@ -11,7 +11,7 @@ use rusqlite::{params, Connection};
 use std::collections::HashMap;
 
 use crate::retrieval::{
-    full_corpus, hybrid_search, is_cjk, query_terms, rrf_fuse, tree_search, RRF_K,
+    full_corpus, hybrid_search, is_cjk, query_terms, rrf_fuse, tree_search, ALPHA, BETA, RRF_K,
 };
 
 pub const REFUSAL: &str = "资料中未涉及";
@@ -205,6 +205,48 @@ pub fn retrieve_channel(
     // retrieve() does this too; without it `koios retract` changed nothing on
     // this shell's read paths.
     crate::state::apply_disposition(conn, out, false)
+}
+
+/// The full lexical route (channels ①+②+③) plus the vector half of ②, fused.
+///
+/// `retrieve_channel` deliberately knows nothing about `vec.db`: it takes only
+/// a `&Connection`, and this crate keeps the vector store in a separate file so
+/// it can be absent without breaking anything. That split is why the embedding
+/// has to be layered on HERE rather than folded in there.
+///
+/// Every caller that exposes search to a user must come through this one, not
+/// through `retrieve_channel` directly. `tool_search` in mcp.rs used to call
+/// hybrid_search on its own, so `koios_search` over MCP skipped both the tree
+/// channel added earlier and the vector channel added in v0.10.0 — the same
+/// query returned results from the CLI and nothing from MCP. retrieve_all is what
+/// makes "which exit did you use" stop changing the answer.
+pub fn retrieve_all(
+    vault: &std::path::Path,
+    conn: &Connection,
+    question: &str,
+    limit: usize,
+    groups: Option<&[String]>,
+) -> Vec<Ev> {
+    crate::embed::warn_if_missing(vault);
+    let semantic = crate::embed::search_vectors(vault, question, limit * 3);
+    if semantic.is_empty() {
+        return retrieve_channel(conn, question, limit, groups);
+    }
+    let lexical = retrieve_channel(conn, question, limit, groups);
+    let lex_list: Vec<(String, f64)> = lexical
+        .iter()
+        .enumerate()
+        .map(|(r, b)| (b.id.clone(), -(r as f64)))
+        .collect();
+    let fused = rrf_fuse(&[lex_list, semantic], &[BETA, ALPHA], RRF_K);
+    let mut out: Vec<Ev> = Vec::new();
+    for (id, _) in fused.iter() {
+        if let Some(b) = get_block(conn, id) {
+            out.push(b);
+        }
+    }
+    out.truncate(limit);
+    filter_chain(conn, out, groups)
 }
 
 /// The retrieval filter chain, as one callable.
