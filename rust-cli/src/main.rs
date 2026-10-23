@@ -864,9 +864,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } => {
             koios::embed::set_allow_lexical(allow_no_embedding);
             if full {
-                // Python's --full does not drop tables either; rebuild already
-                // regenerates every derived row from raw + wiki (P1).
-                eprintln!("[index] --full accepted; rebuild is already complete");
+                // --full used to print that it was accepted and then do
+                // nothing. For the lexical index that is defensible, because
+                // content hashes make every rebuild correct. It is NOT true
+                // for the vector index: hashes also make it skip blocks that
+                // did not change, so a --full that only prints a line leaves
+                // every old vector in place. That is how you get an index
+                // whose vectors predate a recipe or model change.
+                let p = path.clone().unwrap_or_else(|| PathBuf::from("."));
+                if !koios::embed::allow_lexical() {
+                    koios::embed::reset_vectors(&p).map_err(std::io::Error::other)?;
+                }
             }
             cmd_index(&path.unwrap_or_else(|| PathBuf::from("."))).map_err(std::io::Error::other)?
         }

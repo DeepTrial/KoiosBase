@@ -368,12 +368,23 @@ pub fn ensure_vec_db(vault: &Path) -> rusqlite::Result<Connection> {
 const POOLING: &str = "last-token+l2";
 const MODEL_ID: &str = "qwen3-embedding-0.6b-int8-tei";
 
+/// How a block's text is assembled before encoding.
+///
+/// Versioned because changing it silently invalidates every stored vector
+/// while leaving `model_id` and `dim` untouched -- which is exactly what
+/// happened when the join changed from a space to a newline: the index still
+/// claimed to be current, and nothing could tell that half of it had been
+/// encoded from a different text than the other half. Distances between
+/// vectors built from two recipes are not comparable.
+pub const EMBED_RECIPE: &str = "last-heading:nl:body:v3";
+
 fn expected_meta() -> Vec<(&'static str, String)> {
     vec![
         ("model_id", MODEL_ID.to_string()),
         ("dim", DIM.to_string()),
         ("pooling", POOLING.to_string()),
         ("normalize", "l2".to_string()),
+        ("embed_recipe", EMBED_RECIPE.to_string()),
     ]
 }
 
@@ -471,6 +482,17 @@ fn read_index_state(vault: &Path, out: &mut Status) {
     }
 }
 
+/// Write the current identity into `vec_meta`. Exposed so tests can build an
+/// index that claims a specific recipe without running real inference.
+pub fn stamp_identity_for_test(conn: &Connection) -> rusqlite::Result<()> {
+    stamp_identity(conn)
+}
+
+/// Validate `vec_meta` against this build. Exposed for tests.
+pub fn check_identity_for_test(conn: &Connection) -> Result<(), String> {
+    check_identity(conn)
+}
+
 /// Reject a `vec.db` built by anything other than the current model.
 fn check_identity(conn: &Connection) -> Result<(), String> {
     let mut have = std::collections::HashMap::new();
@@ -498,7 +520,7 @@ fn check_identity(conn: &Connection) -> Result<(), String> {
             other => {
                 return Err(format!(
                     "this index was built with {k}={}, but this build uses {k}={v}.\n  \
-                     The two are not comparable distances; rerun `koios index --embed-full`.",
+                     The two are not comparable distances; rerun `koios index --full`.",
                     other.map(|s| s.as_str()).unwrap_or("<unset>")
                 ));
             }
@@ -519,8 +541,24 @@ fn stamp_identity(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
-/// Encode every block whose content hash changed or which has no vector yet.
+/// Drop every stored vector so the next `index` rebuilds them all.
 ///
+/// Needed by `--full`. The incremental path skips blocks whose hash is
+/// unchanged, which is right day to day, but it means "full rebuild" has to
+/// mean something stronger than "run index again" -- otherwise vectors
+/// encoded under an older model or recipe survive a rebuild that claims to be
+/// complete.
+pub fn reset_vectors(vault: &Path) -> rusqlite::Result<()> {
+    let conn = ensure_vec_db(vault)?;
+    let tx = conn.unchecked_transaction()?;
+    conn.execute("DELETE FROM vec_blocks", [])?;
+    conn.execute("DELETE FROM vec_src", [])?;
+    conn.execute("DELETE FROM vec_meta", [])?;
+    tx.commit()?;
+    eprintln!("[index] --full: dropped stored vectors; re-encoding all");
+    Ok(())
+}
+
 /// `blocks.hash` is what keeps this incremental (§5.2.1): a block whose text is
 /// unchanged is not re-encoded, so a second `koios index` over an untouched
 /// vault costs one query and zero forward passes. Rows whose block disappeared
@@ -578,6 +616,7 @@ pub fn build_vectors(vault: &Path, main: &Connection) -> rusqlite::Result<()> {
     // that actually changed is what keeps this incremental.
     let mut insert = conn.prepare("INSERT INTO vec_blocks (block_id, embedding) VALUES (?, ?)")?;
     let mut encoded = 0usize;
+    let mut failed = 0usize;
     for (id, breadcrumb, raw) in rows.iter() {
         let hash = block_hash(main, id).unwrap_or_default();
         if let Some(prev) = hash_of.get(id) {
@@ -587,15 +626,17 @@ pub fn build_vectors(vault: &Path, main: &Connection) -> rusqlite::Result<()> {
         }
         // breadcrumb + raw, per §5.2.1: the heading path carries navigational
         // meaning the sentence alone does not.
-        // §5.2.1 says "breadcrumb + raw", but which form matters. Measured on
-        // MIRACL-zh queries, concatenating the whole breadcrumb path with a
-        // space (`doc.md > 标题 正文`) scores 0.649 mean cosine against the
-        // query, while `标题\n正文` scores 0.709 -- the path prefix and the
-        // space join dilute the body rather than adding context. Same idea as
-        // Anthropic's contextual retrieval (§15), just measured instead of
-        // assumed. The trailing section title still carries the navigational
-        // meaning that motivated breadcrumbs in the first place.
-        let text = format!("{breadcrumb}\n{raw}");
+        // A/B measured on 7 MIRACL-zh queries (mean cosine, best-of count):
+        //   full path `doc.md > 标题\n正文`   0.7298  best 1/7
+        //   last heading `标题\n正文`         0.7373  best 5/7
+        //   body only                        0.6838  best 1/7
+        // The document filename contributes nothing and dilutes the heading.
+        // Keep the last path segment only.
+        let heading = breadcrumb
+            .rsplit(" > ")
+            .next()
+            .unwrap_or(breadcrumb.as_str());
+        let text = format!("{heading}\n{raw}");
         match encode(vault, &text, false) {
             Ok(vec) => {
                 conn.execute("DELETE FROM vec_blocks WHERE block_id = ?", [id])?;
@@ -609,6 +650,7 @@ pub fn build_vectors(vault: &Path, main: &Connection) -> rusqlite::Result<()> {
             }
             Err(e) => {
                 eprintln!("warning: could not encode {id}: {e}");
+                failed += 1;
             }
         }
     }
@@ -624,10 +666,23 @@ pub fn build_vectors(vault: &Path, main: &Connection) -> rusqlite::Result<()> {
             dropped += 1;
         }
     }
-    let _ = encoded;
-    let _ = dropped;
 
     tx.commit()?;
+
+    // #3 — report what happened, and fail when the index is incomplete. These
+    // counts used to be computed and then discarded, and a block that failed
+    // to encode only warned while `index` still exited 0, so a half-built
+    // vector index was indistinguishable from a complete one from outside.
+    if encoded > 0 || dropped > 0 || failed > 0 {
+        println!("vectors: encoded={encoded} dropped={dropped} failed={failed}");
+    }
+    if failed > 0 {
+        return Err(rusqlite::Error::InvalidParameterName(format!(
+            "{failed} block(s) could not be encoded; the vector index is \
+             incomplete. Fix the cause above, or run with \
+             --allow-no-embedding to index lexically on purpose."
+        )));
+    }
     Ok(())
 }
 

@@ -387,6 +387,31 @@ false。实测 mean pooling 会让**无关查询的分数高于真同义词**（
 选择保留原生维度，省掉自建切片逻辑；日后若索引体积成瓶颈，取 Hidden 前 512
 维即可，不改代码结构。
 
+**嵌入配方版本化（v0.11.4 起）**：`vec_meta` 除 `model_id` / `dim` / `pooling` /
+`normalize` 外，另记 `embed_recipe`（当前 `last-heading:nl:body:v3`）。换**拼接方式**
+与换模型是同一类变更：都会让新旧向量互不可比，而前者此前完全不可检测——0.11.3 把
+分隔符从空格改成换行时，索引仍自称"最新"，谁也看不出一半向量来自另一种文本。
+不匹配即拒绝并提示 `koios index --full`。
+
+**`--full` 必须真重建向量**：此前 `--full` 只打印一行提示。对词法索引这说得通
+（内容哈希让每次重建都正确），但**对向量索引不成立**——哈希同样会让未变块被跳过，
+于是"全量重建"名不副实，旧向量原封不动。现在 `--full` 先清空
+`vec_blocks` / `vec_src` / `vec_meta` 再重新编码。
+
+**编码失败必须可见**：`index` 现在输出 `vectors: encoded=N dropped=N failed=N`，
+且 `failed > 0` 时**非零退出**。此前计数被丢弃、单块失败只 warn 而进程仍退 0，
+导致"半数编码失败的索引"与"完整索引"从外部无法区分。
+
+**嵌入文本形式的 A/B（v0.11.4 实测，7 条 MIRACL-zh query）**：
+
+| 形式 | 平均余弦 | 最优次数 |
+|---|---|---|
+| `doc.md > 标题\n正文` | 0.7298 | 1/7 |
+| **`标题\n正文`（末级标题）** | **0.7373** | **5/7** |
+| 纯正文 | 0.6838 | 1/7 |
+
+文件名不提供语义且稀释标题，故只取路径最后一段。
+
 **MIRACL-zh 基线（实测，2026-10-23，已修正）**：362 篇文档、40 条中文 query，
 **hit@1 = 0.950，hit@5 = 1.000**。
 
@@ -411,14 +436,14 @@ false。实测 mean pooling 会让**无关查询的分数高于真同义词**（
 
 **模型锁定**（防静默漂移，v0.10.1 起实装）：`vec.db` 的 `vec_meta` 表在建向量时
 写入 `model_id` / `dim` / `pooling` / `normalize` 四项；`index` 与 `search` 都会
-校验，任一项不匹配即报错并要求 `--embed-full` 重建。
+校验，任一项不匹配即报错并要求 `--full` 重建。
 
 实测：把 `dim` 改成一个不存在的值后查询，得到
 
 ```console
 $ koios search . "营收"
 Error: this index was built with dim=999, but this build uses dim=1024.
-  The two are not comparable distances; rerun `koios index --embed-full`.
+  The two are not comparable distances; rerun `koios index --full`.
 ```
 
 先前 `vec_meta` 是空的——换模型或换维度后毫无校验，只能靠人工记得全量重建。
