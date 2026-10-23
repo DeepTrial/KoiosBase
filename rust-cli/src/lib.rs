@@ -979,7 +979,11 @@ pub fn cmd_index(path: &Path) -> rusqlite::Result<()> {
     if !crate::embed::allow_lexical() {
         crate::embed::require(path).map_err(rusqlite::Error::InvalidParameterName)?;
     }
-    if crate::embed::is_ready(path) {
+    // The opt-out has to gate the BUILD too, not just the check: `is_ready`
+    // only asks whether the files are present, so `--allow-no-embedding` was
+    // still encoding every block. Measured: 0.17s -> 79s on 600 blocks with
+    // the flag supposedly off.
+    if !crate::embed::allow_lexical() && crate::embed::is_ready(path) {
         crate::embed::build_vectors(path, &conn)?;
     }
     let flagged = if changed.is_empty() {
