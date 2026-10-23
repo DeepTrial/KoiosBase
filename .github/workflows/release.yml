@@ -93,8 +93,10 @@ jobs:
           "$BIN" --version
           rm -rf /tmp/smoke && "$BIN" init /tmp/smoke
           printf -- '---\ntitle: 冒烟\n---\n\n# 章节\n\nACME 公司 2024 年营收为 32 亿元。\n' > /tmp/smoke/raw/s.md
-          "$BIN" index /tmp/smoke
-          "$BIN" search 营收 -p /tmp/smoke
+          # No model in the runner image, and index/search are fail-closed since
+          # v0.10.1 -- the smoke test exercises the lexical path on purpose.
+          "$BIN" index /tmp/smoke --allow-no-embedding
+          "$BIN" search 营收 -p /tmp/smoke --allow-no-embedding
           # `lint` exits non-zero when it finds anything, and this fixture
           # genuinely has findings (an unsourced sources/ assertion, orphan
           # pages). That is the tool working, not a broken build — assert it
@@ -113,8 +115,9 @@ jobs:
           if (Test-Path $smoke) { Remove-Item -Recurse -Force $smoke }
           & $bin init $smoke
           Set-Content -Path (Join-Path $smoke 'raw/s.md') -Encoding utf8 -Value "---`ntitle: smoke`n---`n`n# 章节`n`nACME 公司 2024 年营收为 32 亿元。`n"
-          & $bin index $smoke
-          & $bin search 营收 -p $smoke
+          # Same reason as the POSIX side: fail-closed index/search need the opt-in.
+          & $bin index $smoke --allow-no-embedding
+          & $bin search 营收 -p $smoke --allow-no-embedding
 
       - name: Rename artifact
         shell: bash
