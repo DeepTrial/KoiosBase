@@ -475,6 +475,12 @@ PID 若已不存在则自动回收，避免一次中断把 vault 永久锁死。
 `.index/` 一并列走以免整库重编码。`restore` 拒绝写入非空目录——恢复工具最危险的
 方向是悄悄覆盖尚有内容的 vault。
 
+**无 wikilink 语料的图信号**：§5.2 列了四种边，但此前只实装了显式 `[[wikilink]]`
+一种——纯卡片式 Markdown 下 `links` 表实测为**零行**，于是通道 ③ 的 PPR 无任何
+输入，返回结果与 BM25 完全相同（不是图信号，是空转）。现在补上两种纯结构边：
+同节块（`same-section`，0.5）与同文档块（`same-doc`，0.2），二者只依赖 Markdown
+结构，与是否有人写链接无关。实测：零边 → 28 条边，`graph` 通道结果随之改变。
+
 **链接图的边定义**（PPR 的基础，全部从 Markdown 推导）：
 
 | 边类型 | 来源 | 权重 |
@@ -855,10 +861,16 @@ embedding 模型必跑。
 
 | feature | 行为 | 适用 |
 |---|---|---|
-| `ort-download`（默认） | 打包预编译运行时 | 方便，但预编译产物依赖较新的 glibc；实测 glibc 2.35 的机器无法链接 |
+| `ort-download` | 打包预编译运行时 | 方便，但预编译产物依赖较新的 glibc；实测 glibc 2.35 的机器无法链接 |
 | `ort-system` | 经 pkg-config 链接系统已有的 `libonnxruntime` | glibc 较旧的环境；运行时依赖由运维提供 |
 
-构建：`cargo build --release --no-default-features --features ort-system`。
+**两者都不是默认项**：`cargo build` 得到的是不含 ONNX Runtime 的二进制，只能词法
+检索。原因是有默认就会把「这台机器能不能链接」变成运气问题——默认打包会在
+glibc 2.35 上直接构建失败或产出起不来的二进制。无 ort 的二进制会**明确报错**
+而不是静默走词法（否则同一个语料在不同构建下两种行为），`koios status` 的
+`ort_available` 字段可查。
+
+构建：`cargo build --release --features ort-download`（或 `ort-system`）。
 
 **常驻 embedding 后的资源账（2026-10-22 实测修订）**：§5.2.1 已实装，
 Qwen3-Embedding-0.6B int8 常驻后，运行足迹重算如下：

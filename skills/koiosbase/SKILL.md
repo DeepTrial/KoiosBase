@@ -35,6 +35,13 @@ koios search "question" -p /abs/path/to/vault     # ranked blocks
 koios lint /abs/path/to/vault                     # knowledge health
 ```
 
+## Concurrency
+
+`koios index` is mutually exclusive per vault (`.index/index.lock`), so it is
+safe to run alongside a long-lived MCP server — the server keeps serving while
+a rebuild runs, and only one rebuild writes at a time. If the process holding
+the lock died, the lock is reclaimed rather than wedging the vault.
+
 ## Trust boundary
 
 There is **no authentication**. `groups` is whatever the caller claims, so any

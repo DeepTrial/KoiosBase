@@ -262,8 +262,12 @@ fn missing_model_is_an_error_not_a_warning() {
     let v = vault("failclosed");
     assert!(!koios::embed::is_ready(&v), "fixture must have no model");
     let err = koios::embed::require(&v).unwrap_err();
+    // Which reason applies depends on how the binary was built: a build with
+    // no ONNX Runtime cannot embed at all and says so first. Both are
+    // fail-closed, which is the behaviour under test; asserting a specific
+    // wording would just re-encode the build configuration.
     assert!(
-        err.contains("no embedding model installed"),
+        err.contains("no embedding model installed") || err.contains("built without ONNX Runtime"),
         "error must name the cause, got: {err}"
     );
     // And it must fail through the public route, not just the helper.

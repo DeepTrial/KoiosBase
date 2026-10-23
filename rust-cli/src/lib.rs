@@ -910,6 +910,12 @@ pub fn cmd_index(path: &Path) -> rusqlite::Result<()> {
             }
             ingest::add_wikilink_edges(&conn, &evs, &mut seen_links)?;
         }
+        // Structural edges are built once the whole corpus is indexed, after
+        // the per-document wikilink pass. Without them the graph is empty on
+        // card-style corpora and channel ③ silently degenerates into a copy of
+        // BM25 -- measured: links had zero rows, and `graph` returned exactly
+        // what `hybrid` returned.
+        ingest::add_structural_edges(&conn)?;
         if layer == "raw" {
             indexed_raw = true;
         }

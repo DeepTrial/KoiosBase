@@ -1,6 +1,6 @@
 [package]
 name = "koios"
-version = "0.11.0"
+version = "0.11.1"
 edition = "2021"
 # LICENSE NOTE (deliberate, reviewed 2026-10-02):
 # KoiosBase itself is MIT (see /LICENSE), but the PDF tier links MuPDF via the
@@ -50,7 +50,13 @@ sqlite-vec = "0.1.9"
 libc = "0.2"
 
 [features]
-default = ["ort-download"]
+# Neither ONNX Runtime link mode is on by default. `ort-download` bundles a
+# prebuilt runtime that requires a newer glibc than some hosts have (measured:
+# it does not link on glibc 2.35), so picking one silently would make `cargo
+# build` fail or produce a binary that will not start there. The operator
+# chooses; plain `cargo build` gives a lexical-only binary that works
+# everywhere.
+default = []
 # Bundle the ONNX Runtime binaries. Convenient, but they are built against a
 # newer glibc than some hosts ship: on glibc 2.35 the prebuilt runtime does not
 # link. Use `ort-system` there.

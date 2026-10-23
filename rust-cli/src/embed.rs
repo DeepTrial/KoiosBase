@@ -147,9 +147,20 @@ pub fn tokenizer_path(vault: &Path) -> PathBuf {
     models_root(vault).join(TOKENIZER_FILE)
 }
 
+/// True when this binary was compiled with ONNX Runtime support.
+///
+/// Without this the no-ort build is indistinguishable from a build whose model
+/// happens to be missing: both "work", and one of them silently answers
+/// lexically against a corpus that has vectors. That is the two-behaviours
+/// outcome §5.2.1 exists to prevent, reached through the build rather than the
+/// filesystem.
+pub const fn ort_available() -> bool {
+    cfg!(any(feature = "ort-download", feature = "ort-system"))
+}
+
 /// True when the vault has both files §5.2.1 requires.
 pub fn is_ready(vault: &Path) -> bool {
-    model_path(vault).is_file() && tokenizer_path(vault).is_file()
+    ort_available() && model_path(vault).is_file() && tokenizer_path(vault).is_file()
 }
 
 /// Load once per process, keeping the failure so it can be reported.
@@ -287,6 +298,15 @@ pub fn require(vault: &Path) -> Result<(), String> {
         }
         return Ok(());
     }
+    if !ort_available() {
+        return Err(
+            "this binary was built without ONNX Runtime, so it cannot embed.\n  \
+             Rebuild with --features ort-download (bundled runtime, needs a newer\n  \
+             glibc) or --features ort-system (links the system runtime).\n  \
+             Or pass --allow-no-embedding to accept lexical-only retrieval."
+                .to_string(),
+        );
+    }
     if !is_ready(vault) {
         return Err(format!(
             "no embedding model installed.\n  expected: {}\n            {}\n  \
@@ -367,6 +387,8 @@ fn expected_meta() -> Vec<(&'static str, String)> {
 pub struct Status {
     /// True when both model files that §5.2.1 requires are present.
     pub model_installed: bool,
+    /// False when this binary was built without ONNX Runtime support.
+    pub ort_available: bool,
     /// Set when the caller opted out of embeddings for this thread.
     pub lexical_only: bool,
     /// True when this install can actually retrieve semantically.
@@ -394,6 +416,7 @@ pub fn status(vault: &Path) -> Status {
     let lexical = allow_lexical();
     let mut out = Status {
         model_installed: installed,
+        ort_available: ort_available(),
         lexical_only: lexical,
         vector_channel_active: installed && !lexical,
         model_id: MODEL_ID,

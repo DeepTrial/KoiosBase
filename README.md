@@ -168,6 +168,12 @@ flowchart TD
 | 修改 `raw/` 之后 | `koios index myvault` |
 | 健康检查 | `koios lint myvault` |
 | 版本升级之后 | `koios index myvault --full` |
+| 备份 | `koios backup -p myvault -o /backups` |
+| 恢复 | `koios restore <archive> -o /path`（拒绝写入非空目录） |
+
+**并发**：`koios index` 用 `.index/index.lock` 互斥——两个进程同时重建同一个 vault
+此前没有任何保证。持有者进程若已退出，锁会被自动回收，所以一次中断不会把 vault
+永久锁死。长驻 MCP 与 `index` 可以同时运行，但同一时刻只会有一个 index 在写。
 | 修正错误事实 | `koios retract -p myvault -b "块id" --reason "..."` |
 | 提升置信度 | `koios promote --human-confirmed "wiki/entities/acme.md"` |
 

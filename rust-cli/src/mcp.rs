@@ -80,6 +80,7 @@ pub fn tool_status(args: &Value) -> Result<Value, String> {
     let s = crate::embed::status(&vault);
     Ok(json!({
         "model_installed": s.model_installed,
+        "ort_available": s.ort_available,
         "lexical_only": s.lexical_only,
         "vector_channel_active": s.vector_channel_active,
         "model_id": s.model_id,

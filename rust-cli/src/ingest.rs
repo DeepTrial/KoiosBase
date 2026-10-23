@@ -90,6 +90,105 @@ pub fn wikilinks(raw: &str) -> Vec<String> {
 
 /// Insert graph edges for every wikilink found in these blocks (§5.2).
 /// Deduped by (src,dst,kind) exactly as the Python `seen_links` set does.
+/// Structural edges for corpora that have no `[[wikilink]]` at all.
+///
+/// §5.2 lists four edge sources, but only explicit wikilinks were ever
+/// written -- so on card-style Markdown the `links` table is empty (measured:
+/// zero rows) and PPR contributes nothing. The `graph` channel then returns
+/// exactly what BM25 returned, which is not a graph signal, it is a no-op with
+/// extra steps.
+///
+/// These two are the cheap half of §5.2's list: blocks sharing a section, and
+/// blocks sharing a document. Both are derivable from Markdown structure
+/// alone, so they hold regardless of whether anyone wrote a link.
+pub fn add_structural_edges(conn: &Connection) -> rusqlite::Result<usize> {
+    let mut n = 0usize;
+    // Same section: the strongest structural signal short of an explicit link.
+    let mut stmt = conn.prepare(
+        "SELECT section_id, group_concat(id) FROM blocks \
+         WHERE section_id IS NOT NULL AND section_id <> '' \
+         GROUP BY section_id HAVING count(*) > 1",
+    )?;
+    let groups: Vec<Vec<String>> = stmt
+        .query_map([], |r| {
+            let joined: String = r.get::<_, String>(1).unwrap_or_default();
+            Ok(joined.split(',').map(|s| s.to_string()).collect())
+        })?
+        .flatten()
+        .collect();
+    for g in groups {
+        for a in g.iter() {
+            let w = weight_for_block(conn, a, 0.5);
+            for b in g.iter() {
+                if a == b {
+                    continue;
+                }
+                conn.execute(
+                    "INSERT INTO links(src,dst,kind,weight) VALUES(?,?,?,?)",
+                    params![a, b, "same-section", w],
+                )?;
+                n += 1;
+            }
+        }
+    }
+    // Same document, weaker: it keeps navigation across sections possible.
+    let mut stmt2 = conn.prepare(
+        "SELECT doc_path, group_concat(id) FROM blocks \
+         WHERE doc_path IS NOT NULL AND doc_path <> '' \
+         GROUP BY doc_path HAVING count(*) > 1",
+    )?;
+    let docs: Vec<Vec<String>> = stmt2
+        .query_map([], |r| {
+            let joined: String = r.get::<_, String>(1).unwrap_or_default();
+            Ok(joined.split(',').map(|s| s.to_string()).collect())
+        })?
+        .flatten()
+        .collect();
+    for g in docs {
+        for a in g.iter() {
+            let w = weight_for_block(conn, a, 0.2);
+            for b in g.iter() {
+                if a == b {
+                    continue;
+                }
+                conn.execute(
+                    "INSERT INTO links(src,dst,kind,weight) VALUES(?,?,?,?)",
+                    params![a, b, "same-doc", w],
+                )?;
+                n += 1;
+            }
+        }
+    }
+    Ok(n)
+}
+
+/// Structural-edge weight, scaled by how much the corpus has been verified.
+///
+/// §5.4 is not optional here: draft pages must contribute NO graph weight, or a
+/// machine-generated page gains authority simply by existing and the
+/// self-reinforcement loop the section exists to cut comes back through the
+/// structural edges. Raw documents are human-authored, so they are the
+/// reference point; an all-draft corpus stays weightless.
+/// Weight of one structural edge, given the block it starts from.
+///
+/// §5.4 applies here exactly as it does to wikilinks: a page nobody has
+/// confirmed must contribute no graph weight, or a machine-generated page
+/// gains authority merely by existing and the self-reinforcement loop that
+/// section exists to cut returns through the structural edges. So the edge
+/// inherits its source block's confidence: raw documents carry it, draft
+/// derived pages do not.
+fn weight_for_block(conn: &Connection, block_id: &str, base: f64) -> f64 {
+    let conf: String = conn
+        .query_row(
+            "SELECT CASE WHEN COALESCE(layer,'raw')='raw' THEN 'high' ELSE 'draft' END \
+             FROM blocks WHERE id=?",
+            [block_id],
+            |r| r.get(0),
+        )
+        .unwrap_or_else(|_| "draft".to_string());
+    base * crate::compile::edge_weight(&conf)
+}
+
 pub fn add_wikilink_edges(
     conn: &Connection,
     blocks: &[Ev],

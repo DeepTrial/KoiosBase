@@ -91,3 +91,18 @@ fn status_does_not_load_the_model() {
     let _ = connect(&v).unwrap();
     koios::embed::set_allow_lexical(false);
 }
+
+#[test]
+fn status_reports_whether_this_binary_can_embed_at_all() {
+    let v = vault("buildmode");
+    let s = koios::embed::status(&v);
+    // The gate is build-level: a binary without ONNX Runtime must say so
+    // rather than quietly answering lexically against a corpus that has
+    // vectors -- the same two-behaviours trap, reached through cargo instead
+    // of the filesystem.
+    assert_eq!(s.ort_available, koios::embed::ort_available());
+    assert!(
+        s.vector_channel_active == (s.ort_available && s.model_installed && !s.lexical_only),
+        "the channel must not claim activity it cannot deliver"
+    );
+}

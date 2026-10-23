@@ -97,3 +97,37 @@ fn a_first_index_purges_nothing() {
     // document as deleted on its first appearance.
     assert!(blocks_mentioning(&conn, "a.md") > 0);
 }
+
+/// #5 — the graph must not be empty just because nobody wrote a `[[link]]`.
+///
+/// Only explicit wikilinks were ever indexed, so on card-style Markdown the
+/// `links` table had zero rows (measured) and channel ③ returned exactly what
+/// BM25 did: a graph channel with no graph. Section and document co-membership
+/// are derivable from Markdown alone, so they are always available.
+#[test]
+fn a_wikilink_free_corpus_still_gets_graph_edges() {
+    let v = vault("nolinks");
+    fs::write(
+        v.join("raw").join("a.md"),
+        "# 文档\n\n## 第一节\n第一段文字。\n\n第二段文字。\n",
+    )
+    .unwrap();
+    koios::embed::set_allow_lexical(true);
+    koios::cmd_index(&v).unwrap();
+    let conn = connect(&v).unwrap();
+    let n: i64 = conn
+        .query_row("SELECT COUNT(*) FROM links", [], |r| r.get(0))
+        .unwrap();
+    assert!(n > 0, "a corpus with no wikilinks must still have edges");
+    let kinds: Vec<String> = conn
+        .prepare("SELECT DISTINCT kind FROM links")
+        .unwrap()
+        .query_map([], |r| r.get::<_, String>(0))
+        .unwrap()
+        .flatten()
+        .collect();
+    assert!(
+        kinds.iter().any(|k| k == "same-section" || k == "same-doc"),
+        "edges must be structural, got {kinds:?}"
+    );
+}
