@@ -10,6 +10,13 @@ use std::path::PathBuf;
 
 use koios::connect;
 
+/// These fixtures deliberately carry no embedding model. That is now a hard
+/// error (§5.2.1 is fail-closed), so every fixture opts in explicitly rather
+/// than relying on the old "warn and continue" behaviour.
+fn lexical() {
+    koios::embed::set_allow_lexical(true);
+}
+
 fn vault(name: &str) -> PathBuf {
     let p = std::env::temp_dir().join(format!("koios-pdf-{}-{}", name, std::process::id()));
     let _ = fs::remove_dir_all(&p);
@@ -217,7 +224,7 @@ fn sources_page_is_rendered_with_citations() {
         "---\ntitle: T\n---\n# Sec\nACME revenue was 32 yuan.\n",
     )
     .unwrap();
-    koios::cmd_index(&v).unwrap();
+    (lexical(), koios::cmd_index(&v)).1.unwrap();
     let src = v.join("wiki").join("sources").join("r.md");
     assert!(src.exists(), "sources/ page must be generated");
     let text = fs::read_to_string(&src).unwrap();
@@ -232,7 +239,7 @@ fn sources_page_is_rendered_with_citations() {
 #[test]
 fn ingest_writes_sources_and_pdf_pages() {
     let (v, _p) = pdf_vault(" ingestboth", "ACME revenue was 32 yuan in 2024.");
-    koios::cmd_index(&v).unwrap();
+    (lexical(), koios::cmd_index(&v)).1.unwrap();
     let conn = connect(&v).unwrap();
     let pdf_blocks: i64 = conn
         .query_row(
@@ -253,7 +260,7 @@ fn write_source_pages_returns_count() {
         "---\ntitle: T\n---\n# Sec\nACME revenue was 32 yuan.\n",
     )
     .unwrap();
-    koios::cmd_index(&v).unwrap();
+    (lexical(), koios::cmd_index(&v)).1.unwrap();
     let conn = connect(&v).unwrap();
     let (docs, sections) = koios::collect_raw_docs(&conn, &v).unwrap();
     assert!(!docs.is_empty());

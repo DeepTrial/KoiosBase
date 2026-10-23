@@ -11,6 +11,13 @@
 use std::fs;
 use std::path::PathBuf;
 
+/// These fixtures deliberately carry no embedding model. That is now a hard
+/// error (§5.2.1 is fail-closed), so every fixture opts in explicitly rather
+/// than relying on the old "warn and continue" behaviour.
+fn lexical() {
+    koios::embed::set_allow_lexical(true);
+}
+
 const PUBLIC: &str = "---\ntitle: 公开\n---\n# 概览\n营收 32 亿元。\n";
 const SECRET: &str = "---\ntitle: 机密\nacl: [finance-team]\n---\n# 薪酬\n高管薪酬 500 万。\n";
 
@@ -28,7 +35,7 @@ fn vault(name: &str) -> PathBuf {
     }
     fs::write(p.join("raw").join("open.md"), PUBLIC).unwrap();
     fs::write(p.join("raw").join("secret.md"), SECRET).unwrap();
-    koios::cmd_index(&p).unwrap();
+    (lexical(), koios::cmd_index(&p)).1.unwrap();
     p
 }
 

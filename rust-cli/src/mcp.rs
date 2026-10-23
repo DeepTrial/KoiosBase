@@ -208,7 +208,8 @@ pub fn tool_search(args: &Value) -> Result<Value, String> {
     // the other. Retrieval is not per-exit policy — one route (§6.1), one
     // answer, whichever door you came in through.
     let mut blocks =
-        crate::pipeline::retrieve_all(&vault, &conn, &question, top, groups_of(args).as_deref());
+        crate::pipeline::retrieve_all(&vault, &conn, &question, top, groups_of(args).as_deref())
+            .map_err(|e| e.to_string())?;
     blocks.truncate(top);
     // Python emits `d["score"]` inside its row loop, so `score` is the LAST key
     // of each emitted dict. Rank here is position in the fused result.
@@ -320,7 +321,8 @@ fn tool_write_answer(args: &Value) -> Result<Value, String> {
     // Same reasoning as tool_search: evidence for a written-back answer must
     // come from the same route the rest of the system reads through, or a cited
     // block is missing here for no reason the caller can see.
-    let ev = crate::pipeline::retrieve_all(&vault, &conn, &question, 5, groups_of(args).as_deref());
+    let ev = crate::pipeline::retrieve_all(&vault, &conn, &question, 5, groups_of(args).as_deref())
+        .map_err(|e| e.to_string())?;
     let path = crate::compile::write_answer_page(
         &vault,
         &question,

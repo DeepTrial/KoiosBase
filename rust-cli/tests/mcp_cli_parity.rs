@@ -23,6 +23,7 @@ fn seeded(name: &str) -> (PathBuf, rusqlite::Connection) {
         "# 财务\n\n## 营收\n本公司 2025 年度营业收入为 120 亿元。\n",
     )
     .unwrap();
+    koios::embed::set_allow_lexical(true);
     koios::cmd_index(&v).unwrap();
     let conn = connect(&v).unwrap();
     (v, conn)
@@ -36,7 +37,12 @@ fn seeded(name: &str) -> (PathBuf, rusqlite::Connection) {
 #[test]
 fn search_uses_the_same_route_on_both_exits() {
     let (v, conn) = seeded("route");
-    let via_pipeline = koios::pipeline::retrieve_all(&v, &conn, "营收", 8, None);
+    // These fixtures have no model installed, which is now a hard error unless
+    // the caller opts in -- exactly the fail-closed behaviour being asserted
+    // elsewhere. Retrieve here is deliberately lexical on both sides.
+    koios::embed::set_allow_lexical(true);
+    let via_pipeline = koios::pipeline::retrieve_all(&v, &conn, "营收", 8, None)
+        .expect("shared route must succeed with --allow-no-embedding");
     let via_channel = koios::pipeline::retrieve_channel(&conn, "营收", 8, None);
     assert!(
         !via_pipeline.is_empty(),

@@ -833,6 +833,31 @@ pub fn cmd_index(path: &Path) -> rusqlite::Result<()> {
          WHERE blocks.section_id = sections.id ORDER BY ordinal LIMIT 1), '')",
         [],
     )?;
+    // Deletion reclaim. Re-index refreshes whatever is present but never
+    // removes anything: a deleted raw document left its blocks, sections, rows
+    // in `documents` and its generated wiki/sources page behind, all still answering
+    // queries, and the only remedy was throwing away .index/ whole. The corpus
+    // could only grow. Deletes happen inside the same transaction as the rest
+    // of ingest so a failed run cannot leave a half-purged document.
+    if !before_fp.is_empty() {
+        let gone = missing_on_disk(path, before_fp.keys());
+        for doc in &gone {
+            let n = purge_document(&conn, doc)?;
+            if n > 0 {
+                eprintln!("removed {doc} ({n} blocks) — source no longer present");
+            }
+            // The derived page is indexed in its own right (§4.3), so its
+            // blocks survive the parent's removal unless purged too. Leaving
+            // them meant a deleted document kept answering queries through
+            // channel ①, which prefers wiki rows.
+            let derived = format!("sources/{doc}");
+            let m = purge_document(&conn, &derived)?;
+            if m > 0 {
+                eprintln!("removed {derived} ({m} blocks) — derived page of a deleted source");
+            }
+        }
+        compile::retire_source_pages(path, &gone).ok();
+    }
     tx.commit()?;
     // §8.3 write side: an edited raw document invalidates the synthesis pages
     // built from it. Nothing wired this up, so `page_state` stayed empty no
@@ -843,17 +868,15 @@ pub fn cmd_index(path: &Path) -> rusqlite::Result<()> {
     // particular has no fingerprint history, and flagging every synthesis page
     // on the first `index` would be noise, not signal.
     let after_fp = raw_doc_fingerprints(&conn);
-    let changed = if before_fp.is_empty() {
+    let first_run = before_fp.is_empty();
+    let changed = if first_run {
         Vec::new()
     } else {
         changed_raw_docs(&before_fp, &after_fp)
     };
-    // §5.2.1: the vector index is part of what `index` produces, so it is built
-    // in the same command — but only when the operator actually installed the
-    // model. Indexing must still succeed without it (that is every existing
-    // vault, every test, and CI), so absence is reported once and skipped.
-    // Never a silent BM25 downgrade on the READ side either; see embed::warn.
-    crate::embed::warn_if_missing(path);
+    if !crate::embed::allow_lexical() {
+        crate::embed::require(path).map_err(rusqlite::Error::InvalidParameterName)?;
+    }
     if crate::embed::is_ready(path) {
         crate::embed::build_vectors(path, &conn)?;
     }
@@ -919,4 +942,51 @@ fn changed_raw_docs(
         .filter(|k| before.get(*k) != after.get(*k))
         .cloned()
         .collect()
+}
+
+/// Of these raw document paths, the ones with no file on disk any more.
+///
+/// Diffing successive fingerprints did not work, and the reason is worth
+/// keeping: `wiki/sources/x.md` is itself indexed, and during the same run it
+/// regenerates a page whose blocks quote the raw text. So `after` still listed
+/// x.md even with raw/x.md deleted — nothing looked missing. The filesystem is
+/// the only authority here; an in-memory diff of derived state cannot tell
+/// "still present" from "rebuilt from a stale copy a moment ago".
+fn missing_on_disk<'a>(vault: &Path, docs: impl Iterator<Item = &'a String>) -> Vec<String> {
+    let raw_dir = vault.join("raw");
+    let mut out: Vec<String> = docs
+        .filter(|d| !raw_dir.join(d).is_file())
+        .cloned()
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Drop every trace of a document that no longer exists on disk.
+///
+/// Order matters: `blocks_fts` and `links` reference block ids, so they are
+/// cleared before the `blocks` row goes; `sections` after, since it parents
+/// them. The §8.2 state tables are cleaned too, otherwise `block_state` keeps
+/// a retracted verdict attached to a block id that may reappear later.
+fn purge_document(conn: &Connection, doc: &str) -> rusqlite::Result<usize> {
+    let mut removed = 0usize;
+    let mut ids: Vec<String> = Vec::new();
+    {
+        let mut stmt = conn.prepare("SELECT id FROM blocks WHERE doc_path=?")?;
+        let m = stmt.query_map([doc], |r| r.get::<_, String>(0))?;
+        for r in m.flatten() {
+            ids.push(r);
+        }
+    }
+    for id in &ids {
+        conn.execute("DELETE FROM blocks_fts WHERE id=?", [id])?;
+        conn.execute("DELETE FROM links WHERE src=? OR dst=?", [id, id])?;
+        conn.execute("DELETE FROM block_state WHERE block_id=?", [id])?;
+        removed += conn.execute("DELETE FROM blocks WHERE id=?", [id])?;
+    }
+    conn.execute("DELETE FROM sections WHERE doc_path=?", [doc])?;
+    conn.execute("DELETE FROM page_state WHERE page_path=?", [doc])?;
+    conn.execute("DELETE FROM documents WHERE path=?", [doc])?;
+    Ok(removed)
 }

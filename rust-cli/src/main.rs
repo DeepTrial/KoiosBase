@@ -50,6 +50,10 @@ enum Cmd {
         /// accepting it keeps scripts portable between the two shells.
         #[arg(long)]
         full: bool,
+        /// index without embeddings (lexical only). Opt-in — see the same flag
+        /// on `search` for why this is not the default.
+        #[arg(long = "allow-no-embedding")]
+        allow_no_embedding: bool,
     },
     /// BM25 + PPR hybrid search (channel ②+③)
     Search {
@@ -66,6 +70,10 @@ enum Cmd {
         /// force a retrieval channel: hybrid | tree | full | graph (§6.1)
         #[arg(short = 'c', long, value_parser = ["hybrid", "tree", "full", "graph"])]
         channel: Option<String>,
+        /// run without the embedding model (lexical only). Opt-in: §5.2.1 is
+        /// fail-closed because a corpus that answers two ways is not one corpus.
+        #[arg(long = "allow-no-embedding")]
+        allow_no_embedding: bool,
     },
     /// channel ① tree navigation
     Tree {
@@ -254,9 +262,9 @@ fn cmd_search(
     top: usize,
     groups: Option<Vec<String>>,
     channel: Option<&str>,
-) -> rusqlite::Result<()> {
-    let conn = connect(path)?;
-    // Route through retrieve_channel so the ACL applies. The previous raw-FTS
+) -> Result<(), String> {
+    let conn = connect(path).map_err(|e| e.to_string())?;
+    // Route through retrieve_all so the ACL applies and both channels run. The previous raw-FTS
     // ladder here bypassed it completely, so `koios search` handed restricted
     // blocks to whoever asked.
     //
@@ -269,14 +277,9 @@ fn cmd_search(
             .iter()
             .filter_map(|i| pipeline::get_block(&conn, i))
             .collect();
-        // Same triple as retrieve_channel, so `--channel` cannot pick the one
-        // door the ACL forgot to lock.
         pipeline::filter_chain(&conn, out, groups.as_deref())
     } else {
-        // One route, not a private copy of the fusion — mcp.rs used to hand-roll
-        // its own hybrid_search call, which is exactly how the MCP search ended
-        // up without the tree and vector channels.
-        pipeline::retrieve_all(path, &conn, query, top, groups.as_deref())
+        pipeline::retrieve_all(path, &conn, query, top, groups.as_deref())?
     };
     // Byte-identical to koiosbase/cli.py cmd_search()'s three-line form:
     //   [i] id / breadcrumb / snippet
@@ -721,13 +724,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Init { path } => cmd_init(&path.unwrap_or_else(|| PathBuf::from(".")))?,
-        Cmd::Index { path, full } => {
+        Cmd::Index {
+            path,
+            full,
+            allow_no_embedding,
+        } => {
+            koios::embed::set_allow_lexical(allow_no_embedding);
             if full {
                 // Python's --full does not drop tables either; rebuild already
                 // regenerates every derived row from raw + wiki (P1).
                 eprintln!("[index] --full accepted; rebuild is already complete");
             }
-            cmd_index(&path.unwrap_or_else(|| PathBuf::from(".")))?
+            cmd_index(&path.unwrap_or_else(|| PathBuf::from("."))).map_err(std::io::Error::other)?
         }
         Cmd::Search {
             query,
@@ -735,13 +743,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             top,
             groups,
             channel,
-        } => cmd_search(
-            &path,
-            &query.join(" "),
-            top,
-            parse_groups(groups.as_deref()),
-            channel.as_deref(),
-        )?,
+            allow_no_embedding,
+        } => {
+            koios::embed::set_allow_lexical(allow_no_embedding);
+            cmd_search(
+                &path,
+                &query.join(" "),
+                top,
+                parse_groups(groups.as_deref()),
+                channel.as_deref(),
+            )
+            .map_err(std::io::Error::other)?
+        }
         Cmd::Tree {
             query,
             path,

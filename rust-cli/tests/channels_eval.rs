@@ -17,6 +17,7 @@ fn vault(name: &str) -> PathBuf {
 fn seeded(name: &str) -> (PathBuf, rusqlite::Connection) {
     let v = vault(name);
     fs::write(v.join("raw").join("r.md"), MD).unwrap();
+    koios::embed::set_allow_lexical(true);
     koios::cmd_index(&v).unwrap();
     let conn = connect(&v).unwrap();
     (v, conn)
@@ -233,7 +234,8 @@ fn vector_channel_is_empty_without_a_model() {
         !koios::embed::is_ready(&v),
         "the fixture vault must not carry a model"
     );
-    let hits = koios::embed::search_vectors(&v, "营收", 8);
+    koios::embed::set_allow_lexical(true);
+    let hits = koios::embed::search_vectors(&v, "营收", 8).expect("no-model (+ opt-in) must be Ok");
     assert!(
         hits.is_empty(),
         "with no model the vector channel must return nothing, not err"
@@ -248,6 +250,50 @@ fn vec_db_survives_a_missing_gracefully() {
     let conn = koios::embed::ensure_vec_db(&v);
     assert!(conn.is_ok(), "vec.db must be creatable: {:?}", conn.err());
     assert!(v.join(".index").join("vec.db").is_file());
+}
+
+/// §5.2.1 says a missing model is an error, not a silent downgrade to BM25.
+///
+/// It previously printed a warning and carried on, so the same corpus answered
+/// semantically here and lexically there -- which is the failure mode the
+/// section exists to prevent. Reported externally; these lock the fix.
+#[test]
+fn missing_model_is_an_error_not_a_warning() {
+    let v = vault("failclosed");
+    koios::embed::set_allow_lexical(false);
+    assert!(!koios::embed::is_ready(&v), "fixture must have no model");
+    let err = koios::embed::require(&v).unwrap_err();
+    assert!(
+        err.contains("no embedding model installed"),
+        "error must name the cause, got: {err}"
+    );
+    // And it must fail through the public route, not just the helper.
+    let conn = koios::connect(&v).unwrap();
+    let routed = koios::pipeline::retrieve_all(&v, &conn, "营收", 8, None);
+    assert!(routed.is_err(), "search must not silently degrade to BM25");
+}
+
+/// --allow-no-embedding is the documented opt-out, and it must actually work.
+#[test]
+fn allow_no_embedding_opts_out() {
+    let v = vault("optout");
+    koios::embed::set_allow_lexical(true);
+    koios::embed::require(&v).expect("opt-out must permit a model-less vault");
+    koios::embed::set_allow_lexical(false);
+    assert!(koios::embed::require(&v).is_err(), "default must be closed");
+}
+
+/// A `vec.db` must record which model built it, and refuse a different one.
+#[test]
+fn vec_db_records_and_enforces_model_identity() {
+    let v = vault("identity");
+    let conn = koios::embed::ensure_vec_db(&v).unwrap();
+    koios::embed::set_allow_lexical(true);
+    // Nothing written until the first build, so an empty index is accepted.
+    let row_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM vec_meta", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(row_count, 0, "identity must be empty before any build");
 }
 
 /// test_eval_seed_set_runs

@@ -68,8 +68,25 @@ struct Embedder {
     eos: u32,
 }
 
-static EMBEDDER: OnceLock<Option<std::sync::Arc<Embedder>>> = OnceLock::new();
+static EMBEDDER: OnceLock<Result<std::sync::Arc<Embedder>, String>> = OnceLock::new();
 static MISSING_REPORTED: OnceLock<()> = OnceLock::new();
+
+/// Set from `--allow-no-embedding`. Defeat flag, opt-in, never the default.
+///
+/// §5.2.1's reason for being fail-closed is that a corpus must not have two
+/// retrieval behaviours depending on whether a file happened to be present --
+/// then eval numbers stop comparing across versions. This exists for the
+/// person who knowingly accepts that (a scratch vault, a docs-only corpus),
+/// not as a convenience so nothing ever fails.
+static ALLOW_LEXICAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_allow_lexical(allow: bool) {
+    ALLOW_LEXICAL.store(allow, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn allow_lexical() -> bool {
+    ALLOW_LEXICAL.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 pub fn model_path(vault: &Path) -> PathBuf {
     vault.join(MODEL_DIR).join(MODEL_FILE)
@@ -84,11 +101,15 @@ pub fn is_ready(vault: &Path) -> bool {
     model_path(vault).is_file() && tokenizer_path(vault).is_file()
 }
 
-/// Load once per process. `None` means the model files are absent — see
-/// `available()` for why that is a queryable state and not a hard panic here.
-fn embedder(vault: &Path) -> Option<std::sync::Arc<Embedder>> {
+/// Load once per process, keeping the failure so it can be reported.
+///
+/// Previously `.ok()` discarded the reason, so a real failure (an unsupported
+/// session option, a corrupt file, a missing symbol) surfaced to the user as
+/// "the embedding model is not installed", which sent them hunting for a file
+/// that was there all along. The error text is now what reaches stderr.
+fn embedder(vault: &Path) -> Result<std::sync::Arc<Embedder>, String> {
     EMBEDDER
-        .get_or_init(|| load(vault).ok().map(std::sync::Arc::new))
+        .get_or_init(|| load(vault).map(std::sync::Arc::new))
         .clone()
 }
 
@@ -142,11 +163,13 @@ fn load(vault: &Path) -> Result<Embedder, String> {
 ///
 /// Returns a unit vector, or `Err` when the model is unavailable.
 pub fn encode(vault: &Path, text: &str, is_query: bool) -> Result<Vec<f32>, String> {
-    let e = embedder(vault).ok_or_else(|| {
+    let e = embedder(vault).map_err(|err| {
         format!(
-            "the embedding model is not installed in {} — see §5.2.1;
-             KoiosBase does not fall back to BM25 silently.",
-            model_path(vault).display()
+            "the embedding model could not be used ({err}).\n  \
+             model:      {}\n  tokenizer:  {}\n  \
+             Install both files, or pass --allow-no-embedding to run lexically on purpose.",
+            model_path(vault).display(),
+            tokenizer_path(vault).display()
         )
     })?;
     let _ = &e.env; // keep the environment alive for the session's lifetime
@@ -199,23 +222,34 @@ pub fn encode(vault: &Path, text: &str, is_query: bool) -> Result<Vec<f32>, Stri
     Ok(out)
 }
 
-/// Report the missing model to stderr once per process.
+/// Fail unless the embedding model is usable, or the caller opted out.
 ///
-/// Indexing still has to succeed without the model or every existing test,
-/// vault, and CI job breaks the moment this dependency lands. But silence is
-/// what made §5.2.1 easy to ignore, so it is said out loud exactly once.
-pub fn warn_if_missing(vault: &Path) {
-    if is_ready(vault) {
-        return;
+/// This is §5.2.1's "resident dependency, not an optional extra" made real.
+/// It replaces a version that only printed a warning and carried on, which
+/// meant the same corpus answered semantically on one machine and lexically
+/// on another -- exactly the two-behaviours outcome the section exists to
+/// prevent, and the opposite of what the section claimed happened.
+pub fn require(vault: &Path) -> Result<(), String> {
+    if allow_lexical() {
+        if MISSING_REPORTED.set(()).is_ok() && !is_ready(vault) {
+            eprintln!("note: running lexically (--allow-no-embedding); the vector channel is off.");
+        }
+        return Ok(());
     }
-    if MISSING_REPORTED.set(()).is_err() {
-        return;
+    if !is_ready(vault) {
+        return Err(format!(
+            "no embedding model installed.\n  expected: {}\n            {}\n  \
+             §5.2.1 makes embeddings a resident dependency: without them this\n  \
+             vault would answer one way here and another way elsewhere.\n  \
+             Install the two files, or pass --allow-no-embedding to accept that.",
+            model_path(vault).display(),
+            tokenizer_path(vault).display()
+        ));
     }
-    eprintln!(
-        "warning: no embedding model in {} — the vector channel (§6.1 ②) is \
-         inactive and recall is limited to lexical overlap. See §5.2.1.",
-        vault.join(MODEL_DIR).display()
-    );
+    // Files exist; prove they actually load. Reporting "not installed" for a
+    // file that IS installed was the old failure mode, hence the encode path
+    // carrying the real reason.
+    embedder(vault).map(|_| ())
 }
 
 /// The sqlite-vec table holding one row per block, keyed by `blocks.id`.
@@ -254,6 +288,72 @@ pub fn ensure_vec_db(vault: &Path) -> rusqlite::Result<Connection> {
     Ok(conn)
 }
 
+/// Identity of the model an index was built with (§5.2.1 model lock).
+///
+/// Without this nothing could tell that `vec.db` was produced by a different
+/// model, dimension, or pooling rule than the one now being queried. Vectors
+/// from two models are not comparable distances, so silently mixing them
+/// returns plausible-looking nonsense rather than nothing.
+const POOLING: &str = "last-token+l2";
+const MODEL_ID: &str = "qwen3-embedding-0.6b-int8-tei";
+
+fn expected_meta() -> Vec<(&'static str, String)> {
+    vec![
+        ("model_id", MODEL_ID.to_string()),
+        ("dim", DIM.to_string()),
+        ("pooling", POOLING.to_string()),
+        ("normalize", "l2".to_string()),
+    ]
+}
+
+/// Reject a `vec.db` built by anything other than the current model.
+fn check_identity(conn: &Connection) -> Result<(), String> {
+    let mut have = std::collections::HashMap::new();
+    let mut stmt = conn
+        .prepare("SELECT key, value FROM vec_meta")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1).unwrap_or_default(),
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+    for r in rows.flatten() {
+        have.insert(r.0, r.1);
+    }
+    if have.is_empty() {
+        // Nothing encoded yet, so nothing to disagree with.
+        return Ok(());
+    }
+    for (k, v) in expected_meta() {
+        match have.get(k) {
+            Some(found) if found == &v => {}
+            other => {
+                return Err(format!(
+                    "this index was built with {k}={}, but this build uses {k}={v}.\n  \
+                     The two are not comparable distances; rerun `koios index --embed-full`.",
+                    other.map(|s| s.as_str()).unwrap_or("<unset>")
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Record (and enforce) which model this index belongs to.
+fn stamp_identity(conn: &Connection) -> rusqlite::Result<()> {
+    let mut stmt = conn.prepare(
+        "INSERT INTO vec_meta (key, value) VALUES (?, ?) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    )?;
+    for (k, v) in expected_meta() {
+        stmt.execute(rusqlite::params![k, v])?;
+    }
+    Ok(())
+}
+
 /// Encode every block whose content hash changed or which has no vector yet.
 ///
 /// `blocks.hash` is what keeps this incremental (§5.2.1): a block whose text is
@@ -262,6 +362,10 @@ pub fn ensure_vec_db(vault: &Path) -> rusqlite::Result<Connection> {
 /// are dropped, otherwise deleted documents keep answering queries forever.
 pub fn build_vectors(vault: &Path, main: &Connection) -> rusqlite::Result<()> {
     let conn = ensure_vec_db(vault)?;
+    // Refuse to extend an index built by a different model rather than let two
+    // embedding spaces share one distance comparison (§5.2.1 model lock).
+    check_identity(&conn).map_err(rusqlite::Error::InvalidParameterName)?;
+    stamp_identity(&conn)?;
     let tx = conn.unchecked_transaction()?;
 
     // Content hashes of what is ALREADY encoded, keyed by block id. This is
@@ -373,35 +477,25 @@ fn to_blob(v: &[f32]) -> Vec<u8> {
 ///
 /// Returns `(block_id, cosine)` descending. sqlite-vec's default metric on a
 /// normalized embeddding IS cosine, so no further conversion happens here.
-pub fn search_vectors(vault: &Path, query: &str, limit: usize) -> Vec<(String, f64)> {
-    if !is_ready(vault) {
-        return Vec::new();
+pub fn search_vectors(
+    vault: &Path,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<(String, f64)>, String> {
+    if allow_lexical() || !is_ready(vault) {
+        return Ok(Vec::new());
     }
-    let q = match encode(vault, query, true) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("warning: could not encode the query: {e}");
-            return Vec::new();
-        }
-    };
-    let conn = match ensure_vec_db(vault) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("warning: could not open vec.db: {e}");
-            return Vec::new();
-        }
-    };
+    require(vault)?;
+    let q = encode(vault, query, true)?;
+    let conn = ensure_vec_db(vault).map_err(|e| format!("could not open vec.db: {e}"))?;
+    check_identity(&conn)?;
     let mut out = Vec::new();
-    let mut stmt = match conn.prepare(
-        "SELECT block_id, distance FROM vec_blocks \
-         WHERE embedding MATCH ? ORDER BY distance LIMIT ?",
-    ) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("warning: vector query failed: {e}");
-            return Vec::new();
-        }
-    };
+    let mut stmt = conn
+        .prepare(
+            "SELECT block_id, distance FROM vec_blocks \
+             WHERE embedding MATCH ? ORDER BY distance LIMIT ?",
+        )
+        .map_err(|e| format!("vector query failed: {e}"))?;
     let rows = stmt.query_map(rusqlite::params![to_blob(&q), limit as i64], |r| {
         Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?))
     });
@@ -410,5 +504,5 @@ pub fn search_vectors(vault: &Path, query: &str, limit: usize) -> Vec<(String, f
             out.push(r);
         }
     }
-    out
+    Ok(out)
 }

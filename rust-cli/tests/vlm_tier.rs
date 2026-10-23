@@ -59,7 +59,11 @@ fn scanned_page_is_silent_without_a_vision_model() {
     )
     .unwrap();
 
-    let out = koios().args(["index"]).arg(&v).output().unwrap();
+    let out = koios()
+        .args(["index", "--allow-no-embedding"])
+        .arg(&v)
+        .output()
+        .unwrap();
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
@@ -78,7 +82,11 @@ fn configured_vision_command_recovers_the_scanned_page() {
     )
     .unwrap();
 
-    let out = koios().args(["index"]).arg(&v).output().unwrap();
+    let out = koios()
+        .args(["index", "--allow-no-embedding"])
+        .arg(&v)
+        .output()
+        .unwrap();
     assert!(
         out.status.success(),
         "{}",
@@ -91,7 +99,7 @@ fn configured_vision_command_recovers_the_scanned_page() {
     );
 
     let hits = koios()
-        .args(["search", "transcribed", "-p"])
+        .args(["search", "transcribed", "--allow-no-embedding", "-p"])
         .arg(&v)
         .output()
         .unwrap();
@@ -114,14 +122,18 @@ fn a_failing_vision_command_does_not_abort_the_rest_of_the_document() {
     )
     .unwrap();
 
-    let out = koios().args(["index"]).arg(&v).output().unwrap();
+    let out = koios()
+        .args(["index", "--allow-no-embedding"])
+        .arg(&v)
+        .output()
+        .unwrap();
     assert!(
         out.status.success(),
         "a broken model must not fail the build"
     );
 
     let hits = koios()
-        .args(["search", "survives", "-p"])
+        .args(["search", "survives", "--allow-no-embedding", "-p"])
         .arg(&v)
         .output()
         .unwrap();

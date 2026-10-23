@@ -17,6 +17,13 @@ use std::path::PathBuf;
 
 use koios::connect;
 
+/// These fixtures deliberately carry no embedding model. That is now a hard
+/// error (§5.2.1 is fail-closed), so every fixture opts in explicitly rather
+/// than relying on the old "warn and continue" behaviour.
+fn lexical() {
+    koios::embed::set_allow_lexical(true);
+}
+
 const DOC: &str = "---\ntitle: Test\n---\n# Sec\nACME revenue was 3.2 billion yuan.\n";
 
 fn vault(name: &str) -> PathBuf {
@@ -46,7 +53,7 @@ fn vault(name: &str) -> PathBuf {
 #[test]
 fn stale_page_is_downranked_on_the_read_path() {
     let v = vault("stale");
-    koios::cmd_index(&v).unwrap();
+    (lexical(), koios::cmd_index(&v)).1.unwrap();
     let conn = connect(&v).unwrap();
 
     let before = koios::pipeline::retrieve_channel(&conn, "revenue", 8, None);
@@ -75,7 +82,7 @@ fn stale_page_is_downranked_on_the_read_path() {
 #[test]
 fn retracted_page_is_hard_filtered() {
     let v = vault("retract");
-    koios::cmd_index(&v).unwrap();
+    (lexical(), koios::cmd_index(&v)).1.unwrap();
     let conn = connect(&v).unwrap();
     koios::state::mark_stale(&conn, "r.md", "cited retracted x").unwrap();
     conn.execute(
@@ -98,7 +105,7 @@ fn retracted_page_is_hard_filtered() {
 #[test]
 fn disposition_table_matches_python() {
     let v = vault("disp");
-    koios::cmd_index(&v).unwrap();
+    (lexical(), koios::cmd_index(&v)).1.unwrap();
     let conn = connect(&v).unwrap();
 
     // no row -> use

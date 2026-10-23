@@ -5,6 +5,13 @@ use std::path::PathBuf;
 
 use koios::connect;
 
+/// These fixtures deliberately carry no embedding model. That is now a hard
+/// error (§5.2.1 is fail-closed), so every fixture opts in explicitly rather
+/// than relying on the old "warn and continue" behaviour.
+fn lexical() {
+    koios::embed::set_allow_lexical(true);
+}
+
 fn vault(name: &str) -> PathBuf {
     let p = std::env::temp_dir().join(format!("koios-pl-{}-{}", name, std::process::id()));
     let _ = fs::remove_dir_all(&p);
@@ -19,7 +26,7 @@ const MD: &str = "---\ntitle: ACME 2024年报\nversion: 3\n---\n\n# 财务分析
 fn seeded(name: &str) -> (PathBuf, rusqlite::Connection) {
     let v = vault(name);
     fs::write(v.join("raw").join("r.md"), MD).unwrap();
-    koios::cmd_index(&v).unwrap();
+    (lexical(), koios::cmd_index(&v)).1.unwrap();
     let conn = connect(&v).unwrap();
     (v, conn)
 }
@@ -79,12 +86,12 @@ fn frontmatter_and_breadcrumb() {
 fn index_rebuild_counts_blocks() {
     let v = vault("rebuild");
     fs::write(v.join("raw").join("r.md"), MD).unwrap();
-    koios::cmd_index(&v).unwrap();
+    (lexical(), koios::cmd_index(&v)).1.unwrap();
     let conn = connect(&v).unwrap();
     let n1: i64 = conn
         .query_row("SELECT COUNT(*) FROM blocks", [], |r| r.get(0))
         .unwrap();
-    koios::cmd_index(&v).unwrap();
+    (lexical(), koios::cmd_index(&v)).1.unwrap();
     let n2: i64 = conn
         .query_row("SELECT COUNT(*) FROM blocks", [], |r| r.get(0))
         .unwrap();
@@ -149,7 +156,7 @@ fn ppr_runs_on_subgraph() {
         "---\ntitle: S\n---\n# Sec\nSee [[r.md]] for revenue.\n",
     )
     .unwrap();
-    koios::cmd_index(&v).unwrap();
+    (lexical(), koios::cmd_index(&v)).1.unwrap();
     let graph = koios::retrieval::load_graph(&conn).unwrap();
     assert!(!graph.is_empty(), "wikilinks must produce graph edges");
     let out = koios::retrieval::personalized_pagerank(&["r.md".to_string()], &graph, 0.85, 20);
@@ -184,7 +191,7 @@ fn l1_detects_unsourced_wiki_assertion() {
         "---\ntitle: W\nconfidence: draft\n---\n- Berlin was great in 2024.\n",
     )
     .unwrap();
-    koios::cmd_index(&v).unwrap();
+    (lexical(), koios::cmd_index(&v)).1.unwrap();
     let findings = koios::lint::run_l1(&conn);
     let unsourced = findings
         .iter()
@@ -202,14 +209,14 @@ fn l1_detects_unsourced_wiki_assertion() {
 fn derived_pages_are_indexed_and_idempotent() {
     let v = vault("derived");
     fs::write(v.join("raw").join("r.md"), MD).unwrap();
-    koios::cmd_index(&v).unwrap();
+    (lexical(), koios::cmd_index(&v)).1.unwrap();
     let n1: i64 = {
         let c = connect(&v).unwrap();
         c.query_row("SELECT COUNT(*) FROM blocks", [], |r| r.get(0))
             .unwrap()
     };
-    koios::cmd_index(&v).unwrap();
-    koios::cmd_index(&v).unwrap();
+    (lexical(), koios::cmd_index(&v)).1.unwrap();
+    (lexical(), koios::cmd_index(&v)).1.unwrap();
     let n3: i64 = {
         let c = connect(&v).unwrap();
         c.query_row("SELECT COUNT(*) FROM blocks", [], |r| r.get(0))

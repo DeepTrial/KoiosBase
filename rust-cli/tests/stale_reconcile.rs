@@ -15,6 +15,12 @@ use std::path::{Path, PathBuf};
 use koios::compile::reconcile_stale_syntheses;
 use koios::{cmd_index, connect};
 
+/// Fixtures carry no embedding model; fail-closed indexing requires the opt-in.
+fn index(v: &std::path::Path) {
+    koios::embed::set_allow_lexical(true);
+    cmd_index(v).unwrap();
+}
+
 fn raw_md(body: &str) -> String {
     format!("---\ntitle: ACME\n---\n\n# Fin\n\n## Rev\n\n{body}\n")
 }
@@ -40,7 +46,7 @@ fn staleness(v: &Path, key: &str) -> Option<i64> {
 fn editing_a_source_flags_the_synthesis_page_stale() {
     let v = vault("flag");
     fs::write(v.join("raw").join("r.md"), raw_md("revenue was 32")).unwrap();
-    cmd_index(&v).unwrap();
+    index(&v);
 
     // A synthesis page that cites the doc — what `studio brief` writes.
     let sdir = v.join("wiki").join("synthesis");
@@ -53,7 +59,7 @@ fn editing_a_source_flags_the_synthesis_page_stale() {
 
     // Re-indexing an UNCHANGED file must invalidate nothing — otherwise every
     // `index` on a quiet vault would dirty every export.
-    cmd_index(&v).unwrap();
+    index(&v);
     assert_eq!(
         staleness(&v, "synthesis/brief-revenue.md"),
         None,
@@ -61,7 +67,7 @@ fn editing_a_source_flags_the_synthesis_page_stale() {
     );
 
     fs::write(v.join("raw").join("r.md"), raw_md("revenue was 99")).unwrap();
-    cmd_index(&v).unwrap();
+    index(&v);
     assert_eq!(
         staleness(&v, "synthesis/brief-revenue.md"),
         Some(1),
@@ -73,7 +79,7 @@ fn editing_a_source_flags_the_synthesis_page_stale() {
 fn compile_clears_the_stale_flag_and_is_idempotent() {
     let v = vault("clear");
     fs::write(v.join("raw").join("r.md"), raw_md("revenue was 32")).unwrap();
-    cmd_index(&v).unwrap();
+    index(&v);
     let sdir = v.join("wiki").join("synthesis");
     fs::create_dir_all(&sdir).unwrap();
     let page = sdir.join("brief-revenue.md");
@@ -84,7 +90,7 @@ fn compile_clears_the_stale_flag_and_is_idempotent() {
     .unwrap();
 
     fs::write(v.join("raw").join("r.md"), raw_md("revenue was 99")).unwrap();
-    cmd_index(&v).unwrap();
+    index(&v);
     assert_eq!(staleness(&v, "synthesis/brief-revenue.md"), Some(1));
 
     reconcile_stale_syntheses(&connect(&v).unwrap(), &v, &koios::compile::stamp_now());
@@ -128,7 +134,7 @@ fn a_fresh_vault_index_flags_nothing() {
     // if naively diffed — every page would be flagged on first contact.
     let v = vault("cold");
     fs::write(v.join("raw").join("r.md"), raw_md("revenue was 32")).unwrap();
-    cmd_index(&v).unwrap();
+    index(&v);
     let sdir = v.join("wiki").join("synthesis");
     fs::create_dir_all(&sdir).unwrap();
     fs::write(
@@ -137,7 +143,7 @@ fn a_fresh_vault_index_flags_nothing() {
     )
     .unwrap();
     // Second index now HAS history, and its fingerprints match.
-    cmd_index(&v).unwrap();
+    index(&v);
     assert_eq!(
         staleness(&v, "synthesis/brief-revenue.md"),
         None,

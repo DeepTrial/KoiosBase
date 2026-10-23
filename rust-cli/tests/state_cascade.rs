@@ -9,6 +9,13 @@ use std::path::{Path, PathBuf};
 
 use koios::connect;
 
+/// These fixtures deliberately carry no embedding model. That is now a hard
+/// error (§5.2.1 is fail-closed), so every fixture opts in explicitly rather
+/// than relying on the old "warn and continue" behaviour.
+fn lexical() {
+    koios::embed::set_allow_lexical(true);
+}
+
 fn vault(name: &str) -> PathBuf {
     let p = std::env::temp_dir().join(format!("koios-st-{}-{}", name, std::process::id()));
     let _ = fs::remove_dir_all(&p);
@@ -22,6 +29,8 @@ fn seed(v: &Path) -> rusqlite::Connection {
         "---\ntitle: T\n---\n# Sec\nACME revenue was 32 yuan.\n",
     )
     .unwrap();
+    // Fixture carries no model; fail-closed indexing requires the opt-in.
+    koios::embed::set_allow_lexical(true);
     koios::cmd_index(v).unwrap();
     connect(v).unwrap()
 }
@@ -62,7 +71,7 @@ fn cascade_marks_citing_pages_stale() {
         "---\ntitle: W\nconfidence: draft\n---\n- claim [[raw/r.md#Sec/1]]\n",
     )
     .unwrap();
-    koios::cmd_index(&v).unwrap();
+    (lexical(), koios::cmd_index(&v)).1.unwrap();
 
     let pages = koios::state::cascade_retraction(&conn, "r.md#Sec/1", "typo", Some(&v)).unwrap();
     assert!(!pages.is_empty(), "the citing page must be reported");
@@ -173,7 +182,7 @@ fn stale_evidence_is_disclosed_to_the_reader() {
         "---\ntitle: S\n---\n# Sec2\nACME revenue also mentioned here.\n",
     )
     .unwrap();
-    koios::cmd_index(&v).unwrap();
+    (lexical(), koios::cmd_index(&v)).1.unwrap();
     let before = koios::pipeline::retrieve_channel(&conn, "revenue", 8, None);
     koios::state::mark_stale(&conn, "r.md", "x").unwrap();
     let after = koios::pipeline::retrieve_channel(&conn, "revenue", 8, None);

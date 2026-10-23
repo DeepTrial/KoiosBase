@@ -10,6 +10,13 @@ use std::path::{Path, PathBuf};
 
 use koios::connect;
 
+/// These fixtures deliberately carry no embedding model. That is now a hard
+/// error (§5.2.1 is fail-closed), so every fixture opts in explicitly rather
+/// than relying on the old "warn and continue" behaviour.
+fn lexical() {
+    koios::embed::set_allow_lexical(true);
+}
+
 const DOC: &str = "---\ntitle: Test\n---\n# Sec\nACME revenue was 3.2 billion yuan in 2024.\n";
 
 fn vault(name: &str) -> PathBuf {
@@ -46,7 +53,7 @@ fn index_is_idempotent() {
     let v = vault("idem");
     let mut n = None;
     for i in 0..3 {
-        koios::cmd_index(&v).unwrap();
+        (lexical(), koios::cmd_index(&v)).1.unwrap();
         let c = block_count(&v);
         if let Some(prev) = n {
             assert_eq!(prev, c, "run {i} changed the block count");
@@ -64,7 +71,7 @@ fn index_is_idempotent() {
 #[test]
 fn derived_pages_are_indexed() {
     let v = vault("derived");
-    koios::cmd_index(&v).unwrap();
+    (lexical(), koios::cmd_index(&v)).1.unwrap();
     let raw_blocks: Vec<String> = {
         let conn = connect(&v).unwrap();
         let mut s = conn
@@ -98,12 +105,12 @@ fn derived_pages_are_indexed() {
 #[test]
 fn cold_start_matches_warm() {
     let a = vault("cold");
-    koios::cmd_index(&a).unwrap();
+    (lexical(), koios::cmd_index(&a)).1.unwrap();
     let cold = block_count(&a);
 
     let b = vault("warm");
-    koios::cmd_index(&b).unwrap();
-    koios::cmd_index(&b).unwrap();
+    (lexical(), koios::cmd_index(&b)).1.unwrap();
+    (lexical(), koios::cmd_index(&b)).1.unwrap();
     let warm = block_count(&b);
 
     assert_eq!(cold, warm, "first run differs from steady state");

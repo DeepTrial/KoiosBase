@@ -444,6 +444,35 @@ fn build_summary(blocks: &[Ev], max_chars: usize) -> String {
     }
 }
 
+/// Remove the generated `sources/` page for documents that no longer exist.
+///
+/// `write_source_pages` only ever adds, so deleting `raw/x.md` left
+/// `wiki/sources/x.md` in the vault — still summarising, still citable, still
+/// ranked by channel ① (which prefers wiki rows). Nothing else removes it, so
+/// without this the only fix was deleting the whole `wiki/sources` tree.
+pub fn retire_source_pages(vault: &Path, docs: &[String]) -> std::io::Result<usize> {
+    let dir = vault.join("wiki").join("sources");
+    if !dir.is_dir() {
+        return Ok(0);
+    }
+    let mut n = 0;
+    for doc in docs {
+        let stem = match std::path::Path::new(doc)
+            .file_stem()
+            .and_then(|s| s.to_str())
+        {
+            Some(s) => s,
+            None => continue,
+        };
+        let p = dir.join(format!("{stem}.md"));
+        if p.is_file() {
+            std::fs::remove_file(&p)?;
+            n += 1;
+        }
+    }
+    Ok(n)
+}
+
 pub fn write_source_pages(
     vault: &Path,
     docs: &[(String, String, Vec<Ev>)], // (rel_path, title, blocks)

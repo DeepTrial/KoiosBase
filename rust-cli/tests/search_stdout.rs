@@ -41,11 +41,19 @@ fn search_stdout_uses_the_python_three_line_form() {
 
     let init = Command::new(bin).arg("init").arg(&p).output().unwrap();
     assert!(init.status.success(), "init failed: {init:?}");
-    let idx = Command::new(bin).arg("index").arg(&p).output().unwrap();
+    // No model in the fixture, and since §5.2.1 went fail-closed both commands
+    // have to opt in explicitly.
+    let idx = Command::new(bin)
+        .args(["index", "--allow-no-embedding"])
+        .arg(&p)
+        .output()
+        .unwrap();
     assert!(idx.status.success(), "index failed: {idx:?}");
 
+    // `--allow-no-embedding` goes BEFORE `-p`: clap takes the next token as
+    // --path's value, so a flag in that slot is parsed as the path.
     let out = Command::new(bin)
-        .args(["search", "营收", "-p"])
+        .args(["search", "营收", "--allow-no-embedding", "-p"])
         .arg(&p)
         .output()
         .unwrap();
@@ -98,10 +106,14 @@ fn search_with_no_hits_prints_the_shared_sentinel() {
     let p = vault("empty");
     let bin = env!("CARGO_BIN_EXE_koios");
     Command::new(bin).arg("init").arg(&p).output().unwrap();
-    Command::new(bin).arg("index").arg(&p).output().unwrap();
+    Command::new(bin)
+        .args(["index", "--allow-no-embedding"])
+        .arg(&p)
+        .output()
+        .unwrap();
 
     let out = Command::new(bin)
-        .args(["search", "zzzzz-not-present", "-p"])
+        .args(["search", "zzzzz-not-present", "--allow-no-embedding", "-p"])
         .arg(&p)
         .output()
         .unwrap();

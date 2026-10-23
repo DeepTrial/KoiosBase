@@ -5,6 +5,13 @@ use std::path::PathBuf;
 
 use koios::connect;
 
+/// These fixtures deliberately carry no embedding model. That is now a hard
+/// error (§5.2.1 is fail-closed), so every fixture opts in explicitly rather
+/// than relying on the old "warn and continue" behaviour.
+fn lexical() {
+    koios::embed::set_allow_lexical(true);
+}
+
 fn vault(name: &str) -> PathBuf {
     let p = std::env::temp_dir().join(format!("koios-as-{}-{}", name, std::process::id()));
     let _ = fs::remove_dir_all(&p);
@@ -25,7 +32,7 @@ fn seeded(name: &str) -> (PathBuf, rusqlite::Connection) {
         "---\ntitle: Secret\nacl: [finance-team]\n---\n# Pay\nEmployee pay is confidential.\n",
     )
     .unwrap();
-    koios::cmd_index(&v).unwrap();
+    (lexical(), koios::cmd_index(&v)).1.unwrap();
     let conn = connect(&v).unwrap();
     (v, conn)
 }

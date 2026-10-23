@@ -226,11 +226,11 @@ pub fn retrieve_all(
     question: &str,
     limit: usize,
     groups: Option<&[String]>,
-) -> Vec<Ev> {
-    crate::embed::warn_if_missing(vault);
-    let semantic = crate::embed::search_vectors(vault, question, limit * 3);
+) -> Result<Vec<Ev>, String> {
+    crate::embed::require(vault)?;
+    let semantic = crate::embed::search_vectors(vault, question, limit * 3)?;
     if semantic.is_empty() {
-        return retrieve_channel(conn, question, limit, groups);
+        return Ok(retrieve_channel(conn, question, limit, groups));
     }
     let lexical = retrieve_channel(conn, question, limit, groups);
     let lex_list: Vec<(String, f64)> = lexical
@@ -246,7 +246,7 @@ pub fn retrieve_all(
         }
     }
     out.truncate(limit);
-    filter_chain(conn, out, groups)
+    Ok(filter_chain(conn, out, groups))
 }
 
 /// The retrieval filter chain, as one callable.
