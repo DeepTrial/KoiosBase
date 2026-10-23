@@ -524,6 +524,7 @@ pub fn collect_raw_docs(
                     raw: r.get::<_, String>(1).unwrap_or_default(),
                     breadcrumb: r.get::<_, String>(2).unwrap_or_default(),
                     doc_path: r.get::<_, String>(3).unwrap_or_default(),
+                    channels: None,
                 })
             })?;
             for b in m.flatten() {
@@ -732,7 +733,101 @@ pub fn init_vault(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Mutual exclusion for `koios index`, held for the duration of one run.
+///
+/// An exclusive create (`O_EXCL`) is the whole mechanism: it is atomic in the
+/// kernel, so two processes racing cannot both win. Stale locks from a crash
+/// are recovered by checking whether the PID recorded inside is still alive --
+/// without that, one interrupted run would wedge every future index forever.
+pub struct IndexLock {
+    path: PathBuf,
+}
+
+impl IndexLock {
+    fn file(vault: &Path) -> PathBuf {
+        vault.join(".index").join("index.lock")
+    }
+
+    pub fn acquire(vault: &Path) -> Result<Self, std::io::Error> {
+        let dir = vault.join(".index");
+        std::fs::create_dir_all(&dir)?;
+        let path = Self::file(vault);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(mut f) => {
+                use std::io::Write;
+                let _ = writeln!(f, "{}", std::process::id());
+                let _ = f.flush();
+                Ok(IndexLock { path })
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // Is the owner still alive? A lock file left by a killed
+                // process must not block indexing forever.
+                if Self::holder_is_dead(&path) {
+                    let _ = std::fs::remove_file(&path);
+                    return Self::acquire(vault);
+                }
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    format!("lock held: {}", path.display()),
+                ))
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// True when the recorded PID is absent, unparsable, or no longer running.
+    fn holder_is_dead(path: &Path) -> bool {
+        let text = match std::fs::read_to_string(path) {
+            Ok(t) => t,
+            Err(_) => return true,
+        };
+        let pid: i32 = match text.trim().parse() {
+            Ok(p) => p,
+            Err(_) => return true,
+        };
+        if pid <= 0 {
+            return true;
+        }
+        // Signal 0 is the existence probe: it succeeds iff the process lives.
+        #[cfg(unix)]
+        {
+            unsafe { libc::kill(pid, 0) != 0 }
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    }
+}
+
+impl Drop for IndexLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 pub fn cmd_index(path: &Path) -> rusqlite::Result<()> {
+    // §15 — one writer at a time.
+    //
+    // `koios index` rewrites the whole derived index inside a transaction, and
+    // nothing stopped a second process (a long-lived MCP server, a cron job,
+    // two terminals) from starting its own concurrently. The result was not
+    // obviously broken, which is worse: two successful-looking runs against
+    // overlapping state. Callers had to invent their own file lock.
+    let _guard = match IndexLock::acquire(path) {
+        Ok(g) => g,
+        Err(e) => {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "another `koios index` is already running on this vault ({e}). \
+                 Wait for it, or remove {} if it is stale.",
+                path.join(".index").join("index.lock").display()
+            )));
+        }
+    };
     let conn = connect(path)?;
     // Wrap the whole ingest in ONE transaction. Without it every INSERT is its
     // own implicit transaction and fsyncs, which dominated the runtime.
@@ -806,6 +901,7 @@ pub fn cmd_index(path: &Path) -> rusqlite::Result<()> {
                         raw: r.get::<_, String>(1).unwrap_or_default(),
                         breadcrumb: r.get::<_, String>(2).unwrap_or_default(),
                         doc_path: r.get::<_, String>(3).unwrap_or_default(),
+                        channels: None,
                     })
                 })?;
                 for e in m.flatten() {

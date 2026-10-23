@@ -41,6 +41,7 @@ fn blocks_of(conn: &rusqlite::Connection) -> Vec<koios::pipeline::Ev> {
             raw: r.get::<_, String>(1).unwrap_or_default(),
             breadcrumb: r.get::<_, String>(2).unwrap_or_default(),
             doc_path: r.get::<_, String>(3).unwrap_or_default(),
+            channels: None,
         })
     })
     .unwrap()

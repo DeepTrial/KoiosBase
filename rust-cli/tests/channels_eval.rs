@@ -268,7 +268,7 @@ fn missing_model_is_an_error_not_a_warning() {
     );
     // And it must fail through the public route, not just the helper.
     let conn = koios::connect(&v).unwrap();
-    let routed = koios::pipeline::retrieve_all(&v, &conn, "营收", 8, None);
+    let routed = koios::pipeline::retrieve_all(&v, &conn, "营收", 8, None, None);
     assert!(routed.is_err(), "search must not silently degrade to BM25");
 }
 

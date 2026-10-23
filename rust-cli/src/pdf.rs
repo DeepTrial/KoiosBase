@@ -245,6 +245,7 @@ pub fn page_to_blocks(doc_path: &str, page_no: usize, text: &str, start_ord: usi
             raw: body.clone(),
             breadcrumb: crumb,
             doc_path: doc_path.to_string(),
+            channels: None,
         })
     };
 

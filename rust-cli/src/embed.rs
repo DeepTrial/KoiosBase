@@ -37,6 +37,11 @@ use tokenizers::Tokenizer;
 /// Deliberately a real directory rather than a cached download: §12 promises a
 /// zero-network binary, so the operator puts the files there once and `koios`
 /// never reaches out.
+/// Where the ONNX weights and tokenizer may live.
+///
+/// Checked in order: `KOIOS_MODELS_ROOT` if set, else the vault's own
+/// `models/`. A single model is ~600 MB, so requiring a copy per vault made
+/// multi-project setups duplicate it; the shared root is the escape hatch.
 const MODEL_DIR: &str = "models";
 const MODEL_FILE: &str = "qwen3-embedding-0.6b-int8-tei.onnx";
 const TOKENIZER_FILE: &str = "tokenizer.json";
@@ -44,13 +49,36 @@ const TOKENIZER_FILE: &str = "tokenizer.json";
 /// Native output width of Qwen3-Embedding-0.6B.
 pub const DIM: usize = 1024;
 
-/// The instruction the model card prescribes for retrieval queries.
+/// Instruction prefixes, chosen per query language.
 ///
-/// Applied to queries only. Documents are embedded bare (`unless the config
-/// says otherwise` — sentence-transformers' own config sets an empty document
-/// prompt), so the asymmetry is intentional.
-const QUERY_INSTRUCTION: &str =
+/// Measured on zero-word-overlap queries (see §10.2): the English prompt is
+/// best on 营业额 (0.544 vs 0.469 bare) and 雇员 (0.600 vs 0.541), the Chinese
+/// one on 营业额 again (0.564) and is the only variant that beats bare on 发动机
+/// (0.445 vs 0.375 with English). Neither wins outright, so the honest answer
+/// is to match the query's language rather than hardcode one -- and all three
+/// put the correct document first, so this is tuning, not a correctness fix.
+///
+/// Applied to queries only; documents stay bare, matching
+/// sentence-transformers' own config in the upstream repo.
+const QUERY_INSTRUCTION_EN: &str =
     "Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery:";
+const QUERY_INSTRUCTION_ZH: &str = "指令：给定一个问题，检索能够回答该问题的相关段落\n查询：";
+
+/// Pick the instruction matching the query's dominant script.
+fn query_instruction(query: &str) -> &'static str {
+    let cjk = query.chars().filter(|c| is_cjk_query(*c)).count();
+    let latin = query.chars().filter(|c| c.is_ascii_alphabetic()).count();
+    if cjk > latin {
+        QUERY_INSTRUCTION_ZH
+    } else {
+        QUERY_INSTRUCTION_EN
+    }
+}
+
+/// CJK ranges, kept local so `embed` does not depend on `retrieval`.
+fn is_cjk_query(c: char) -> bool {
+    ('\u{4e00}'..='\u{9fff}').contains(&c) || ('\u{3400}'..='\u{4dbf}').contains(&c)
+}
 
 /// Long documents are cut to this many characters before encoding.
 ///
@@ -92,12 +120,31 @@ pub fn allow_lexical() -> bool {
     ALLOW_LEXICAL.with(|c| c.get())
 }
 
+/// Model files: `KOIOS_MODELS_ROOT` if set, else the vault's own `models/`.
+///
+/// The env var is what makes one copy serve every vault. A model is ~600 MB,
+/// so per-vault copies were not viable with more than one project.
+fn models_root(vault: &Path) -> PathBuf {
+    if let Ok(root) = std::env::var("KOIOS_MODELS_ROOT") {
+        let p = PathBuf::from(root);
+        if p.is_dir() {
+            return p;
+        }
+        eprintln!(
+            "warning: KOIOS_MODELS_ROOT is set to {} but that is not a directory; \
+             falling back to <vault>/models",
+            p.display()
+        );
+    }
+    vault.join(MODEL_DIR)
+}
+
 pub fn model_path(vault: &Path) -> PathBuf {
-    vault.join(MODEL_DIR).join(MODEL_FILE)
+    models_root(vault).join(MODEL_FILE)
 }
 
 pub fn tokenizer_path(vault: &Path) -> PathBuf {
-    vault.join(MODEL_DIR).join(TOKENIZER_FILE)
+    models_root(vault).join(TOKENIZER_FILE)
 }
 
 /// True when the vault has both files §5.2.1 requires.
@@ -179,7 +226,7 @@ pub fn encode(vault: &Path, text: &str, is_query: bool) -> Result<Vec<f32>, Stri
     let _ = &e.env; // keep the environment alive for the session's lifetime
     let text: String = text.chars().take(MAX_CHARS).collect();
     let body = if is_query {
-        format!("{QUERY_INSTRUCTION}{text}")
+        format!("{}{text}", query_instruction(&text))
     } else {
         text
     };

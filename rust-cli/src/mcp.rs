@@ -103,6 +103,8 @@ fn tool_defs() -> Value {
             "vault": {"type": "string", "description": "vault directory"},
             "question": {"type": "string"},
             "top": {"type": "integer", "default": 8},
+            "layer": {"type": "string", "enum": ["raw", "derived"],
+                      "description": "restrict to a corpus layer; \"raw\" omits compiler-derived pages"},
             "groups": {"type": "array", "items": {"type": "string"},
                        "description": "principal groups for ACL (§9.2)"}
           },
@@ -240,9 +242,22 @@ pub fn tool_search(args: &Value) -> Result<Value, String> {
     // "revenue" returned the right block from one shell and an empty list from
     // the other. Retrieval is not per-exit policy — one route (§6.1), one
     // answer, whichever door you came in through.
-    let mut blocks =
-        crate::pipeline::retrieve_all(&vault, &conn, &question, top, groups_of(args).as_deref())
-            .map_err(|e| e.to_string())?;
+    // #7 — let the caller name the corpus layer it wants instead of every
+    // client discarding `layer=wiki` results itself.
+    let layer = args
+        .get("layer")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let mut blocks = crate::pipeline::retrieve_all(
+        &vault,
+        &conn,
+        &question,
+        top,
+        groups_of(args).as_deref(),
+        layer.as_deref(),
+    )
+    .map_err(|e| e.to_string())?;
+    let returned = blocks.len();
     blocks.truncate(top);
     // Python emits `d["score"]` inside its row loop, so `score` is the LAST key
     // of each emitted dict. Rank here is position in the fused result.
@@ -252,19 +267,43 @@ pub fn tool_search(args: &Value) -> Result<Value, String> {
         .map(|(r, b)| (b.id.clone(), -(r as f64)))
         .collect();
     let mut out = blocks_to_json(&conn, &blocks);
-    // attach score in retrieval order — Python does this inside the row loop,
-    // so `score` stays the LAST key even though the block list is re-ordered
-    // by disposition below it.
+    // #6 — attach what a downstream client cannot otherwise recover: which
+    // channel(s) each block came from and how strongly, and whether the result
+    // window was cut. Without this a caller can only over-fetch and re-rank
+    // blind, since position conflates all three channels.
+    //
+    // All of this is inserted BEFORE `score`, which is written last so the
+    // emitted dict keeps its key order against Python's (`score` is the last
+    // key there too) -- that ordering is asserted in tests/search_stdout.rs.
     for item in out.iter_mut() {
         if let Value::Object(m) = item {
-            if let Some(bid) = m.get("id").and_then(|v| v.as_str()) {
-                if let Some((_, score)) = rows.iter().find(|(b, _)| b == bid) {
+            if let Some(bid) = m.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()) {
+                if let Some(b) = blocks.iter().find(|x| x.id == bid) {
+                    if let Some(cs) = &b.channels {
+                        m.insert("matched_by".to_string(), json!(cs.matched_by));
+                        m.insert(
+                            "scores".to_string(),
+                            json!({
+                                "lexical": cs.lexical,
+                                "vector": cs.vector,
+                                "graph": cs.graph,
+                            }),
+                        );
+                    }
+                }
+                // Written last so the emitted dict keeps its key order against
+                // Python's, whose own `score` is also final.
+                if let Some((_, score)) = rows.iter().find(|(b, _)| *b == bid) {
                     m.insert("score".to_string(), json!(score));
                 }
             }
         }
     }
-    Ok(json!({"blocks": out}))
+    Ok(json!({
+        "blocks": out,
+        "returned": returned,
+        "truncated": returned > blocks.len(),
+    }))
 }
 
 fn tool_ask(args: &Value) -> Result<Value, String> {
@@ -279,7 +318,6 @@ fn tool_ask(args: &Value) -> Result<Value, String> {
         let m = cfg.model.clone().unwrap_or_default();
         let f =
             move |q: &str, ctx: &str| -> Result<String, String> { crate::llm::chat(&m, q, ctx) };
-        let top = cfg.retrieval.as_ref().and_then(|r| r.top).unwrap_or(top);
         crate::pipeline::full_query_with(
             &conn,
             &question,
@@ -354,8 +392,15 @@ fn tool_write_answer(args: &Value) -> Result<Value, String> {
     // Same reasoning as tool_search: evidence for a written-back answer must
     // come from the same route the rest of the system reads through, or a cited
     // block is missing here for no reason the caller can see.
-    let ev = crate::pipeline::retrieve_all(&vault, &conn, &question, 5, groups_of(args).as_deref())
-        .map_err(|e| e.to_string())?;
+    let ev = crate::pipeline::retrieve_all(
+        &vault,
+        &conn,
+        &question,
+        5,
+        groups_of(args).as_deref(),
+        Some("raw"),
+    )
+    .map_err(|e| e.to_string())?;
     let path = crate::compile::write_answer_page(
         &vault,
         &question,

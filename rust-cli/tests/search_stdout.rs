@@ -63,8 +63,8 @@ fn search_stdout_uses_the_python_three_line_form() {
     let lines: Vec<&str> = stdout.lines().collect();
     assert!(!lines.is_empty(), "search printed nothing");
     // The header line must be `[i] id` (old Rust printed `[doc_path] id`), and
-    // every hit is three lines. Derived sources/ pages rank first because they
-    // summarize the raw doc — the same order Python produces.
+    // every hit is three lines. Source blocks precede the derived sources/
+    // pages that restate them (§4.3 crowding).
     assert_eq!(lines.len() % 3, 0, "stdout is not triples:\n{stdout}");
     for (n, triple) in lines.chunks(3).enumerate() {
         assert!(
@@ -87,9 +87,13 @@ fn search_stdout_uses_the_python_three_line_form() {
         );
     }
     // The block every caller needs must be present in the three-line form.
+    // It is [0] and not [1]: derived sources/ pages used to outrank the
+    // document they merely restate, which is the §4.3 crowding that made a
+    // compiled vault answer worse than an uncompiled one. Source blocks now
+    // rank ahead of their own derived restatements.
     assert!(
-        stdout.contains("[1] r.md#财务分析/负债分析/1\n    Report > 财务分析 > 负债分析\n"),
-        "missing the three-line form for the raw block:\n{stdout}"
+        stdout.contains("[0] r.md#财务分析/负债分析/1\n    Report > 财务分析 > 负债分析\n"),
+        "the raw block must rank above its derived restatement:\n{stdout}"
     );
     assert!(
         !lines.iter().any(|l| l.contains("] r.md] ")),

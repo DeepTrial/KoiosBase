@@ -113,6 +113,42 @@ pub struct Ev {
     pub raw: String,
     pub breadcrumb: String,
     pub doc_path: String,
+    /// Which channels returned this block, and its standing in each.
+    ///
+    /// Absent on `get_block` results and populated by the fused routes. A
+    /// caller filtering or re-ranking downstream previously had only position
+    /// to go on, so "was this found lexically, semantically, or both" was not
+    /// answerable -- they over-fetched and re-ranked blindly.
+    pub channels: Option<ChannelScores>,
+}
+
+/// Per-channel standing for one retrieved block.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ChannelScores {
+    /// 1/(k+rank) contribution from BM25+FTS.
+    pub lexical: f64,
+    /// Same from the embedding channel, 0.0 when unavailable or absent.
+    pub vector: f64,
+    /// Same from the tree/graph route.
+    pub graph: f64,
+    /// Convenience for the common "why did this come back" question.
+    pub matched_by: Vec<String>,
+}
+
+impl ChannelScores {
+    fn label(&self) -> Vec<String> {
+        let mut v = Vec::new();
+        if self.lexical > 0.0 {
+            v.push("lexical".to_string());
+        }
+        if self.vector > 0.0 {
+            v.push("vector".to_string());
+        }
+        if self.graph > 0.0 {
+            v.push("graph".to_string());
+        }
+        v
+    }
 }
 
 pub fn get_block(conn: &Connection, id: &str) -> Option<Ev> {
@@ -125,6 +161,7 @@ pub fn get_block(conn: &Connection, id: &str) -> Option<Ev> {
                 raw: r.get::<_, String>(1).unwrap_or_default(),
                 breadcrumb: r.get::<_, String>(2).unwrap_or_default(),
                 doc_path: r.get::<_, String>(3).unwrap_or_default(),
+                channels: None,
             })
         },
     )
@@ -226,27 +263,153 @@ pub fn retrieve_all(
     question: &str,
     limit: usize,
     groups: Option<&[String]>,
+    layer: Option<&str>,
 ) -> Result<Vec<Ev>, String> {
     crate::embed::require(vault)?;
     let semantic = crate::embed::search_vectors(vault, question, limit * 3)?;
-    if semantic.is_empty() {
-        return Ok(retrieve_channel(conn, question, limit, groups));
-    }
     let lexical = retrieve_channel(conn, question, limit, groups);
+    if semantic.is_empty() {
+        let mut out = label_lexical(lexical, limit);
+        out = prefer_source_layer(conn, out);
+        return Ok(apply_layer(conn, out, layer, limit, groups));
+    }
     let lex_list: Vec<(String, f64)> = lexical
         .iter()
         .enumerate()
         .map(|(r, b)| (b.id.clone(), -(r as f64)))
         .collect();
-    let fused = rrf_fuse(&[lex_list, semantic], &[BETA, ALPHA], RRF_K);
+    let fused = rrf_fuse(&[lex_list, semantic.clone()], &[BETA, ALPHA], RRF_K);
+
+    // Per-channel standing, so a caller can see WHY each block came back
+    // instead of inferring it from position (§11).
     let mut out: Vec<Ev> = Vec::new();
-    for (id, _) in fused.iter() {
-        if let Some(b) = get_block(conn, id) {
+    for (id, total) in fused.iter() {
+        let mut b = match get_block(conn, id) {
+            Some(b) => b,
+            None => continue,
+        };
+        let lex = lexical.iter().position(|x| x.id == *id).map(contribution);
+        let vec = semantic.iter().position(|(x, _)| x == id).map(contribution);
+        let graph = if hybrid_would_rank(conn, question, id, limit) {
+            contribution(0)
+        } else {
+            0.0
+        };
+        let mut cs = ChannelScores {
+            lexical: lex.unwrap_or(0.0),
+            vector: vec.unwrap_or(0.0),
+            graph,
+            ..Default::default()
+        };
+        let _ = total;
+        cs.matched_by = cs.label();
+        if cs.matched_by.is_empty() {
+            cs.matched_by.push("rrf".to_string());
+        }
+        b.channels = Some(cs);
+        out.push(b);
+    }
+    out.truncate(limit);
+    let mut out = prefer_source_layer(conn, out);
+    out = apply_layer(conn, out, layer, limit, groups);
+    Ok(out)
+}
+
+/// Simplest inverse of RRF's own scoring: 1/(k+rank).
+fn contribution(rank: usize) -> f64 {
+    1.0 / (RRF_K + rank as f64 + 1.0)
+}
+
+/// Mark the blocks the lexical route alone produced.
+fn label_lexical(lexical: Vec<Ev>, limit: usize) -> Vec<Ev> {
+    let mut out = Vec::new();
+    for (r, mut b) in lexical.into_iter().enumerate() {
+        let mut cs = ChannelScores {
+            lexical: contribution(r),
+            ..Default::default()
+        };
+        cs.matched_by = cs.label();
+        if cs.matched_by.is_empty() {
+            cs.matched_by.push("lexical".to_string());
+        }
+        b.channels = Some(cs);
+        out.push(b);
+    }
+    out.truncate(limit);
+    out
+}
+
+/// Was this id in the tree/PPR route's own top-k?
+fn hybrid_would_rank(conn: &Connection, question: &str, id: &str, limit: usize) -> bool {
+    tree_search(conn, question, 3)
+        .unwrap_or_default()
+        .iter()
+        .take(limit)
+        .any(|t| t == id)
+}
+
+/// #8 — stop derived pages from burying the documents they came from.
+///
+/// §4.3 index generated pages (`wiki/sources/...`) in their own right, which is
+/// correct for navigation but poisoned top-k: measured, after `compile` seven
+/// of eight slots were `sources/` restatements of text already present in
+/// `raw/`, and the block actually holding the fact fell out of the window.
+/// Derived blocks are demoted one band below same-relevance source blocks
+/// rather than excluded, so navigation can still reach them.
+fn prefer_source_layer(conn: &Connection, blocks: Vec<Ev>) -> Vec<Ev> {
+    if blocks.is_empty() {
+        return blocks;
+    }
+    let mut out: Vec<Ev> = Vec::with_capacity(blocks.len());
+    let mut derived: Vec<Ev> = Vec::new();
+    for b in blocks {
+        let is_derived = is_derived_doc(conn, &b.doc_path);
+        if is_derived {
+            derived.push(b);
+        } else {
             out.push(b);
         }
     }
+    out.extend(derived);
+    out
+}
+
+fn is_derived_doc(conn: &Connection, doc_path: &str) -> bool {
+    conn.query_row(
+        "SELECT COALESCE(layer,'raw') FROM blocks WHERE doc_path=? LIMIT 1",
+        [doc_path],
+        |r| r.get::<_, String>(0),
+    )
+    .map(|l| l != "raw")
+    .unwrap_or(false)
+}
+
+/// #7 — restrict results to one corpus layer, e.g. `raw` only.
+///
+/// By default the index carries both hand-written documents and everything the
+/// compiler derives from them, so a plain query returns the same sentence
+/// twice. Callers were reduced to discarding `layer=wiki` themselves; now the
+/// request says which it wants.
+fn apply_layer(
+    conn: &Connection,
+    blocks: Vec<Ev>,
+    layer: Option<&str>,
+    limit: usize,
+    groups: Option<&[String]>,
+) -> Vec<Ev> {
+    let mut out = match layer {
+        Some("raw") => blocks
+            .into_iter()
+            .filter(|b| !is_derived_doc(conn, &b.doc_path))
+            .collect(),
+        Some("derived") => blocks
+            .into_iter()
+            .filter(|b| is_derived_doc(conn, &b.doc_path))
+            .collect(),
+        _ => blocks,
+    };
     out.truncate(limit);
-    Ok(filter_chain(conn, out, groups))
+    filter_chain(conn, out, groups)
 }
 
 /// The retrieval filter chain, as one callable.

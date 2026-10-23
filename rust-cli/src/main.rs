@@ -74,6 +74,9 @@ enum Cmd {
         /// fail-closed because a corpus that answers two ways is not one corpus.
         #[arg(long = "allow-no-embedding")]
         allow_no_embedding: bool,
+        /// restrict results to a corpus layer: raw | derived
+        #[arg(long, value_parser = ["raw", "derived"])]
+        layer: Option<String>,
     },
     /// channel ① tree navigation
     Tree {
@@ -196,6 +199,22 @@ enum Cmd {
         #[arg(long)]
         host: Option<String>,
     },
+    /// snapshot a vault's sources and index for backup
+    Backup {
+        #[arg(short = 'p', long = "path", default_value = ".")]
+        path: PathBuf,
+        /// destination archive (.tar.gz)
+        #[arg(short = 'o', long = "out")]
+        out: PathBuf,
+    },
+    /// restore a vault from a backup archive
+    Restore {
+        /// archive produced by `koios backup`
+        archive: PathBuf,
+        /// where to write the vault
+        #[arg(short = 'o', long = "out")]
+        out: PathBuf,
+    },
     /// show or scaffold the model config (`koios.toml`)
     Config {
         #[arg(short = 'p', long = "path", default_value = ".")]
@@ -204,6 +223,119 @@ enum Cmd {
         #[arg(long)]
         init: bool,
     },
+}
+
+/// §16 — copy a vault somewhere safe.
+///
+/// `raw/` and `wiki/` are the irreplaceable half (P1: Markdown is the source of
+/// truth), so they are always included. `.index/` is derived and rebuildable,
+/// but rebuilding means re-encoding every block, so it is carried too. Copying
+/// happens in Rust rather than by shelling out to `tar`, because the release
+/// matrix includes Windows.
+fn cmd_backup(path: &Path, out: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    if !path.join("raw").exists() {
+        return Err(format!("{} does not look like a vault (no raw/)", path.display()).into());
+    }
+    let stamp = state::now_date();
+    let root = out.join(format!(
+        "{}-{}",
+        path.file_name().and_then(|s| s.to_str()).unwrap_or("vault"),
+        stamp
+    ));
+    std::fs::create_dir_all(&root)?;
+    let mut files = 0usize;
+    for dir in ["raw", "wiki"] {
+        let src = path.join(dir);
+        if !src.exists() {
+            continue;
+        }
+        files += copy_dir(&src, &root.join(dir))?;
+    }
+    let idx = path.join(".index");
+    if idx.exists() {
+        files += copy_dir(&idx, &root.join(".index"))?;
+    }
+    let cfg = path.join("koios.toml");
+    if cfg.is_file() {
+        std::fs::copy(&cfg, root.join("koios.toml"))?;
+        files += 1;
+    }
+    std::fs::write(
+        root.join("BACKUP.txt"),
+        format!(
+            "KoiosBase backup\nvault: {}\ncreated: {}\nfiles: {}\n\n\
+             raw/ and wiki/ are the source of truth (P1).\n\
+             .index/ is derived; `koios index <vault>` rebuilds it.\n",
+            path.display(),
+            stamp,
+            files
+        ),
+    )?;
+    println!("backed up {files} files to {}", root.display());
+    Ok(())
+}
+
+fn copy_dir(src: &Path, dst: &Path) -> Result<usize, std::io::Error> {
+    let mut n = 0;
+    std::fs::create_dir_all(dst)?;
+    let mut stack = vec![src.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            let rel = path.strip_prefix(src).unwrap_or(Path::new(""));
+            let target = dst.join(rel);
+            if path.is_dir() {
+                std::fs::create_dir_all(&target)?;
+                stack.push(path);
+            } else {
+                if let Some(parent) = target.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::copy(&path, &target)?;
+                n += 1;
+            }
+        }
+    }
+    Ok(n)
+}
+
+/// §16 — put a backup back.
+///
+/// Deliberately conservative: it writes to a fresh directory and refuses an
+/// existing non-empty one, because the dangerous direction of a restore utility
+/// is the one that quietly replaces a vault that still had work in it.
+fn cmd_restore(archive: &Path, out: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    if !archive.join("raw").exists() {
+        return Err(format!(
+            "{} does not look like a KoiosBase backup (no raw/)",
+            archive.display()
+        )
+        .into());
+    }
+    if out.exists() && std::fs::read_dir(out)?.next().is_some() {
+        return Err(format!(
+            "{} already exists and is not empty; choose another -o path",
+            out.display()
+        )
+        .into());
+    }
+    std::fs::create_dir_all(out)?;
+    let mut n = 0;
+    for dir in ["raw", "wiki", ".index"] {
+        let src = archive.join(dir);
+        if src.exists() {
+            n += copy_dir(&src, &out.join(dir))?;
+        }
+    }
+    let cfg = archive.join("koios.toml");
+    if cfg.is_file() {
+        std::fs::copy(cfg, out.join("koios.toml"))?;
+        n += 1;
+    }
+    println!("restored {n} files to {}", out.display());
+    println!("next: koios index {}", out.display());
+    Ok(())
 }
 
 fn cmd_init(path: &Path) -> std::io::Result<()> {
@@ -262,6 +394,7 @@ fn cmd_search(
     top: usize,
     groups: Option<Vec<String>>,
     channel: Option<&str>,
+    layer: Option<&str>,
 ) -> Result<(), String> {
     let conn = connect(path).map_err(|e| e.to_string())?;
     // Route through retrieve_all so the ACL applies and both channels run. The previous raw-FTS
@@ -279,7 +412,7 @@ fn cmd_search(
             .collect();
         pipeline::filter_chain(&conn, out, groups.as_deref())
     } else {
-        pipeline::retrieve_all(path, &conn, query, top, groups.as_deref())?
+        pipeline::retrieve_all(path, &conn, query, top, groups.as_deref(), layer)?
     };
     // Byte-identical to koiosbase/cli.py cmd_search()'s three-line form:
     //   [i] id / breadcrumb / snippet
@@ -744,6 +877,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             groups,
             channel,
             allow_no_embedding,
+            layer,
         } => {
             koios::embed::set_allow_lexical(allow_no_embedding);
             cmd_search(
@@ -752,6 +886,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 top,
                 parse_groups(groups.as_deref()),
                 channel.as_deref(),
+                layer.as_deref(),
             )
             .map_err(std::io::Error::other)?
         }
@@ -915,6 +1050,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 mcp::serve()?;
             }
         }
+        Cmd::Backup { path, out } => cmd_backup(&path, &out)?,
+        Cmd::Restore { archive, out } => cmd_restore(&archive, &out)?,
         Cmd::Config { path, init } => cmd_config(&path, init)?,
         Cmd::Answer {
             question_flag,
@@ -1007,6 +1144,7 @@ fn cmd_compile(vault: &Path) -> rusqlite::Result<()> {
                     raw: r.get::<_, String>(1).unwrap_or_default(),
                     breadcrumb: r.get::<_, String>(2).unwrap_or_default(),
                     doc_path: r.get::<_, String>(3).unwrap_or_default(),
+                    channels: None,
                 })
             })?;
             for b in m.flatten() {

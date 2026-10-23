@@ -444,6 +444,37 @@ documents，外加 `sources/<doc>` 派生页与其 blocks。
 > "本次"结果里仍然列着 x.md —— 前后指纹比对看不出任何缺失。文件系统是这里唯一的
 > 权威；派生状态的内存差分无法区分"仍在"与"刚从旧副本重建过"。
 
+**查询侧接口（§11）**：`koios_search` 返回的每个块带 `matched_by`（lexical /
+vector / graph 的子集）与 `scores`（各通道 RRF 贡献值），并附 `returned` /
+`truncated` 说明结果窗口是否被截断。此前调用方只能依位置推断，因而只能"过取 +
+后过滤 + 自行归一化"。`score` 保持为最后一个键，与 Python 的键序一致。
+
+**分层检索**：`--layer raw | derived`（MCP 同名参数）限定语料层。索引同时收录
+手写文档与编译派生页，默认会把同一句话返回两遍；调用方此前只能自行丢弃
+`layer=wiki`。
+
+**派生页降权**：§4.3 生成的 `wiki/sources/` 页面各自入库，用于导航是对的，但会
+挤占 top-k——实测 compile 后 top-8 中 7 条是 `sources/` 的复述，真正承载事实的
+raw 块被挤出窗口（对应 hit@5 0.994 → 0.950）。现在同源块排在其派生复述之前，
+派生块仍然可达，只是不再优先。
+
+**查询 instruction 按语言选择**：中文查询用中文指令，其余用英文。实测三者都能把
+正确文档排到首位，但互有胜负（营业额 EN 0.544 / ZH 0.564 / 无 0.469；雇员
+EN 0.600 / ZH 0.599 / 无 0.541；发动机 ZH 0.445 / 无 0.506 / EN 0.375），没有
+单一胜者，因此按查询文字的脚本选择，而不是写死一种。
+
+**模型共享目录**：模型依次在 `$KOIOS_MODELS_ROOT` 与 `<vault>/models/` 中查找。
+单份权重约 600 MB，此前每个 vault 都要一份副本。
+
+**索引锁**：`koios index` 以 `.index/index.lock` 互斥（内核级 `O_EXCL`）。持有者
+PID 若已不存在则自动回收，避免一次中断把 vault 永久锁死。长驻 MCP 与 index 并发
+此前无任何保证，只能由宿主自行加锁。
+
+**备份与恢复**：`koios backup -p <vault> -o <dir>` 与
+`koios restore <archive> -o <path>`。`raw/` + `wiki/` 是源事实（P1），
+`.index/` 一并列走以免整库重编码。`restore` 拒绝写入非空目录——恢复工具最危险的
+方向是悄悄覆盖尚有内容的 vault。
+
 **链接图的边定义**（PPR 的基础，全部从 Markdown 推导）：
 
 | 边类型 | 来源 | 权重 |
@@ -818,6 +849,16 @@ embedding 模型必跑。
 >         libc.so.6     => /lib/x86_64-linux-gnu/libc.so.6
 >         /lib64/ld-linux-x86-64.so.2
 > ```
+
+
+**ONNX Runtime 的链接方式（二选一，编译期 feature）**：
+
+| feature | 行为 | 适用 |
+|---|---|---|
+| `ort-download`（默认） | 打包预编译运行时 | 方便，但预编译产物依赖较新的 glibc；实测 glibc 2.35 的机器无法链接 |
+| `ort-system` | 经 pkg-config 链接系统已有的 `libonnxruntime` | glibc 较旧的环境；运行时依赖由运维提供 |
+
+构建：`cargo build --release --no-default-features --features ort-system`。
 
 **常驻 embedding 后的资源账（2026-10-22 实测修订）**：§5.2.1 已实装，
 Qwen3-Embedding-0.6B int8 常驻后，运行足迹重算如下：
