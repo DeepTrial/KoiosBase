@@ -357,37 +357,70 @@ pub fn personalized_pagerank(
 }
 
 /// Channel ② + ③: BM25 fused with the PPR graph bonus.
+/// Channel ②+③, reusing a cached graph when the corpus has not changed.
+///
+/// The MCP server is one process answering many queries over the same vault,
+/// and rebuilding the graph means scanning `links` and re-deriving page
+/// confidence on every single request. `hybrid_search` cannot cache because it
+/// only has a `&Connection` and no vault identity to key on -- so this variant
+/// takes the path and delegates to the cache.
+pub fn hybrid_search_cached(
+    vault: &std::path::Path,
+    conn: &Connection,
+    query: &str,
+    limit: usize,
+) -> rusqlite::Result<Vec<(String, f64)>> {
+    let adj = crate::cache::graph(vault, conn).map_err(rusqlite::Error::InvalidParameterName)?;
+    Ok(hybrid_with_graph(conn, query, limit, &adj))
+}
+
+/// The graph half of the fusion, given an adjacency that is already built.
+pub fn hybrid_with_graph(
+    conn: &Connection,
+    query: &str,
+    limit: usize,
+    adj: &HashMap<String, Vec<(String, f64)>>,
+) -> Vec<(String, f64)> {
+    let mut fused = rrf_fuse(
+        &[fts_search(conn, query, limit * 3).unwrap_or_default()],
+        &[BETA],
+        RRF_K,
+    );
+    if adj.is_empty() {
+        return fused;
+    }
+    let seeds: Vec<String> = fused.iter().take(50).map(|(id, _)| id.clone()).collect();
+    let pr = personalized_pagerank(&seeds, adj, 0.85, 20);
+    if !pr.is_empty() {
+        fused = fused
+            .into_iter()
+            .map(|(id, s)| {
+                let bonus = GAMMA * pr.get(&id).cloned().unwrap_or(0.0) * 10.0;
+                (id, s + bonus)
+            })
+            .collect();
+        fused.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    }
+    fused.truncate(limit);
+    fused
+}
+
 pub fn hybrid_search(
     conn: &Connection,
     query: &str,
     limit: usize,
     use_graph: bool,
 ) -> rusqlite::Result<Vec<(String, f64)>> {
-    let mut fused = rrf_fuse(&[fts_search(conn, query, limit * 3)?], &[BETA], RRF_K);
-    if use_graph {
-        // Build the authority map by DEFAULT, exactly like Python's
-        // `if page_confidence is None: build_page_confidence(conn)`. Leaving it
-        // unweighted is what made §6.6 dead: a draft page's citations scored
-        // the same as a human-verified one's.
-        let pc = build_page_confidence(conn);
-        let adj = load_graph_weighted(conn, &pc)?;
-        if !adj.is_empty() {
-            let seeds: Vec<String> = fused.iter().take(50).map(|(id, _)| id.clone()).collect();
-            let pr = personalized_pagerank(&seeds, &adj, 0.85, 20);
-            if !pr.is_empty() {
-                fused = fused
-                    .into_iter()
-                    .map(|(id, s)| {
-                        let bonus = GAMMA * pr.get(&id).cloned().unwrap_or(0.0) * 10.0;
-                        (id, s + bonus)
-                    })
-                    .collect();
-                fused.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-            }
-        }
+    if !use_graph {
+        return Ok(hybrid_with_graph(conn, query, limit, &HashMap::new()));
     }
-    fused.truncate(limit);
-    Ok(fused)
+    // Build the authority map by DEFAULT, exactly like Python's
+    // `if page_confidence is None: build_page_confidence(conn)`. Leaving it
+    // unweighted is what made §6.6 dead: a draft page's citations scored
+    // the same as a human-verified one's.
+    let pc = build_page_confidence(conn);
+    let adj = load_graph_weighted(conn, &pc)?;
+    Ok(hybrid_with_graph(conn, query, limit, &adj))
 }
 
 /// Channel ①: pick sections whose navigational summary matches, return their blocks.

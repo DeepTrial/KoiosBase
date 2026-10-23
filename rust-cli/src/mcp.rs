@@ -88,6 +88,10 @@ pub fn tool_status(args: &Value) -> Result<Value, String> {
         "pooling": s.pooling,
         "index_model_id": s.index_model_id,
         "index_dim": s.index_dim,
+        "index_recipe": s.index_recipe,
+        "indexed_blocks": s.indexed_blocks,
+        "embeddable_blocks": s.embeddable_blocks,
+        "pending_blocks": s.pending_blocks,
         "index_mismatch": s.index_mismatch,
         "error": s.error,
     }))

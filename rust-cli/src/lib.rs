@@ -9,6 +9,7 @@
 //! compile the same logic and cannot drift.
 
 pub mod acl;
+pub mod cache;
 pub mod compile;
 pub mod embed;
 pub mod ingest;

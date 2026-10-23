@@ -11,7 +11,7 @@ use rusqlite::{params, Connection};
 use std::collections::HashMap;
 
 use crate::retrieval::{
-    full_corpus, hybrid_search, is_cjk, query_terms, rrf_fuse, tree_search, ALPHA, BETA, RRF_K,
+    full_corpus, hybrid_search, is_cjk, query_terms, rrf_fuse, tree_search, RRF_K,
 };
 
 pub const REFUSAL: &str = "资料中未涉及";
@@ -168,11 +168,62 @@ pub fn get_block(conn: &Connection, id: &str) -> Option<Ev> {
     .ok()
 }
 
-/// Weight of channel ① relative to ②+③ in the default fusion.
+/// Channel weights for the RRF fusion (§6.3).
 ///
-/// Kept slightly below 1.0: the tree channel returns a WHOLE SECTION's blocks,
-/// so it is coarse — it earns a seat in the ranking, not the casting vote.
-const TREE_WEIGHT: f64 = 0.8;
+/// Fixed values are the right default, but the optimal split depends on the
+/// corpus and its language, and there was no way to test that without
+/// recompiling. Read once from the environment so an evaluation can sweep
+/// them; unset means the defaults below.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Weights {
+    /// Vector channel (②'s semantic half).
+    pub alpha: f64,
+    /// BM25 (②'s lexical half).
+    pub beta: f64,
+    /// Tree channel ①.
+    pub tree: f64,
+}
+
+impl Default for Weights {
+    fn default() -> Self {
+        Weights {
+            alpha: 1.0,
+            beta: 1.0,
+            tree: 0.8,
+        }
+    }
+}
+
+impl Weights {
+    /// Parse `KOIOS_WEIGHTS="alpha,beta,tree"`, ignoring malformed values.
+    ///
+    /// Ignoring rather than erroring: a bad value should not make retrieval
+    /// unavailable, it should fall back to the defaults and say so.
+    pub fn from_env() -> Self {
+        let Ok(raw) = std::env::var("KOIOS_WEIGHTS") else {
+            return Self::default();
+        };
+        let parts: Vec<&str> = raw.split(',').map(|s| s.trim()).collect();
+        if parts.len() != 3 {
+            eprintln!("warning: KOIOS_WEIGHTS needs 3 comma-separated numbers; using defaults");
+            return Self::default();
+        }
+        let nums: Option<Vec<f64>> = parts.iter().map(|p| p.parse::<f64>().ok()).collect();
+        match nums {
+            Some(v) if v.iter().all(|x| x.is_finite() && *x >= 0.0) => Weights {
+                alpha: v[0],
+                beta: v[1],
+                tree: v[2],
+            },
+            _ => {
+                eprintln!(
+                    "warning: KOIOS_WEIGHTS has a non-numeric or negative value; using defaults"
+                );
+                Self::default()
+            }
+        }
+    }
+}
 
 /// Fuse channel ① (unscored ids) with ②+③ (scored) through RRF.
 ///
@@ -185,7 +236,8 @@ fn koios_fuse_tree(tree_ids: &[String], hybrid: &[(String, f64)]) -> Vec<String>
         .enumerate()
         .map(|(r, id)| (id.clone(), 1.0 / (RRF_K + r as f64 + 1.0)))
         .collect();
-    rrf_fuse(&[tree_list, hybrid.to_vec()], &[TREE_WEIGHT, 1.0], RRF_K)
+    let w = Weights::from_env();
+    rrf_fuse(&[tree_list, hybrid.to_vec()], &[w.tree, w.beta], RRF_K)
         .into_iter()
         .map(|(id, _)| id)
         .collect()
@@ -213,6 +265,39 @@ fn koios_fuse_tree(tree_ids: &[String], hybrid: &[(String, f64)]) -> Vec<String>
 /// then it never met the other channels in the same ranking. tree_search returns
 /// ids without scores, so it enters the RRF as a list too — RRF is rank-based,
 /// which is exactly why it takes uneven inputs without normalisation.
+/// Same as `retrieve_channel`, but reusing the cached link graph.
+///
+/// The MCP server answers many queries against one vault from a single
+/// process; without this each request rescans `links` and re-derives page
+/// confidence. Takes the vault path because the cache needs a key.
+pub fn retrieve_channel_cached(
+    vault: &std::path::Path,
+    conn: &Connection,
+    question: &str,
+    limit: usize,
+    groups: Option<&[String]>,
+) -> Vec<Ev> {
+    let tree_ids = tree_search(conn, question, 3).unwrap_or_default();
+    let hybrid =
+        crate::retrieval::hybrid_search_cached(vault, conn, question, limit).unwrap_or_default();
+    let mut ids: Vec<String> = if !tree_ids.is_empty() {
+        koios_fuse_tree(&tree_ids, &hybrid)
+    } else {
+        hybrid.into_iter().map(|(i, _)| i).collect()
+    };
+    if ids.is_empty() {
+        ids = crate::retrieval::hybrid_search_cached(vault, conn, question, limit)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(i, _)| i)
+            .collect();
+    }
+    let mut out: Vec<Ev> = ids.iter().filter_map(|i| get_block(conn, i)).collect();
+    out = crate::acl::filter_blocks(conn, out, groups);
+    out = crate::state::filter_visible(conn, out);
+    crate::state::apply_disposition(conn, out, false)
+}
+
 pub fn retrieve_channel(
     conn: &Connection,
     question: &str,
@@ -267,7 +352,8 @@ pub fn retrieve_all(
 ) -> Result<Vec<Ev>, String> {
     crate::embed::require(vault)?;
     let semantic = crate::embed::search_vectors(vault, question, limit * 3)?;
-    let lexical = retrieve_channel(conn, question, limit, groups);
+    // Cached graph: this is the per-request hot path under MCP.
+    let lexical = retrieve_channel_cached(vault, conn, question, limit, groups);
     if semantic.is_empty() {
         let mut out = label_lexical(lexical, limit);
         out = prefer_source_layer(conn, out);
@@ -278,7 +364,10 @@ pub fn retrieve_all(
         .enumerate()
         .map(|(r, b)| (b.id.clone(), -(r as f64)))
         .collect();
-    let fused = rrf_fuse(&[lex_list, semantic.clone()], &[BETA, ALPHA], RRF_K);
+    let w = Weights::from_env();
+    let fused = rrf_fuse(&[lex_list, semantic.clone()], &[w.beta, w.alpha], RRF_K);
+    // Computed once: the tree channel's own ranking, keyed by block id.
+    let trees = tree_ranks(conn, question);
 
     // Per-channel standing, so a caller can see WHY each block came back
     // instead of inferring it from position (§11).
@@ -290,11 +379,8 @@ pub fn retrieve_all(
         };
         let lex = lexical.iter().position(|x| x.id == *id).map(contribution);
         let vec = semantic.iter().position(|(x, _)| x == id).map(contribution);
-        let graph = if hybrid_would_rank(conn, question, id, limit) {
-            contribution(0)
-        } else {
-            0.0
-        };
+        // Real tree rank, not a constant -- see tree_ranks.
+        let graph = trees.get(id).copied().unwrap_or(0.0);
         let mut cs = ChannelScores {
             lexical: lex.unwrap_or(0.0),
             vector: vec.unwrap_or(0.0),
@@ -339,13 +425,24 @@ fn label_lexical(lexical: Vec<Ev>, limit: usize) -> Vec<Ev> {
     out
 }
 
-/// Was this id in the tree/PPR route's own top-k?
-fn hybrid_would_rank(conn: &Connection, question: &str, id: &str, limit: usize) -> bool {
-    tree_search(conn, question, 3)
+/// Precompute the tree channel's ranking once per query.
+///
+/// Previously `hybrid_would_rank` ran `tree_search` again for EVERY fused
+/// result, so a top-10 query executed ten full section scans, and the "graph"
+/// score it produced was a constant `contribution(0)` rather than anything
+/// derived from the tree's own rank -- one value for every hit, which conveys
+/// nothing about position. Now the ranking is computed once and each id gets
+/// its real rank contribution.
+fn tree_ranks(conn: &Connection, question: &str) -> std::collections::HashMap<String, f64> {
+    let mut out = std::collections::HashMap::new();
+    for (r, id) in tree_search(conn, question, 3)
         .unwrap_or_default()
-        .iter()
-        .take(limit)
-        .any(|t| t == id)
+        .into_iter()
+        .enumerate()
+    {
+        out.insert(id, contribution(r));
+    }
+    out
 }
 
 /// #8 — stop derived pages from burying the documents they came from.

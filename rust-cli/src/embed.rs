@@ -85,7 +85,17 @@ fn is_cjk_query(c: char) -> bool {
 /// §5.2.1 says "truncate at §4.1 boundaries, never mid-block"; for the encoder
 /// itself the practical constraint is the position budget, and Blocks in this
 /// vault are paragraph-sized, so this only fires on pathological input.
-const MAX_CHARS: usize = 2000;
+/// Character budget before encoding, used only as a cheap pre-filter.
+///
+/// The real limit is the token window, enforced in `encode` by truncating the
+/// token ids. Cutting text by characters first avoids tokenising an absurd
+/// input, but the authoritative cut is by tokens -- a character count says
+/// nothing about how many tokens a script will produce, and §5.2.1 promises we
+/// never cut mid-block, which a blind character slice can do.
+const MAX_CHARS: usize = 8000;
+
+/// Token window per row. The authoritative truncation limit — see `encode`.
+const MAX_SEQ: usize = 512;
 
 /// Everything about the loaded model that must not change without a re-index.
 struct Embedder {
@@ -246,6 +256,13 @@ pub fn encode(vault: &Path, text: &str, is_query: bool) -> Result<Vec<f32>, Stri
         .encode(body.as_str(), false)
         .map_err(|err| err.to_string())?;
     let mut ids: Vec<i64> = enc.get_ids().iter().map(|&x| x as i64).collect();
+    // §5.2.1 promises we never cut mid-block; the honest reading is that the
+    // cut must respect the model's actual unit, which is tokens, not
+    // characters. Truncate to the window and end on EOS so last-token pooling
+    // still reads the real final state rather than a clipped one.
+    if ids.len() > MAX_SEQ {
+        ids.truncate(MAX_SEQ - 1);
+    }
     ids.push(e.eos as i64);
     let seq = ids.len();
     let shape = [1i64, seq as i64];
@@ -404,14 +421,25 @@ pub struct Status {
     pub lexical_only: bool,
     /// True when this install can actually retrieve semantically.
     pub vector_channel_active: bool,
+    /// How many blocks this index holds vectors for.
+    ///
+    /// Without this, partial encoding is invisible: `installed` and
+    /// `active` both stay true while half the corpus silently has no vector,
+    /// and the only symptom is that some queries miss.
+    pub indexed_blocks: usize,
+    /// Blocks with non-empty text that could be embedded.
+    pub embeddable_blocks: usize,
     pub model_id: &'static str,
     pub dim: usize,
     pub pooling: &'static str,
     /// The identity recorded in `vec.db`, if one has been built yet.
     pub index_model_id: Option<String>,
     pub index_dim: Option<String>,
-    /// True when the index disagrees with this build's model.
+    pub index_recipe: Option<String>,
+    /// True when the index disagrees with this build's model or recipe.
     pub index_mismatch: bool,
+    /// Blocks still needing encoding on the next `index`.
+    pub pending_blocks: usize,
     /// Why the model could not be used, when that happened.
     pub error: Option<String>,
 }
@@ -433,20 +461,36 @@ pub fn status(vault: &Path) -> Status {
         model_id: MODEL_ID,
         dim: DIM,
         pooling: POOLING,
+        indexed_blocks: 0,
+        embeddable_blocks: 0,
         index_model_id: None,
         index_dim: None,
+        index_recipe: None,
         index_mismatch: false,
+        pending_blocks: 0,
         error: None,
     };
-    // The early return is deliberately only about the model, not the index:
-    // even a caller running lexically still needs to know that the stored
-    // vectors came from a different model, since a later non-lexical process
-    // would refuse them.
+    // The early return is only about the model, not the index: a caller
+    // running lexically still needs to know the stored vectors came from a
+    // different model, since a later non-lexical process would refuse them.
     if lexical {
         read_index_state(vault, &mut out);
         return out;
     }
     read_index_state(vault, &mut out);
+    // Coverage, so a partially encoded corpus is visible rather than inferred
+    // from queries that mysteriously miss.
+    if let Ok(conn) = crate::connect(vault) {
+        let embeddable: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM blocks WHERE raw IS NOT NULL AND TRIM(raw) <> ''",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        out.embeddable_blocks = embeddable as usize;
+        out.pending_blocks = embeddable.saturating_sub(out.indexed_blocks as i64) as usize;
+    }
     if !installed {
         out.error = require(vault).err();
     }
@@ -472,6 +516,10 @@ fn read_index_state(vault: &Path, out: &mut Status) {
             }
             out.index_model_id = seen.get("model_id").cloned();
             out.index_dim = seen.get("dim").cloned();
+            out.index_recipe = seen.get("embed_recipe").cloned();
+            out.indexed_blocks = conn
+                .query_row("SELECT COUNT(*) FROM vec_src", [], |r| r.get::<_, i64>(0))
+                .unwrap_or(0) as usize;
             // A mismatch is what check_identity rejects during retrieval, so
             // surface the same judgement the retrieval path will apply.
             if !seen.is_empty() {
@@ -590,17 +638,21 @@ pub fn build_vectors(vault: &Path, main: &Connection) -> rusqlite::Result<()> {
         }
     }
 
-    let mut rows: Vec<(String, String, String)> = Vec::new();
+    // #6 — the hash comes along in this one query. It used to be re-fetched
+    // per block with a separate `SELECT hash FROM blocks WHERE id=?`, which is
+    // one extra statement per block on a loop that already dominates indexing.
+    let mut rows: Vec<(String, String, String, String)> = Vec::new();
     {
         let mut stmt = main.prepare(
-            "SELECT id, breadcrumb, raw FROM blocks WHERE raw IS NOT NULL \
-             AND TRIM(raw) <> '' ORDER BY doc_path, ordinal",
+            "SELECT id, breadcrumb, raw, COALESCE(hash,'') FROM blocks \
+             WHERE raw IS NOT NULL AND TRIM(raw) <> '' ORDER BY doc_path, ordinal",
         )?;
         let m = stmt.query_map([], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1).unwrap_or_default(),
                 r.get::<_, String>(2)?,
+                r.get::<_, String>(3).unwrap_or_default(),
             ))
         })?;
         for r in m.flatten() {
@@ -609,7 +661,7 @@ pub fn build_vectors(vault: &Path, main: &Connection) -> rusqlite::Result<()> {
     }
 
     let live: std::collections::HashSet<String> =
-        rows.iter().map(|(id, _, _)| id.clone()).collect();
+        rows.iter().map(|(id, _, _, _)| id.clone()).collect();
 
     // sqlite-vec's vec0 is a virtual table and does not implement UPSERT, so
     // "replace" is a delete followed by an insert. Doing it only for blocks
@@ -617,10 +669,9 @@ pub fn build_vectors(vault: &Path, main: &Connection) -> rusqlite::Result<()> {
     let mut insert = conn.prepare("INSERT INTO vec_blocks (block_id, embedding) VALUES (?, ?)")?;
     let mut encoded = 0usize;
     let mut failed = 0usize;
-    for (id, breadcrumb, raw) in rows.iter() {
-        let hash = block_hash(main, id).unwrap_or_default();
+    for (id, breadcrumb, raw, hash) in rows.iter() {
         if let Some(prev) = hash_of.get(id) {
-            if *prev == hash {
+            if prev == hash {
                 continue;
             }
         }
@@ -684,12 +735,6 @@ pub fn build_vectors(vault: &Path, main: &Connection) -> rusqlite::Result<()> {
         )));
     }
     Ok(())
-}
-
-/// The content hash `blocks` carries for a block, which drives incrementality.
-fn block_hash(main: &Connection, id: &str) -> Option<String> {
-    main.query_row("SELECT hash FROM blocks WHERE id=?", [id], |r| r.get(0))
-        .ok()
 }
 
 /// sqlite-vec expects raw little-endian float32 bytes.
