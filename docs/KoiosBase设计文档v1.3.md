@@ -318,16 +318,22 @@ Vault 根部的 `AGENTS.md` 定义 agent 维护本库的完整规范：页面模
 **实装状态：✅ 已落地（v0.10.0 起）。** 运行前提是下述两个模型文件在位；缺失时
 `koios index` 报错退出——见下「模型安装」。
 
-**决策：embedding 是常驻依赖，不是可选增强。** 模型文件缺失时命令 **报错退出**，
-而非静默降级为纯 BM25——否则同一套语料会存在"有向量/无向量"两种检索形态，
-评测结果无法跨版本比较。
+**决策：embedding 是常驻依赖，不是可选增强。** 模型缺失时 `koios index` 与
+`koios search` **以非零码退出**，而非静默降级为纯 BM25——否则同一套语料会存在
+"有向量/无向量"两种检索形态，评测结果无法跨版本比较。
+
+> **更正（v0.10.1）**：本节先前声称缺失即"报错退出"，而实装只打印一行 warning
+> 后继续走词法通道——文档描述的行为与代码实际行为相反，且是外部反馈后才发现。
+> 现已按此处描述修正实现：`index` / `search` 默认失败退出，需要故意跑词法时
+> 显式加 `--allow-no-embedding`。这条差异本身记录在这里，以免日后
+> 再把「文档写了」当成「代码做了」。
 
 **模型：`Qwen3-Embedding-0.6B`**（锁定版本，非可替换默认值）。
 
 | 决策项 | 结论 |
 |---|---|
-| 模型权重 | `janni-t/qwen3-embedding-0.6b-int8-tei-onnx` 的 `model.onnx` — **静态 TEI 导出** |
-| 分词器 | 同一仓库的 `tokenizer.json` |
+| 模型权重 | TEI 静态导出；仓库内文件名 `models/qwen3-embedding-0.6b-int8-tei.onnx`（源自 `janni-t/qwen3-embedding-0.6b-int8-tei-onnx` 的 `model.onnx`） |
+| 分词器 | `models/tokenizer.json` |
 | 推理位置 | 进程内 `ort`（ONNX Runtime），静态编译进二进制 |
 | 权重体积 | 599 MB（单文件，无外挂 `model.onnx_data`） |
 | 输出维度 | **1024**（模型原生，不做 MRL 截断） |
@@ -339,8 +345,11 @@ Vault 根部的 `AGENTS.md` 定义 agent 维护本库的完整规范：页面模
 
 ```console
 $ mkdir -p myvault/models
-$ # 放入 model.onnx 与 tokenizer.json：$KOIOS/models/qwen3-embedding-0.6b-int8-tei.onnx
-$ #                                   $KOIOS/models/tokenizer.json
+$ # 文件名必须逐字一致——代码按这两个名字查找，改一个字母都会报"模型缺失"：
+$ #   myvault/models/qwen3-embedding-0.6b-int8-tei.onnx   （权重）
+$ #   myvault/models/tokenizer.json                        （分词器）
+$ # 权重来源（TEI 静态导出，重命名后放入）：
+$ #   huggingface.co/janni-t/qwen3-embedding-0.6b-int8-tei-onnx 的 model.onnx
 $ koios index myvault      # 顺带写 .index/vec.db
 ```
 
@@ -378,9 +387,20 @@ false。实测 mean pooling 会让**无关查询的分数高于真同义词**（
 选择保留原生维度，省掉自建切片逻辑；日后若索引体积成瓶颈，取 Hidden 前 512
 维即可，不改代码结构。
 
-**模型锁定**（防静默漂移）：`vec.db` 元数据区写 `model_id` / `model_sha256` /
-`dim`。三者任一变化自动触发全量重嵌——换模型而不同步重建，等于让新旧向量在
-同一个距离空间里比大小。
+**模型锁定**（防静默漂移，v0.10.1 起实装）：`vec.db` 的 `vec_meta` 表在建向量时
+写入 `model_id` / `dim` / `pooling` / `normalize` 四项；`index` 与 `search` 都会
+校验，任一项不匹配即报错并要求 `--embed-full` 重建。
+
+实测：把 `dim` 改成一个不存在的值后查询，得到
+
+```console
+$ koios search . "营收"
+Error: this index was built with dim=999, but this build uses dim=1024.
+  The two are not comparable distances; rerun `koios index --embed-full`.
+```
+
+先前 `vec_meta` 是空的——换模型或换维度后毫无校验，只能靠人工记得全量重建。
+换 embedding 而不重建，等于把两组互不可比的向量放进同一个距离空间排序。
 
 **增量路径**（已实装）：§5.1 已产出 Block 级哈希，据此只对「新出现或哈希变化」
 的 Block 跑前向；Block 消失则同时删 `vec_blocks` 与 `vec_src` 行。
@@ -409,6 +429,20 @@ build_vectors(vault, blocks):
 | 常驻内存 | ≈ 950 MB（含 tokenizer + ORT 运行时） |
 | 磁盘 | 块数 × 1024 × 4 字节 |
 | 入库延迟 | 同步批处理；15 块首次 5.7 s，无改动重跑 0.029 s |
+
+**删除回取**（v0.10.1 起）：索引以往只能增长。实际行为：`index` 只刷新现存内容，从不删除；
+删掉 `raw/x.md` 后，它的 blocks / sections / `documents` 行、以及 §4.3 生成的
+`wiki/sources/x.md` 全部残留并继续应答查询，唯一的"修复"是删掉整个 `.index/`
+（连带丢弃所有派生页）。
+
+现在 `index` 会按" fingerprints 曾记录过、但磁盘上已不存在"判定删除，并在同一
+事务里清除：blocks → blocks_fts / links / block_state → sections → page_state →
+documents，外加 `sources/<doc>` 派生页与其 blocks。
+
+> **为什么判据是磁盘而不是 fingerprint 差分（实测踩到的坑）**：`wiki/sources/x.md`
+> 自身也被索引，同一次 index 里它会重新生成一份引用了原文正文的派生页，于是
+> "本次"结果里仍然列着 x.md —— 前后指纹比对看不出任何缺失。文件系统是这里唯一的
+> 权威；派生状态的内存差分无法区分"仍在"与"刚从旧副本重建过"。
 
 **链接图的边定义**（PPR 的基础，全部从 Markdown 推导）：
 
@@ -737,7 +771,7 @@ embedding 模型必跑。
 | 存储 | SQLite + FTS5（`rusqlite` bundled）+ `sqlite-vec` 0.1.9 | ✅ | 零部署；`tree.db`（倒排/图）与 `vec.db`（向量）同在 `.index/`，均可重建。选 0.1.9 而非 0.1.10-alpha.4：后者打包缺 `sqlite-vec-diskann.c`，编译即失败（实测） |
 | 解析 Markdown | 自研 heading-stack 解析器（`lib.rs` `index_file`） | ✅ | 标题即树；脏文档按行聚合成段落块 |
 | 解析 PDF | MuPDF（CPU 文本层）+ 可插拔 VLM 回调（PNG 字节） | ✅ | 双档回退已落地：`extract_pages(path, vlm)`；扫描件缺 VLM 时跳过而非编造 |
-| Embedding | **Qwen3-Embedding-0.6B** ONNX int8（TEI 静态导出） | ✅ | 已实装（v0.10.0）。100+ 语、原生 code retrieval、32K 上下文；进程内 `ort`，静态编译，零网络调用 |
+| Embedding | **Qwen3-Embedding-0.6B** ONNX int8（TEI 静态导出） | ✅ | 已实装。100+ 语、原生 code retrieval、32K 上下文；进程内 `ort`，静态编译，零网络调用。缺失即失败退出（`--allow-no-embedding` 例外） |
 | Embedding（精度档） | Qwen3-Embedding-4B（2560 维） | ⬜ | 后期按需启用；需 ≥16GB 内存，非默认 |
 | Reranker | bge-reranker 系列 | ⬜ | 同上；cross-encoder 属情态敏感场景的专项增强 |
 | 向量存储 | `sqlite-vec` 虚表 `.index/vec.db` | ✅ | 主键对齐 `blocks.id`；content hash 存旁路表 `vec_src` 驱动增量 |
