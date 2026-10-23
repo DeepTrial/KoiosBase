@@ -401,6 +401,9 @@ false。实测 mean pooling 会让**无关查询的分数高于真同义词**（
 
 `--layer raw` 与默认结果一致，说明 §4.3 派生页已不再挤占召回。
 
+复现方式：`tools/eval_miracl.py`。该脚本内建 gold 覆盖校验，覆盖不足会拒绝出分——
+这道检查不是可选项，它防止的正是上面那次误判。
+
 **本机是否支撑更大模型（实测结论：不能）**：换 Qwen3-Embedding-4B 需要约 8 GB
 （fp16）或 2.5 GB（Q4_K_M GGUF），而实测本机可用内存仅 **2.5 GB**、可用磁盘一度只剩
 507 MB；且 GGUF 需 llama.cpp 后端，ONNX Runtime 不直接支持。因此在当前机器上

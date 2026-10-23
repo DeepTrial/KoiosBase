@@ -171,6 +171,25 @@ flowchart TD
 | 备份 | `koios backup -p myvault -o /backups` |
 | 恢复 | `koios restore <archive> -o /path`（拒绝写入非空目录） |
 
+## 评测
+
+用 MIRACL-zh 复现召回指标（需要先准备数据，见脚本头注释）：
+
+```console
+$ python3 tools/eval_miracl.py --koios rust-cli/target/release/koios \
+      --data /tmp/miracl --model-dir /path/to/models --json out.json
+docs=362 gold=62 queries=40 coverage=1.000
+indexed in 522.5s
+default (all layers): hit@1=0.950  hit@5=1.000
+layer=raw          : hit@1=0.950  hit@5=1.000
+raw-vs-all:  hit@1=+0.000  hit@5=+0.000
+```
+
+脚本会在出分前**校验 gold 段落确实在语料内**（`coverage=1.000`），覆盖不全则拒绝
+报数。这道检查是必须的：曾经因为只下载了部分分片、103 个 gold 里有 56 个不在库内，
+把"答案不存在"计成了"检索失败"，得出 hit@1 0.700 的错误结论——修正后是 0.950。
+`layer=raw` 与默认一致即说明派生页未挤占原文（§4.3）。
+
 **并发**：`koios index` 用 `.index/index.lock` 互斥——两个进程同时重建同一个 vault
 此前没有任何保证。持有者进程若已退出，锁会被自动回收，所以一次中断不会把 vault
 永久锁死。长驻 MCP 与 `index` 可以同时运行，但同一时刻只会有一个 index 在写。
