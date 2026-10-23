@@ -71,21 +71,25 @@ struct Embedder {
 static EMBEDDER: OnceLock<Result<std::sync::Arc<Embedder>, String>> = OnceLock::new();
 static MISSING_REPORTED: OnceLock<()> = OnceLock::new();
 
-/// Set from `--allow-no-embedding`. Defeat flag, opt-in, never the default.
-///
-/// §5.2.1's reason for being fail-closed is that a corpus must not have two
-/// retrieval behaviours depending on whether a file happened to be present --
-/// then eval numbers stop comparing across versions. This exists for the
-/// person who knowingly accepts that (a scratch vault, a docs-only corpus),
-/// not as a convenience so nothing ever fails.
-static ALLOW_LEXICAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+thread_local! {
+    /// Per-thread opt-out for running without embeddings.
+    ///
+    /// Thread-local, not process-global: `cargo test` runs a binary's tests in
+    /// parallel, and with an AtomicBool whichever thread set it last decided
+    /// whether *every* other test degraded silently. That made the fail-closed
+    /// assertions racy -- one observed `true` that another test had set.
+    static ALLOW_LEXICAL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 
+/// Let this thread index/search without embeddings (CLI: --allow-no-embedding).
+///
+/// Per-thread rather than per-process on purpose -- see ALLOW_LEXICAL.
 pub fn set_allow_lexical(allow: bool) {
-    ALLOW_LEXICAL.store(allow, std::sync::atomic::Ordering::Relaxed);
+    ALLOW_LEXICAL.with(|c| c.set(allow));
 }
 
 pub fn allow_lexical() -> bool {
-    ALLOW_LEXICAL.load(std::sync::atomic::Ordering::Relaxed)
+    ALLOW_LEXICAL.with(|c| c.get())
 }
 
 pub fn model_path(vault: &Path) -> PathBuf {
@@ -304,6 +308,97 @@ fn expected_meta() -> Vec<(&'static str, String)> {
         ("pooling", POOLING.to_string()),
         ("normalize", "l2".to_string()),
     ]
+}
+
+/// A machine-readable description of the vector channel's state.
+///
+/// Callers previously had no way to ask: errors arrive as free text, so a
+/// client could not distinguish "no model installed" from "this index was
+/// built by a different model" without string matching. Every field here is
+/// something the operator otherwise has to infer from stderr.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Status {
+    /// True when both model files that §5.2.1 requires are present.
+    pub model_installed: bool,
+    /// Set when the caller opted out of embeddings for this thread.
+    pub lexical_only: bool,
+    /// True when this install can actually retrieve semantically.
+    pub vector_channel_active: bool,
+    pub model_id: &'static str,
+    pub dim: usize,
+    pub pooling: &'static str,
+    /// The identity recorded in `vec.db`, if one has been built yet.
+    pub index_model_id: Option<String>,
+    pub index_dim: Option<String>,
+    /// True when the index disagrees with this build's model.
+    pub index_mismatch: bool,
+    /// Why the model could not be used, when that happened.
+    pub error: Option<String>,
+}
+
+/// Report the vector channel's state without side effects on retrieval.
+///
+/// Deliberately does not attempt to load the model; that is an expensive
+/// operation and `is_ready` plus the recorded error is enough to tell the
+/// caller why semantic recall is off. `error` carries the last failure seen
+/// during this process, if there was one.
+pub fn status(vault: &Path) -> Status {
+    let installed = is_ready(vault);
+    let lexical = allow_lexical();
+    let mut out = Status {
+        model_installed: installed,
+        lexical_only: lexical,
+        vector_channel_active: installed && !lexical,
+        model_id: MODEL_ID,
+        dim: DIM,
+        pooling: POOLING,
+        index_model_id: None,
+        index_dim: None,
+        index_mismatch: false,
+        error: None,
+    };
+    // The early return is deliberately only about the model, not the index:
+    // even a caller running lexically still needs to know that the stored
+    // vectors came from a different model, since a later non-lexical process
+    // would refuse them.
+    if lexical {
+        read_index_state(vault, &mut out);
+        return out;
+    }
+    read_index_state(vault, &mut out);
+    if !installed {
+        out.error = require(vault).err();
+    }
+    out
+}
+
+/// Fill in what `vec.db` records about itself.
+fn read_index_state(vault: &Path, out: &mut Status) {
+    match ensure_vec_db(vault) {
+        Ok(conn) => {
+            let mut seen = std::collections::HashMap::new();
+            if let Ok(mut stmt) = conn.prepare("SELECT key, value FROM vec_meta") {
+                if let Ok(rows) = stmt.query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1).unwrap_or_default(),
+                    ))
+                }) {
+                    for r in rows.flatten() {
+                        seen.insert(r.0, r.1);
+                    }
+                }
+            }
+            out.index_model_id = seen.get("model_id").cloned();
+            out.index_dim = seen.get("dim").cloned();
+            // A mismatch is what check_identity rejects during retrieval, so
+            // surface the same judgement the retrieval path will apply.
+            if !seen.is_empty() {
+                out.index_mismatch = check_identity(&conn).is_err();
+            }
+        }
+        Err(e) => out.error = Some(format!("could not read vec.db: {e}")),
+    }
 }
 
 /// Reject a `vec.db` built by anything other than the current model.

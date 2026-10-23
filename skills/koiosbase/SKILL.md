@@ -35,6 +35,14 @@ koios search "question" -p /abs/path/to/vault     # ranked blocks
 koios lint /abs/path/to/vault                     # knowledge health
 ```
 
+## Trust boundary
+
+There is **no authentication**. `groups` is whatever the caller claims, so any
+principal that can invoke these tools can name any group. Run KoiosBase behind
+something you already trust (a local shell, a controlled agent host) and never
+expose it directly to a browser or a network node. The ACL limits visibility
+*between already-authorised principals*; it is not an identity layer.
+
 ## The rule that matters
 
 > **Never state a fact from the vault unless the answer carried a citation.**

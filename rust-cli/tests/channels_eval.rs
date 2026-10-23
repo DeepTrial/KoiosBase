@@ -260,7 +260,6 @@ fn vec_db_survives_a_missing_gracefully() {
 #[test]
 fn missing_model_is_an_error_not_a_warning() {
     let v = vault("failclosed");
-    koios::embed::set_allow_lexical(false);
     assert!(!koios::embed::is_ready(&v), "fixture must have no model");
     let err = koios::embed::require(&v).unwrap_err();
     assert!(

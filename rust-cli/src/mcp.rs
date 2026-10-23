@@ -68,6 +68,30 @@ fn is_notification(req: &Value) -> bool {
 /// Set false to silence write attribution — mirrors Python's WRITE_AUDIT_LOG.
 const WRITE_AUDIT_LOG: bool = true;
 
+/// `koios_status` — the vector channel's state, machine-readable.
+///
+/// Errors are free text everywhere else in this server, so a client could not
+/// tell "no model installed" from "index built by a different model" without
+/// pattern matching on sentences. This gives both a home: the booleans say
+/// whether semantic recall is live, `index_*` say what the stored vectors
+/// were built with, and `error` keeps the human sentence for display.
+pub fn tool_status(args: &Value) -> Result<Value, String> {
+    let vault = Path::new(&as_str(args, "vault")?).to_path_buf();
+    let s = crate::embed::status(&vault);
+    Ok(json!({
+        "model_installed": s.model_installed,
+        "lexical_only": s.lexical_only,
+        "vector_channel_active": s.vector_channel_active,
+        "model_id": s.model_id,
+        "dim": s.dim,
+        "pooling": s.pooling,
+        "index_model_id": s.index_model_id,
+        "index_dim": s.index_dim,
+        "index_mismatch": s.index_mismatch,
+        "error": s.error,
+    }))
+}
+
 fn tool_defs() -> Value {
     json!([
       {
@@ -113,6 +137,15 @@ fn tool_defs() -> Value {
     these so citations never point at unreadable blocks (§9.2)"}
           },
           "required": ["vault", "question", "answer"]
+        }
+      },
+      {
+        "name": "koios_status",
+        "description": "Report whether semantic recall is live for this vault, and why not if it isn't (§5.2.1).",
+        "inputSchema": {
+          "type": "object",
+          "properties": {"vault": {"type": "string"}},
+          "required": ["vault"]
         }
       }
     ])
@@ -411,6 +444,9 @@ pub fn handle_request(req: &Value) -> Value {
                 "koios_search" => tool_search(&arguments),
                 "koios_ask" => tool_ask(&arguments),
                 "koios_write_answer" => tool_write_answer(&arguments),
+                // A client has no other way to ask why semantic recall is off:
+                // failures arrive as free text and look alike.
+                "koios_status" => tool_status(&arguments),
                 other => return err(-32601, format!("unknown tool: {other}")),
             };
             match payload {
