@@ -362,21 +362,17 @@ fn persist_retraction(
 /// Block-level decisions are more specific than document frontmatter `state:`.
 /// Replaying the reverse-citation cascade also rebuilds `page_state`, which is
 /// derived and therefore intentionally not persisted in the ledger.
-pub fn apply_markdown_states(
-    conn: &Connection,
-    vault: &std::path::Path,
-) -> Result<usize, String> {
+pub fn apply_markdown_states(conn: &Connection, vault: &std::path::Path) -> Result<usize, String> {
     let ledger = load_ledger(vault)?;
     let mut applied = 0usize;
     for (block_id, block) in ledger.blocks {
-        let content_hash: String = match conn.query_row(
-            "SELECT hash FROM blocks WHERE id=?",
-            [&block_id],
-            |r| r.get(0),
-        ) {
-            Ok(hash) => hash,
-            Err(_) => continue,
-        };
+        let content_hash: String =
+            match conn.query_row("SELECT hash FROM blocks WHERE id=?", [&block_id], |r| {
+                r.get(0)
+            }) {
+                Ok(hash) => hash,
+                Err(_) => continue,
+            };
         // Positional ids can be reused by a later edit. A verdict belongs to the
         // assertion that was reviewed, not to different text at the same address.
         if content_hash != block.content_hash {

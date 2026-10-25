@@ -98,11 +98,18 @@ fn retraction_survives_reindex_and_cold_rebuild() {
     koios::state::cascade_retraction(&conn, block_id, "wrong figure", Some(&v)).unwrap();
     let ledger = fs::read_to_string(v.join("raw/.koios/state.md")).unwrap();
     assert!(ledger.contains(block_id), "retraction must be in Markdown");
-    assert!(ledger.contains("wrong figure"), "the audit reason must survive");
+    assert!(
+        ledger.contains("wrong figure"),
+        "the audit reason must survive"
+    );
     // A document-level active declaration must not silently undo a more
     // specific human decision about one block.
     let raw = fs::read_to_string(v.join("raw/r.md")).unwrap();
-    fs::write(v.join("raw/r.md"), raw.replace("title: T", "title: T\nstate: active")).unwrap();
+    fs::write(
+        v.join("raw/r.md"),
+        raw.replace("title: T", "title: T\nstate: active"),
+    )
+    .unwrap();
 
     drop(conn);
     for cold_rebuild in [false, true] {
@@ -133,7 +140,10 @@ fn retraction_survives_reindex_and_cold_rebuild() {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(indexed_ledger, 0, "the state ledger is metadata, not corpus");
+        assert_eq!(
+            indexed_ledger, 0,
+            "the state ledger is metadata, not corpus"
+        );
         if cold_rebuild {
             let states = vec!["retracted".to_string()];
             let history = koios::pipeline::retrieve_all(
