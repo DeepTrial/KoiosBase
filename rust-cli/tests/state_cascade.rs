@@ -80,6 +80,123 @@ fn cascade_marks_citing_pages_stale() {
     }
 }
 
+/// P1/P5: a human retraction is a Markdown fact, not disposable index state.
+/// Exercise both an ordinary rebuild and recovery from a deleted .index, and
+/// check the blast radius as well as the block itself.
+#[test]
+fn retraction_survives_reindex_and_cold_rebuild() {
+    let v = vault("persistent-retraction");
+    let conn = seed(&v);
+    fs::write(
+        v.join("wiki").join("w.md"),
+        "---\ntitle: W\nconfidence: draft\n---\n- claim [[raw/r.md#Sec/1]]\n",
+    )
+    .unwrap();
+    (lexical(), koios::cmd_index(&v)).1.unwrap();
+
+    let block_id = "r.md#Sec/1";
+    koios::state::cascade_retraction(&conn, block_id, "wrong figure", Some(&v)).unwrap();
+    let ledger = fs::read_to_string(v.join("raw/.koios/state.md")).unwrap();
+    assert!(ledger.contains(block_id), "retraction must be in Markdown");
+    assert!(
+        ledger.contains("wrong figure"),
+        "the audit reason must survive"
+    );
+    // A document-level active declaration must not silently undo a more
+    // specific human decision about one block.
+    let raw = fs::read_to_string(v.join("raw/r.md")).unwrap();
+    fs::write(
+        v.join("raw/r.md"),
+        raw.replace("title: T", "title: T\nstate: active"),
+    )
+    .unwrap();
+
+    drop(conn);
+    for cold_rebuild in [false, true] {
+        if cold_rebuild {
+            fs::remove_dir_all(v.join(".index")).unwrap();
+        }
+        (lexical(), koios::cmd_index(&v)).1.unwrap();
+        let conn = koios::connect(&v).unwrap();
+        assert_eq!(koios::state::get_block_state(&conn, block_id), "retracted");
+        let reason: String = conn
+            .query_row(
+                "SELECT reason FROM block_state WHERE block_id=?",
+                [block_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(reason, "wrong figure");
+        assert!(
+            koios::state::is_stale(&conn, "w.md"),
+            "a cold rebuild must rederive the citing page's staleness"
+        );
+        let visible = koios::pipeline::retrieve_channel(&conn, "revenue", 8, None);
+        assert!(visible.iter().all(|b| b.id != block_id));
+        let indexed_ledger: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM documents WHERE path LIKE '.koios/%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            indexed_ledger, 0,
+            "the state ledger is metadata, not corpus"
+        );
+        if cold_rebuild {
+            let states = vec!["retracted".to_string()];
+            let history = koios::pipeline::retrieve_all(
+                &v,
+                &conn,
+                "revenue",
+                8,
+                None,
+                &koios::pipeline::Query {
+                    include_states: &states,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert!(history.iter().any(|b| b.id == block_id));
+        }
+    }
+}
+
+#[test]
+fn malformed_state_ledger_fails_closed() {
+    let v = vault("malformed-state-ledger");
+    let conn = seed(&v);
+    koios::state::cascade_retraction(&conn, "r.md#Sec/1", "wrong", Some(&v)).unwrap();
+    drop(conn);
+    fs::write(v.join("raw/.koios/state.md"), "# corrupt state\n").unwrap();
+    let err = koios::cmd_index(&v).unwrap_err().to_string();
+    assert!(
+        err.contains("no JSON state block"),
+        "a corrupt source-of-truth ledger must not silently reactivate blocks: {err}"
+    );
+}
+
+#[test]
+fn retraction_does_not_stick_to_different_content_at_the_same_id() {
+    let v = vault("content-bound-retraction");
+    let conn = seed(&v);
+    koios::state::cascade_retraction(&conn, "r.md#Sec/1", "wrong", Some(&v)).unwrap();
+    drop(conn);
+    fs::write(
+        v.join("raw/r.md"),
+        "---\ntitle: T\n---\n# Sec\nACME revenue was 99 yuan.\n",
+    )
+    .unwrap();
+    (lexical(), koios::cmd_index(&v)).1.unwrap();
+    let conn = koios::connect(&v).unwrap();
+    assert_eq!(
+        koios::state::get_block_state(&conn, "r.md#Sec/1"),
+        "active",
+        "a verdict on the old assertion must not retract new content"
+    );
+}
+
 /// test_disposition_when_stale
 #[test]
 fn disposition_when_stale() {
