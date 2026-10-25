@@ -77,6 +77,9 @@ enum Cmd {
         /// restrict results to a corpus layer: raw | derived
         #[arg(long, value_parser = ["raw", "derived"])]
         layer: Option<String>,
+        /// also return blocks in these §8.2 states (superseded|retracted|…)
+        #[arg(long = "include-states", value_delimiter = ',')]
+        include_states: Vec<String>,
     },
     /// channel ① tree navigation
     Tree {
@@ -395,6 +398,7 @@ fn cmd_search(
     groups: Option<Vec<String>>,
     channel: Option<&str>,
     layer: Option<&str>,
+    include_states: &[String],
 ) -> Result<(), String> {
     let conn = connect(path).map_err(|e| e.to_string())?;
     // Route through retrieve_all so the ACL applies and both channels run. The previous raw-FTS
@@ -412,7 +416,18 @@ fn cmd_search(
             .collect();
         pipeline::filter_chain(&conn, out, groups.as_deref())
     } else {
-        pipeline::retrieve_all(path, &conn, query, top, groups.as_deref(), layer)?
+        pipeline::retrieve_all(
+            path,
+            &conn,
+            query,
+            top,
+            groups.as_deref(),
+            &pipeline::Query {
+                layer,
+                include_states,
+                filters: &[],
+            },
+        )?
     };
     // Byte-identical to koiosbase/cli.py cmd_search()'s three-line form:
     //   [i] id / breadcrumb / snippet
@@ -886,6 +901,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             channel,
             allow_no_embedding,
             layer,
+            include_states,
         } => {
             koios::embed::set_allow_lexical(allow_no_embedding);
             cmd_search(
@@ -895,6 +911,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 parse_groups(groups.as_deref()),
                 channel.as_deref(),
                 layer.as_deref(),
+                &include_states,
             )
             .map_err(std::io::Error::other)?
         }
@@ -1153,6 +1170,7 @@ fn cmd_compile(vault: &Path) -> rusqlite::Result<()> {
                     breadcrumb: r.get::<_, String>(2).unwrap_or_default(),
                     doc_path: r.get::<_, String>(3).unwrap_or_default(),
                     channels: None,
+                    state: None,
                 })
             })?;
             for b in m.flatten() {

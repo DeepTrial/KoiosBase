@@ -41,8 +41,9 @@ fn search_uses_the_same_route_on_both_exits() {
     // the caller opts in -- exactly the fail-closed behaviour being asserted
     // elsewhere. Retrieve here is deliberately lexical on both sides.
     koios::embed::set_allow_lexical(true);
-    let via_pipeline = koios::pipeline::retrieve_all(&v, &conn, "营收", 8, None, None)
-        .expect("shared route must succeed with --allow-no-embedding");
+    let via_pipeline =
+        koios::pipeline::retrieve_all(&v, &conn, "营收", 8, None, &Default::default())
+            .expect("shared route must succeed with --allow-no-embedding");
     let via_channel = koios::pipeline::retrieve_channel(&conn, "营收", 8, None);
     assert!(
         !via_pipeline.is_empty(),

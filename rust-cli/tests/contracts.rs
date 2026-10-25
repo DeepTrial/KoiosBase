@@ -19,6 +19,7 @@ fn ev_or_empty(empty: bool) -> Vec<Ev> {
         breadcrumb: "b".to_string(),
         doc_path: "report.md".to_string(),
         channels: None,
+        state: None,
     }]
 }
 

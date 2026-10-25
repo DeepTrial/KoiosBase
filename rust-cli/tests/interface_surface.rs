@@ -29,7 +29,7 @@ fn seeded(name: &str) -> (PathBuf, rusqlite::Connection) {
 #[test]
 fn every_block_reports_which_channels_matched_it() {
     let (v, conn) = seeded("channels");
-    let out = koios::pipeline::retrieve_all(&v, &conn, "营收", 8, None, None)
+    let out = koios::pipeline::retrieve_all(&v, &conn, "营收", 8, None, &Default::default())
         .expect("lexical route must succeed");
     assert!(!out.is_empty());
     for b in &out {
@@ -56,13 +56,25 @@ fn layer_raw_omits_compiler_derived_pages() {
     // `index` itself generates wiki/sources/ (§4.3), so a derived page exists
     // here without a separate compile step.
 
-    let derived_present = koios::pipeline::retrieve_all(&v, &conn, "body", 20, None, None)
-        .unwrap()
-        .iter()
-        .any(|b| b.doc_path.starts_with("sources/"));
+    let derived_present =
+        koios::pipeline::retrieve_all(&v, &conn, "body", 20, None, &Default::default())
+            .unwrap()
+            .iter()
+            .any(|b| b.doc_path.starts_with("sources/"));
     assert!(derived_present, "fixture must contain a derived page");
 
-    let raw_only = koios::pipeline::retrieve_all(&v, &conn, "body", 20, None, Some("raw")).unwrap();
+    let raw_only = koios::pipeline::retrieve_all(
+        &v,
+        &conn,
+        "body",
+        20,
+        None,
+        &koios::pipeline::Query {
+            layer: Some("raw"),
+            ..Default::default()
+        },
+    )
+    .unwrap();
     assert!(!raw_only.is_empty(), "raw-only must still find the source");
     assert!(
         !raw_only.iter().any(|b| b.doc_path.starts_with("sources/")),
@@ -78,7 +90,9 @@ fn source_blocks_outrank_their_own_derived_restatements() {
     koios::cmd_index(&v).unwrap();
     let conn = connect(&v).unwrap();
 
-    let out = koios::pipeline::retrieve_all(&v, &conn, "unique sentence", 20, None, None).unwrap();
+    let out =
+        koios::pipeline::retrieve_all(&v, &conn, "unique sentence", 20, None, &Default::default())
+            .unwrap();
     let first_source = out.iter().position(|b| !b.doc_path.starts_with("sources/"));
     let first_derived = out.iter().position(|b| b.doc_path.starts_with("sources/"));
     match (first_source, first_derived) {

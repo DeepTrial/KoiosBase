@@ -276,9 +276,31 @@ pub fn filter_visible(
     conn: &Connection,
     blocks: Vec<crate::pipeline::Ev>,
 ) -> Vec<crate::pipeline::Ev> {
+    filter_visible_with(conn, blocks, &[])
+}
+
+/// Like `filter_visible`, but the caller may ask for hidden states back.
+///
+/// §8.2 disposes of superseded and retracted blocks by excluding them from
+/// retrieval, which is right -- but it was unconditional, so a caller could
+/// never see the history at all: a superseded card was simply absent, with no
+/// way to ask. `include` names the otherwise-hidden states to let through.
+/// `retracted` stays available only on explicit request, since it marks a
+/// wrong fact rather than an old one.
+pub fn filter_visible_with(
+    conn: &Connection,
+    blocks: Vec<crate::pipeline::Ev>,
+    include: &[String],
+) -> Vec<crate::pipeline::Ev> {
     blocks
         .into_iter()
-        .filter(|b| !FILTERED.contains(&get_block_state(conn, &b.id).as_str()))
+        .filter(|b| {
+            let st = get_block_state(conn, &b.id);
+            if include.iter().any(|s| s == &st) {
+                return true;
+            }
+            !FILTERED.contains(&st.as_str())
+        })
         .collect()
 }
 
@@ -348,6 +370,21 @@ pub fn apply_disposition(
     blocks: Vec<crate::pipeline::Ev>,
     high_risk: bool,
 ) -> Vec<crate::pipeline::Ev> {
+    apply_disposition_with(conn, blocks, high_risk, &[])
+}
+
+/// Like `apply_disposition`, but states the caller asked for survive.
+///
+/// `hard_filter` (retracted) dropped blocks unconditionally, so asking for
+/// history was impossible for exactly the state most worth auditing. When a
+/// state is named in `include`, its blocks are kept and ordered after the
+/// current ones so a stale answer can never outrank a live one.
+pub fn apply_disposition_with(
+    conn: &Connection,
+    blocks: Vec<crate::pipeline::Ev>,
+    high_risk: bool,
+    include: &[String],
+) -> Vec<crate::pipeline::Ev> {
     if blocks.is_empty() {
         return blocks;
     }
@@ -360,6 +397,7 @@ pub fn apply_disposition(
     let disp = page_dispositions(conn, &paths);
     let mut keep: Vec<crate::pipeline::Ev> = Vec::new();
     let mut stale: Vec<crate::pipeline::Ev> = Vec::new();
+    let mut history: Vec<crate::pipeline::Ev> = Vec::new();
     for b in blocks {
         // The map above was keyed on the *given* `doc_path`, whose shape has
         // historically disagreed with the key the writer used. Normalising on
@@ -371,12 +409,17 @@ pub fn apply_disposition(
             .copied()
             .unwrap_or_else(|| disposition_for(conn, &b.doc_path, false));
         match d {
-            "hard_filter" => continue,
+            "hard_filter" => {
+                if include.iter().any(|s| s == &get_block_state(conn, &b.id)) {
+                    history.push(b);
+                }
+            }
             "downrank_and_async_recompile" | "refuse_or_recompile" => stale.push(b),
             _ => keep.push(b),
         }
     }
     keep.extend(stale);
+    keep.extend(history);
     let _ = high_risk;
     keep
 }

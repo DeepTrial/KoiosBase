@@ -120,6 +120,10 @@ pub struct Ev {
     /// to go on, so "was this found lexically, semantically, or both" was not
     /// answerable -- they over-fetched and re-ranked blindly.
     pub channels: Option<ChannelScores>,
+    /// §8.2 state, set when the route knew it. Present on history requests,
+    /// where a superseded or retracted block is returned on purpose and the
+    /// caller must be able to tell that it is not current.
+    pub state: Option<String>,
 }
 
 /// Per-channel standing for one retrieved block.
@@ -162,6 +166,7 @@ pub fn get_block(conn: &Connection, id: &str) -> Option<Ev> {
                 breadcrumb: r.get::<_, String>(2).unwrap_or_default(),
                 doc_path: r.get::<_, String>(3).unwrap_or_default(),
                 channels: None,
+                state: None,
             })
         },
     )
@@ -276,6 +281,7 @@ pub fn retrieve_channel_cached(
     question: &str,
     limit: usize,
     groups: Option<&[String]>,
+    include_states: &[String],
 ) -> Vec<Ev> {
     let tree_ids = tree_search(conn, question, 3).unwrap_or_default();
     let hybrid =
@@ -294,8 +300,12 @@ pub fn retrieve_channel_cached(
     }
     let mut out: Vec<Ev> = ids.iter().filter_map(|i| get_block(conn, i)).collect();
     out = crate::acl::filter_blocks(conn, out, groups);
-    out = crate::state::filter_visible(conn, out);
-    crate::state::apply_disposition(conn, out, false)
+    // The hidden-state opt-in has to reach THIS filter as well. Passing it only
+    // to `apply_layer` was not enough: the channel-level filter ran first and
+    // dropped superseded blocks before the request was ever consulted, so
+    // asking for history returned nothing.
+    out = crate::state::filter_visible_with(conn, out, include_states);
+    crate::state::apply_disposition_with(conn, out, false, include_states)
 }
 
 pub fn retrieve_channel(
@@ -342,22 +352,37 @@ pub fn retrieve_channel(
 /// channel added earlier and the vector channel added in v0.10.0 — the same
 /// query returned results from the CLI and nothing from MCP. retrieve_all is what
 /// makes "which exit did you use" stop changing the answer.
+/// Everything a caller can ask for in one query.
+///
+/// Grouped because the list outgrew what a positional signature should carry;
+/// adding another knob would otherwise mean touching every call site again.
+#[derive(Default)]
+pub struct Query<'a> {
+    /// Restrict results to a corpus layer: `raw` or `derived`.
+    pub layer: Option<&'a str>,
+    /// §8.2 states to let through that are hidden by default.
+    pub include_states: &'a [String],
+    /// Frontmatter metadata the document must declare, e.g. doc_type.
+    pub filters: &'a [(String, Vec<String>)],
+}
+
 pub fn retrieve_all(
     vault: &std::path::Path,
     conn: &Connection,
     question: &str,
     limit: usize,
     groups: Option<&[String]>,
-    layer: Option<&str>,
+    opts: &Query<'_>,
 ) -> Result<Vec<Ev>, String> {
     crate::embed::require(vault)?;
     let semantic = crate::embed::search_vectors(vault, question, limit * 3)?;
     // Cached graph: this is the per-request hot path under MCP.
-    let lexical = retrieve_channel_cached(vault, conn, question, limit, groups);
+    let lexical =
+        retrieve_channel_cached(vault, conn, question, limit, groups, opts.include_states);
     if semantic.is_empty() {
         let mut out = label_lexical(lexical, limit);
         out = prefer_source_layer(conn, out);
-        return Ok(apply_layer(conn, out, layer, limit, groups));
+        return Ok(apply_layer(conn, out, opts.layer, limit, groups, opts));
     }
     let lex_list: Vec<(String, f64)> = lexical
         .iter()
@@ -395,10 +420,75 @@ pub fn retrieve_all(
         b.channels = Some(cs);
         out.push(b);
     }
+    // #5 — filter during recall, so `limit` is honoured against what the
+    // caller asked for instead of being emptied out afterwards.
+    if !opts.filters.is_empty() {
+        out.retain(|b| matches_filters(conn, &b.id, opts.filters));
+    }
     out.truncate(limit);
     let mut out = prefer_source_layer(conn, out);
-    out = apply_layer(conn, out, layer, limit, groups);
+    out = apply_layer(conn, out, opts.layer, limit, groups, opts);
     Ok(out)
+}
+
+/// Restrict results to blocks whose document declares these field values.
+///
+/// `filters` is `{"doc_type": ["failure"]}` and is applied INSIDE recall rather
+/// than after it. Filtering afterwards is what forced callers to over-fetch by
+/// a large factor and still come up short: they asked for 8, discarded 7, and
+/// got one. Doing it during recall means the limit is honoured against what
+/// the caller actually wanted.
+pub fn matches_filters(
+    conn: &Connection,
+    block_id: &str,
+    filters: &[(String, Vec<String>)],
+) -> bool {
+    if filters.is_empty() {
+        return true;
+    }
+    // The document this block belongs to, with derived `sources/<doc>` pages
+    // resolved back to the document they summarise. Without that, filtering by
+    // a metadata field returned only the raw block and silently dropped the
+    // derived ones -- the "emptied out" failure this filter exists to fix.
+    let mut doc: String = conn
+        .query_row("SELECT doc_path FROM blocks WHERE id=?", [block_id], |r| {
+            r.get(0)
+        })
+        .unwrap_or_default();
+    if let Some(rest) = doc.strip_prefix("sources/") {
+        doc = rest.to_string();
+    }
+    if doc.is_empty() {
+        return false;
+    }
+    let fm: String = conn
+        .query_row(
+            "SELECT COALESCE(frontmatter,'') FROM documents WHERE path=?",
+            [&doc],
+            |r| r.get(0),
+        )
+        .unwrap_or_default();
+    let parsed = serde_json::from_str::<serde_json::Value>(&fm).unwrap_or(serde_json::Value::Null);
+    let Some(obj) = parsed.as_object() else {
+        return false;
+    };
+    for (key, allowed) in filters {
+        let Some(val) = obj.get(key) else {
+            return false;
+        };
+        let hits = match val {
+            serde_json::Value::String(s) => allowed.iter().any(|a| a == s),
+            serde_json::Value::Array(a) => a
+                .iter()
+                .filter_map(|x| x.as_str())
+                .any(|s| allowed.iter().any(|a| a == s)),
+            other => allowed.iter().any(|a| a == &other.to_string()),
+        };
+        if !hits {
+            return false;
+        }
+    }
+    true
 }
 
 /// Simplest inverse of RRF's own scoring: 1/(k+rank).
@@ -493,6 +583,7 @@ fn apply_layer(
     layer: Option<&str>,
     limit: usize,
     groups: Option<&[String]>,
+    opts: &Query<'_>,
 ) -> Vec<Ev> {
     let mut out = match layer {
         Some("raw") => blocks
@@ -506,7 +597,19 @@ fn apply_layer(
         _ => blocks,
     };
     out.truncate(limit);
-    filter_chain(conn, out, groups)
+    let out = filter_chain_with(conn, out, groups, opts.include_states);
+    // A block returned from history must say so, or a caller cannot tell an
+    // old fact from a current one -- which is the whole hazard of letting
+    // hidden states through at all.
+    out.into_iter()
+        .map(|mut b| {
+            let st = crate::state::get_block_state(conn, &b.id);
+            if st != "active" {
+                b.state = Some(st);
+            }
+            b
+        })
+        .collect()
 }
 
 /// The retrieval filter chain, as one callable.
@@ -517,9 +620,22 @@ fn apply_layer(
 /// `cmd_full`, and the §4 escalation below), which is exactly how an anonymous
 /// caller read the restricted blocks directly. One function, no variations.
 pub fn filter_chain(conn: &Connection, blocks: Vec<Ev>, groups: Option<&[String]>) -> Vec<Ev> {
+    filter_chain_with(conn, blocks, groups, &[])
+}
+
+/// The retrieval filter chain, with §8.2 history opt-in.
+///
+/// Same triple as `filter_chain`; `include_states` decides which otherwise
+/// hidden states survive the visibility filter.
+pub fn filter_chain_with(
+    conn: &Connection,
+    blocks: Vec<Ev>,
+    groups: Option<&[String]>,
+    include_states: &[String],
+) -> Vec<Ev> {
     let out = crate::acl::filter_blocks(conn, blocks, groups);
-    let out = crate::state::filter_visible(conn, out);
-    crate::state::apply_disposition(conn, out, false)
+    let out = crate::state::filter_visible_with(conn, out, include_states);
+    crate::state::apply_disposition_with(conn, out, false, include_states)
 }
 
 /// Every block in the corpus, after the filter chain. Used by channel ④ and by

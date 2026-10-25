@@ -75,6 +75,56 @@ const WRITE_AUDIT_LOG: bool = true;
 /// pattern matching on sentences. This gives both a home: the booleans say
 /// whether semantic recall is live, `index_*` say what the stored vectors
 /// were built with, and `error` keeps the human sentence for display.
+/// Read `include_states` (or `history: true`) from a request.
+///
+/// `history: true` is shorthand for "every §8.2 hidden state", which is what
+/// someone auditing a vault actually wants. Explicit lists stay available for
+/// asking for exactly one kind.
+/// Parse `filters: {"doc_type": ["failure"]}` into an ordered list.
+///
+/// Ordered rather than a map so the same shape can be passed straight through
+/// to retrieval without an allocation-per-request HashMap.
+fn filters_of(args: &Value) -> Vec<(String, Vec<String>)> {
+    let Some(obj) = args.get("filters").and_then(|v| v.as_object()) else {
+        return Vec::new();
+    };
+    obj.iter()
+        .filter_map(|(k, v)| {
+            let vals: Vec<String> = match v {
+                Value::String(s) => vec![s.clone()],
+                Value::Array(a) => a
+                    .iter()
+                    .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                    .collect(),
+                _ => Vec::new(),
+            };
+            if vals.is_empty() {
+                None
+            } else {
+                Some((k.clone(), vals))
+            }
+        })
+        .collect()
+}
+
+/// Read `include_states` (or `history: true`) from a request.
+fn states_of(args: &Value) -> Vec<String> {
+    if args.get("history").and_then(|v| v.as_bool()) == Some(true) {
+        return crate::state::FILTERED
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+    }
+    match args.get("include_states").and_then(|v| v.as_array()) {
+        Some(a) => a
+            .iter()
+            .filter_map(|x| x.as_str().map(|s| s.to_string()))
+            .filter(|s| crate::state::VALID_STATES.contains(&s.as_str()))
+            .collect(),
+        None => Vec::new(),
+    }
+}
+
 pub fn tool_status(args: &Value) -> Result<Value, String> {
     let vault = Path::new(&as_str(args, "vault")?).to_path_buf();
     let s = crate::embed::status(&vault);
@@ -259,7 +309,11 @@ pub fn tool_search(args: &Value) -> Result<Value, String> {
         &question,
         top,
         groups_of(args).as_deref(),
-        layer.as_deref(),
+        &crate::pipeline::Query {
+            layer: layer.as_deref(),
+            include_states: &states_of(args),
+            filters: &filters_of(args),
+        },
     )
     .map_err(|e| e.to_string())?;
     let returned = blocks.len();
@@ -272,6 +326,21 @@ pub fn tool_search(args: &Value) -> Result<Value, String> {
         .map(|(r, b)| (b.id.clone(), -(r as f64)))
         .collect();
     let mut out = blocks_to_json(&conn, &blocks);
+    // §8.2 state, when it is not `active`. `blocks_to_json` reads the block
+    // columns only, so this has to be carried across from the Ev explicitly --
+    // otherwise a superseded block returned at the caller's request would be
+    // indistinguishable from a current one.
+    for item in out.iter_mut() {
+        if let Value::Object(m) = item {
+            if let Some(bid) = m.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()) {
+                if let Some(b) = blocks.iter().find(|x| x.id == bid) {
+                    if let Some(st) = &b.state {
+                        m.insert("state".to_string(), json!(st));
+                    }
+                }
+            }
+        }
+    }
     // #6 — attach what a downstream client cannot otherwise recover: which
     // channel(s) each block came from and how strongly, and whether the result
     // window was cut. Without this a caller can only over-fetch and re-rank
@@ -403,7 +472,11 @@ fn tool_write_answer(args: &Value) -> Result<Value, String> {
         &question,
         5,
         groups_of(args).as_deref(),
-        Some("raw"),
+        &crate::pipeline::Query {
+            layer: Some("raw"),
+            include_states: &states_of(args),
+            filters: &filters_of(args),
+        },
     )
     .map_err(|e| e.to_string())?;
     let path = crate::compile::write_answer_page(

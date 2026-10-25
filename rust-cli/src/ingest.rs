@@ -196,16 +196,146 @@ pub fn add_wikilink_edges(
 ) -> rusqlite::Result<()> {
     for b in blocks {
         for link in wikilinks(&b.raw) {
-            let key = (b.id.clone(), link.clone(), "wikilink".to_string());
-            if seen.contains(&key) {
+            // Resolve the target before storing it. Raw `[[target]]` text was
+            // written straight into links.dst, but PPR runs over BLOCK ids, so
+            // every such edge pointed at a node that does not exist -- a dead
+            // edge that looks present in the table and contributes nothing.
+            let targets = resolve_link(conn, &link);
+            if targets.is_empty() {
+                // Keep the raw form and mark it, so an unresolved link is
+                // visible as such rather than silently vanishing.
+                let key = (
+                    b.id.clone(),
+                    link.clone(),
+                    "wikilink-unresolved".to_string(),
+                );
+                if seen.contains(&key) {
+                    continue;
+                }
+                seen.insert(key);
+                conn.execute(
+                    "INSERT INTO links(src,dst,kind,weight) VALUES(?,?,?,?)",
+                    params![b.id, link, "wikilink-unresolved", 0.0f64],
+                )?;
                 continue;
             }
-            seen.insert(key);
-            conn.execute(
-                "INSERT INTO links(src,dst,kind,weight) VALUES(?,?,?,?)",
-                params![b.id, link, "wikilink", 1.0f64],
-            )?;
+            for dst in targets {
+                let key = (b.id.clone(), dst.clone(), "wikilink".to_string());
+                if seen.contains(&key) {
+                    continue;
+                }
+                seen.insert(key);
+                conn.execute(
+                    "INSERT INTO links(src,dst,kind,weight) VALUES(?,?,?,?)",
+                    params![b.id, dst, "wikilink", 1.0f64],
+                )?;
+            }
         }
     }
     Ok(())
+}
+
+/// Block ids a `[[target]]` refers to.
+///
+/// A link names a card, not a block -- so one resolved link fans out to every
+/// block of that document, which is what makes PPR able to spread authority
+/// across a card rather than to a single node. Tried in order: an exact block
+/// id, a document path, a document stem, then a section heading.
+fn resolve_link(conn: &Connection, target: &str) -> Vec<String> {
+    let t = target.trim();
+    if t.is_empty() {
+        return Vec::new();
+    }
+    let candidates = [
+        t.to_string(),
+        format!("{t}.md"),
+        format!("{}.md", t.trim_end_matches(".md")),
+    ];
+    let mut out: Vec<String> = Vec::new();
+    for c in &candidates {
+        let mut stmt = match conn.prepare("SELECT id FROM blocks WHERE doc_path=? ORDER BY ordinal")
+        {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let m = stmt.query_map([c], |r| r.get::<_, String>(0));
+        if let Ok(rows) = m {
+            let found: Vec<String> = rows.flatten().collect();
+            if !found.is_empty() {
+                out = found;
+                break;
+            }
+        }
+    }
+    if out.is_empty() {
+        // A card is usually named by its title, not its filename.
+        let mut stmt = match conn.prepare("SELECT path FROM documents WHERE title=?") {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        if let Ok(path) = stmt.query_row([t], |r| r.get::<_, String>(0)) {
+            let mut s2 =
+                match conn.prepare("SELECT id FROM blocks WHERE doc_path=? ORDER BY ordinal") {
+                    Ok(s) => s,
+                    Err(_) => return Vec::new(),
+                };
+            let rows = s2.query_map([&path], |r| r.get::<_, String>(0));
+            if let Ok(rows) = rows {
+                out = rows.flatten().collect();
+            }
+        }
+    }
+    if out.is_empty() {
+        // Fall back to a section whose heading matches the target, or a
+        // document whose first heading does (which is how a card is usually
+        // named in Chinese: `[[目标卡]]` refers to `# 目标卡`).
+        let mut stmt = match conn.prepare(
+            "SELECT b.id FROM blocks b JOIN sections s ON b.section_id = s.id \
+             WHERE s.title = ? OR s.id LIKE ? ORDER BY b.ordinal",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let pat = format!("%{t}%");
+        let rows = stmt.query_map(params![t, pat], |r| r.get::<_, String>(0));
+        if let Ok(rows) = rows {
+            out = rows.flatten().collect();
+        }
+    }
+    out
+}
+
+/// Re-resolve every unresolved wikilink once the whole corpus is indexed.
+///
+/// Links are written while documents are still being ingested, so a link to a
+/// card that has not been read yet -- or one named by its Chinese title rather
+/// than its filename -- has nothing to point at when the edge is created.
+/// Measured: `[[目标卡]]` stayed unresolved while `[[target.md]]` resolved,
+/// purely by ordering. This runs at the end of `index` and repairs them.
+pub fn resolve_pending_links(conn: &Connection) -> rusqlite::Result<usize> {
+    let pending: Vec<(String, String)> = {
+        let mut stmt =
+            conn.prepare("SELECT src, dst FROM links WHERE kind='wikilink-unresolved'")?;
+        let m = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        m.flatten().collect()
+    };
+    let mut fixed = 0usize;
+    for (src, dst) in pending {
+        let targets = resolve_link(conn, &dst);
+        if targets.is_empty() {
+            continue;
+        }
+        conn.execute(
+            "DELETE FROM links WHERE src=? AND dst=? AND kind='wikilink-unresolved'",
+            params![src, dst],
+        )?;
+        for t in targets {
+            conn.execute(
+                "INSERT OR IGNORE INTO links(src,dst,kind,weight) VALUES(?,?,?,?)",
+                params![src, t, "wikilink", 1.0f64],
+            )?;
+            fixed += 1;
+        }
+    }
+    Ok(fixed)
 }

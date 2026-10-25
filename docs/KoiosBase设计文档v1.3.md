@@ -402,6 +402,31 @@ false。实测 mean pooling 会让**无关查询的分数高于真同义词**（
 且 `failed > 0` 时**非零退出**。此前计数被丢弃、单块失败只 warn 而进程仍退 0，
 导致"半数编码失败的索引"与"完整索引"从外部无法区分。
 
+**同一文档重索引前清理旧块（v0.11.6）**：`INSERT OR REPLACE` 只刷新文档仍产生的行，
+其余原封不动——实测三段落缩成一段后 `/2`、`/3` 仍留在 tree.db，搜索已删文本照样命中，
+可被引用。现在索引一份文档前先清除其 `blocks` / `blocks_fts` / `sections` / `links` /
+`block_state` 旧行。
+
+**状态来自 Markdown（v0.11.6）**：frontmatter 的 `state:`（active|superseded|disputed|
+retracted|draft）在该文档**及其 `sources/` 派生页**的所有块上生效。此前整卡状态只能靠
+`koios retract` 按块写。状态是**派生**的：字段删除或改回 active 即清除，重复 index 不漂移。
+
+**历史状态可显式索取（v0.11.6）**：`koios_search` / `koios_ask` 支持
+`include_states: ["superseded"]` 或 `history: true`；CLI 为 `--include-states superseded`。
+默认行为不变；显式请求时每个块附 `state` 字段。注意 `apply_disposition` 原先把 retracted
+**无条件**硬过滤，所以"历史"对最该审计的状态不可用——现已按请求放行且排在现役块之后。
+`include` 必须透传到**通道级**过滤：只给 `apply_layer` 不够，通道过滤先跑，块在那一步
+就被丢掉了（本次实测踩到）。
+
+**文档元数据过滤（v0.11.6）**：`filters: {"doc_type": ["failure"]}` 在**召回内**生效，
+`limit` 按调用方真正想要的数量兑现（此前只能 overfetch ×8 再过滤，仍可能欠填）。派生页
+按其源文档解析元数据，否则过滤后只剩 raw 块。
+
+**wikilink 目标解析（v0.11.6）**：`[[目标]]` 此前原样写入 `links.dst`，而 PPR 只在块 id
+空间运行，所以指向卡片的链接全是死边。现在解析到块 id（文档路径 / 标题 / 小节名），
+一条链接扇出到该卡所有块；无法解析的保留原样并标记 `wikilink-unresolved`（权重 0）。
+链接在 ingest 中途写入，看不到后建的文档，故在 pass 末尾重解析一次。
+
 **图与连接的复用（v0.11.4）**：长驻 MCP 进程内，链接图按 vault 缓存，失效判据是
 语料指纹（blocks/links 计数 + hash 长度和）。此前每个请求都重扫 `links` 并重算页面
 置信度。实测：每次新建进程约 **2.3 s/query**（含模型加载），单个长驻进程约
