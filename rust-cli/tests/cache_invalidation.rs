@@ -148,7 +148,7 @@ fn graph_reloads_link_weight_delete_restore_and_matches_a_fresh_reader() {
     conn.execute("DELETE FROM links", []).unwrap();
     conn.execute("DELETE FROM blocks", []).unwrap();
     block(
-        conn,
+        &conn,
         "entities/e.md#s/1",
         "entities/e.md",
         "derived",
