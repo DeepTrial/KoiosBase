@@ -66,7 +66,8 @@ pub fn corpus_stamp(conn: &Connection) -> rusqlite::Result<String> {
     drop(stmt);
 
     hasher.update(b"links\0");
-    let mut stmt = conn.prepare("SELECT src,dst,kind,weight FROM links ORDER BY src,dst,kind,weight")?;
+    let mut stmt =
+        conn.prepare("SELECT src,dst,kind,weight FROM links ORDER BY src,dst,kind,weight")?;
     let rows = stmt.query_map([], |r| {
         Ok((
             r.get::<_, String>(0)?,
@@ -85,12 +86,9 @@ pub fn corpus_stamp(conn: &Connection) -> rusqlite::Result<String> {
     drop(stmt);
 
     hasher.update(b"documents\0");
-    let mut stmt = conn.prepare(
-        "SELECT path,COALESCE(frontmatter,'') FROM documents ORDER BY path",
-    )?;
-    let rows = stmt.query_map([], |r| {
-        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-    })?;
+    let mut stmt =
+        conn.prepare("SELECT path,COALESCE(frontmatter,'') FROM documents ORDER BY path")?;
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
     for row in rows {
         let (path, frontmatter) = row?;
         hash_text(&mut hasher, &path);

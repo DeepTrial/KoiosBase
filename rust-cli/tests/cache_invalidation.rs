@@ -43,7 +43,13 @@ fn link(conn: &Connection, src: &str, dst: &str) {
 
 fn fixture(conn: &Connection) {
     document(conn, "entities/e.md", "draft");
-    block(conn, "entities/e.md#s/1", "entities/e.md", "derived", "aaaaaaaaaaaaaaaa");
+    block(
+        conn,
+        "entities/e.md#s/1",
+        "entities/e.md",
+        "derived",
+        "aaaaaaaaaaaaaaaa",
+    );
     link(conn, "entities/e.md#s/1", "raw/a.md#s/1");
 }
 
@@ -141,7 +147,13 @@ fn graph_reloads_link_weight_delete_restore_and_matches_a_fresh_reader() {
     // Simulate a full rebuild with the same row counts but new graph inputs.
     conn.execute("DELETE FROM links", []).unwrap();
     conn.execute("DELETE FROM blocks", []).unwrap();
-    block(conn, "entities/e.md#s/1", "entities/e.md", "derived", "cccccccccccccccc");
+    block(
+        conn,
+        "entities/e.md#s/1",
+        "entities/e.md",
+        "derived",
+        "cccccccccccccccc",
+    );
     link(&conn, "entities/e.md#s/1", "raw/c.md#s/1");
     assert_eq!(graph(&v, &conn).unwrap(), fresh_graph(&conn));
     drop(conn);
