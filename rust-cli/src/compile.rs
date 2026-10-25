@@ -945,9 +945,7 @@ pub fn reconcile_stale_syntheses(conn: &rusqlite::Connection, vault: &Path, stam
 /// Rebuild one page from its recorded recipe. `None` means the page is not
 /// safely replayable; callers must leave both its bytes and stale flag intact.
 fn rebuild_stale_page(conn: &Connection, text: &str, stamp: &str) -> Option<String> {
-    if frontmatter_line_count(text).is_none() {
-        return None;
-    }
+    frontmatter_line_count(text)?;
     let (fm, body) = crate::split_frontmatter(text);
     if frontmatter_value(&fm, "generated") != Some("true") {
         return None;
