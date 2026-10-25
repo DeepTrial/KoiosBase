@@ -106,8 +106,14 @@ fn compile_rebuilds_brief_content_clears_stale_and_is_idempotent() {
     // Clearing the marker is not enough: the derived prose must move to the
     // current raw evidence too, while the original creation date survives.
     let text = fs::read_to_string(&page).unwrap();
-    assert!(text.contains("revenue was 99"), "stale body survived: {text}");
-    assert!(!text.contains("revenue was 32"), "old fact survived: {text}");
+    assert!(
+        text.contains("revenue was 99"),
+        "stale body survived: {text}"
+    );
+    assert!(
+        !text.contains("revenue was 32"),
+        "old fact survived: {text}"
+    );
     assert!(text.contains("created: 2026-10-10"));
     assert!(text.contains("last_compiled: 2026-10-25"));
 
