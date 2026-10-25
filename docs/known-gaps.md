@@ -54,18 +54,20 @@ hand-writes a Chinese/English negation lexicon. Neither is free, and a wrong
 **Fixed when**: `cross_judge` returns non-`unknown` for a pair of sentences that
 share no numerals. Test to add: `("revenue rose", "revenue fell")` → not unknown.
 
-## 3. ~~Stale pages are never auto-recompiled~~ — CLOSED 2026-10-10
+## 3. ~~Stale pages are never auto-recompiled~~ — CLOSED 2026-10-25
 
 Was: nothing called `mark_syntheses_stale` from `src/` at all, so `page_state`
 stayed empty no matter how many times the vault was edited. The read side was
-correct and had nothing to act on. Unit-green, system-broken.
+correct and had nothing to act on. Unit-green, system-broken. The first repair
+then cleared the marker without rebuilding the body, which could present old
+facts as freshly compiled.
 
-Now closed, both directions:
+Now closed for replayable brief and synthesis pages:
 
 | Step | Where | Behaviour |
 | --- | --- | --- |
 | Flag | `cmd_index` | per-doc fingerprint diff (before/after ingest) → `syntheses_citing` → `mark_syntheses_stale` |
-| Clear | `cmd_compile` | `reconcile_stale_syntheses` re-stamps each flagged page and clears the flag |
+| Rebuild | `cmd_compile` | recover the page's raw Block ids, render the body from their current contents, then clear the flag |
 
 Deliberate properties, each covered by `rust-cli/tests/stale_reconcile.rs`:
 
@@ -74,22 +76,20 @@ Deliberate properties, each covered by `rust-cli/tests/stale_reconcile.rs`:
 - **A brand-new vault flags nothing.** The first `index` has no fingerprint
   history to diff against; treating "was absent" as "changed" would dirty every
   export on first contact.
+- **Content is rebuilt, not just re-stamped.** Brief bullets and synthesis facts
+  reflect the current raw evidence. Brief creation dates, synthesis confidence,
+  human conflict notes, and page lifecycle state survive recompilation.
+- **Fail closed.** Missing Blocks, malformed recipes, non-generated pages, and
+  unsupported templates keep their original bytes and stale flag. Missing
+  evidence is never treated as an empty successful result.
 - **Idempotent.** A second `compile` leaves the page byte-identical.
 - **Compile writes, reads never do.** Reconciliation sits in `compile`, not in
   `search`/`query`, so a read can never mutate the vault behind your back.
 
-The recompile is deliberately conservative: it re-stamps the page and clears
-`stale`, it does **not** regenerate the body. Synthesis pages come from three
-templates (`render_synthesis`, `render_brief`, `render_mindmap`) and re-rendering
-from one would clobber the other two. Regenerating factual content is a separate
-piece of work.
-
-**What remains**: a stale page gets its marker cleared, but its *content* is not
-re-derived from the new sources. Doing that honestly needs a per-template
-regeneration story, which is why it is still outstanding:
-
-- **Regenerating the body of an existing synthesis page.** Today the page keeps
-  the body it was authored with; only `stale` and `last_compiled` move.
+**What remains**: mindmaps do not record a sufficient rebuild recipe. They stay
+stale rather than being regenerated with ambiguous inputs or an implicit ACL
+context. Supporting them requires persisting their root and access scope, then
+reusing the section-tree builder without broadening or narrowing visibility.
 
 ## 4. The Windows binary is verified structurally only
 
@@ -119,6 +119,8 @@ alongside it.
 
 - **2026-10-10** — entry 3: the §8.3 write side now flags and clears stale
   synthesis pages automatically. See `rust-cli/tests/stale_reconcile.rs`.
+- **2026-10-25** — entry 3: brief and synthesis reconciliation now rebuilds
+  content from current raw evidence and fails closed when replay is impossible.
 
-Last reviewed: 2026-10-10 — entries 1–4 verified against the tree at `08cf68f`
-plus the §8.3 reconciliation work above.
+Last reviewed: 2026-10-25 — entry 3 updated for content recompilation; the
+remaining mindmap limitation is recorded above.

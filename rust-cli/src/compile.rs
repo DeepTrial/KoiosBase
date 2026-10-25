@@ -321,7 +321,15 @@ fn extract_section(text: &str, heading: &str) -> Option<String> {
 fn replace_section(text: &str, heading: &str, body: &str) -> String {
     let needle = format!("## {heading}\n");
     let Some(start) = text.find(&needle) else {
-        return text.to_string();
+        // Synthesis pages can acquire a human conflict section after their
+        // initial render. Human-owned content must survive even when the fresh
+        // machine template does not contain that optional section.
+        let mut out = text.to_string();
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(&format!("\n## {heading}\n{body}\n"));
+        return out;
     };
     let body_start = start + needle.len();
     let end = text[body_start..]
@@ -886,13 +894,13 @@ pub fn write_answer_page(
     Ok(target)
 }
 
-/// Rebuild every synthesis page flagged stale and clear its flag.
+/// Rebuild every replayable generated page under synthesis/ and clear its flag.
 ///
-/// A synthesis page is DERIVED (P1), so the honest fix for "its sources moved
-/// on" is to regenerate it from the current index and drop the marker. Doing
-/// this inside `cmd_compile` rather than on every read keeps mutations where a
-/// human asked for them — and leaves an audit trail in the page's
-/// `last_compiled` stamp.
+/// Briefs and syntheses record their raw Block ids, so their bodies can be
+/// regenerated from the current index rather than merely re-stamped. A page is
+/// cleared only after a complete render and write. Missing evidence, unsupported
+/// templates (including mindmaps), and human-authored pages stay stale instead
+/// of being made to look fresh by dropping or preserving obsolete content.
 pub fn reconcile_stale_syntheses(conn: &rusqlite::Connection, vault: &Path, stamp: &str) -> usize {
     let stale = crate::state::stale_pages(conn);
     if stale.is_empty() {
@@ -900,47 +908,144 @@ pub fn reconcile_stale_syntheses(conn: &rusqlite::Connection, vault: &Path, stam
     }
     let mut n = 0usize;
     for key in stale {
-        // Keys are normalized (`synthesis/x.md`), so the stem is everything
-        // after the last '/', which is both the topic and the filename.
-        let topic = match key.rsplit('/').next() {
-            Some(t) => t.trim_end_matches(".md").to_string(),
-            None => continue,
+        // Only generated pages directly inside wiki/synthesis are in scope. In
+        // particular, never reconcile a raw/entity page or follow a nested path.
+        let Some(name) = key.strip_prefix("synthesis/") else {
+            continue;
         };
-        if topic.is_empty() {
+        if name.is_empty() || name.contains('/') || !name.ends_with(".md") {
             continue;
         }
         let file = vault.join("wiki").join(&key);
-        if !file.exists() {
-            continue;
-        }
-        // Keep the page's recorded forms — its entities and its cited facts —
-        // and only rewrite the bits a recompile owns. Regenerating the facts
-        // from scratch here would silently drop content the page was authored
-        // with, so the page is re-stamped and un-flagged, nothing else.
         let Ok(text) = std::fs::read_to_string(&file) else {
             continue;
         };
-        let updated = refresh_stamp_and_stale(&text, stamp);
+        let Some(updated) = rebuild_stale_page(conn, &text, stamp) else {
+            continue;
+        };
+        let prev_state: String = conn
+            .query_row(
+                "SELECT state FROM page_state WHERE page_path=?",
+                rusqlite::params![&key],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap_or_else(|_| "active".to_string());
         if std::fs::write(&file, updated).is_err() {
             continue;
         }
-        if crate::state::set_page_state(conn, &key, 0, "active", "recompiled").is_ok() {
+        // Staleness and lifecycle are orthogonal: compiling fresh evidence must
+        // not turn a human's disputed/retracted judgement back into active.
+        if crate::state::set_page_state(conn, &key, 0, &prev_state, "recompiled").is_ok() {
             n += 1;
         }
     }
     n
 }
 
-/// Rewrite a compiled page's frontmatter to record the recompile.
+/// Rebuild one page from its recorded recipe. `None` means the page is not
+/// safely replayable; callers must leave both its bytes and stale flag intact.
+fn rebuild_stale_page(conn: &Connection, text: &str, stamp: &str) -> Option<String> {
+    if frontmatter_line_count(text).is_none() {
+        return None;
+    }
+    let (fm, body) = crate::split_frontmatter(text);
+    if frontmatter_value(&fm, "generated") != Some("true") {
+        return None;
+    }
+    let kind = frontmatter_value(&fm, "type")?;
+    if kind != "brief" && kind != "synthesis" {
+        return None;
+    }
+    let title = body
+        .lines()
+        .find_map(|line| line.strip_prefix("# "))
+        .map(str::trim)
+        .filter(|title| !title.is_empty())?;
+    let ids = recorded_block_ids(&fm, &body, kind == "brief")?;
+    let mut blocks = Vec::with_capacity(ids.len());
+    for id in ids {
+        // Missing evidence is not an empty result. Keeping the page stale is
+        // safer than deleting the corresponding assertion and declaring success.
+        blocks.push(crate::pipeline::get_block(conn, &id)?);
+    }
+
+    if kind == "brief" {
+        let mut rendered = crate::studio::render_brief(title, &blocks, stamp);
+        if let Some(created) = frontmatter_value(&fm, "created") {
+            rendered = set_frontmatter_field(&rendered, "created", created);
+        }
+        Some(refresh_stamp_and_stale(&rendered, stamp))
+    } else {
+        let entities_text = extract_section(text, "覆盖实体")?;
+        static ENTITY_LINK_RE: Lazy<Regex> =
+            Lazy::new(|| Regex::new(r"\[\[entities/([^\]]+)\]\]").unwrap());
+        let mut entities = Vec::new();
+        for cap in ENTITY_LINK_RE.captures_iter(&entities_text) {
+            let id = cap[1].trim().to_string();
+            if !id.is_empty() && !entities.contains(&id) {
+                entities.push(id);
+            }
+        }
+        let facts = blocks
+            .iter()
+            .map(|block| (block.raw.clone(), block.id.clone()))
+            .collect::<Vec<_>>();
+        let rendered = render_synthesis(title, &entities, &facts, stamp, false);
+        Some(carry_forward(&rendered, &Some(text.to_string()), stamp))
+    }
+}
+
+/// A top-level scalar in the simple frontmatter emitted by KoiosBase templates.
+/// Unsupported YAML shapes are deliberately not guessed at during recompile.
+fn frontmatter_value<'a>(fm: &'a str, key: &str) -> Option<&'a str> {
+    let prefix = format!("{key}:");
+    fm.lines()
+        .find_map(|line| line.strip_prefix(&prefix))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+/// Recover Block ids in their original order: frontmatter sources first, then
+/// citations beyond the frontmatter's truncation limit, then brief evidence.
+fn recorded_block_ids(fm: &str, body: &str, brief: bool) -> Option<Vec<String>> {
+    let sources = frontmatter_value(fm, "sources")?;
+    let sources = sources.strip_prefix('[')?.strip_suffix(']')?;
+    let mut ids = Vec::new();
+    for source in sources.split(',') {
+        let id = source.trim().strip_prefix("raw/")?;
+        push_recorded_id(&mut ids, id);
+    }
+    if ids.is_empty() {
+        return None;
+    }
+
+    static RAW_LINK_RE: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"\[\[raw/([^\]|]+)(?:\|[^\]]*)?\]\]").unwrap());
+    for cap in RAW_LINK_RE.captures_iter(body) {
+        push_recorded_id(&mut ids, cap[1].trim());
+    }
+    if brief {
+        // render_brief's evidence list retains up to 20 blocks, beyond both the
+        // five frontmatter sources and the twelve cited bullet sentences.
+        static EVIDENCE_RE: Lazy<Regex> =
+            Lazy::new(|| Regex::new(r"(?m)^- `([^`\r\n]+)`\s+—").unwrap());
+        for cap in EVIDENCE_RE.captures_iter(body) {
+            push_recorded_id(&mut ids, cap[1].trim());
+        }
+    }
+    Some(ids)
+}
+
+fn push_recorded_id(ids: &mut Vec<String>, id: &str) {
+    if !id.is_empty() && !ids.iter().any(|known| known == id) {
+        ids.push(id.to_string());
+    }
+}
+
+/// Refresh the two compilation markers after a successful brief render.
 ///
-/// String surgery rather than a full re-render: synthesis pages are written by
-/// three different templates (`render_synthesis`, `render_brief`,
-/// `render_mindmap`) whose bodies this function knows nothing about, and
-/// re-rendering from one would clobber the others. So touch only the keys every
-/// compiled page shares, and *add* the ones this maturity marker needs when the
-/// template omitted them — `studio brief` has neither `stale:` nor
-/// `last_compiled:`, which is why an earlier version of this was a no-op on
-/// exported pages.
+/// This remains string surgery so the original frontmatter shape is retained;
+/// the body itself has already been regenerated from current raw evidence.
 pub fn refresh_stamp_and_stale(text: &str, stamp: &str) -> String {
     let Some(fm_end) = frontmatter_line_count(text) else {
         return text.to_string();
