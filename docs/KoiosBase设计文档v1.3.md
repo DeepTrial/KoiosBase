@@ -408,8 +408,13 @@ false。实测 mean pooling 会让**无关查询的分数高于真同义词**（
 `block_state` 旧行。
 
 **状态来自 Markdown（v0.11.6）**：frontmatter 的 `state:`（active|superseded|disputed|
-retracted|draft）在该文档**及其 `sources/` 派生页**的所有块上生效。此前整卡状态只能靠
-`koios retract` 按块写。状态是**派生**的：字段删除或改回 active 即清除，重复 index 不漂移。
+retracted|draft）在该文档**及其 `sources/` 派生页**的所有块上生效。字段删除或改回 active
+即清除文档级声明，重复 index 不漂移。`koios retract` 的按块人工决定另存入
+`raw/.koios/state.md`（Markdown 中的版本化 JSON 代码块），同时支持 Markdown 与 PDF 来源；
+普通重索引及删除 `.index` 后的冷重建都会恢复块状态并重放引用页的 stale 级联。
+块级人工决定比文档级 `state: active` 更具体，优先生效；账本同时记录内容 hash，避免旧
+断言的撤回误伤同地址的新内容。账本损坏时索引必须报错，不得静默把内容恢复为 active。
+`.koios/` 是元数据而非语料，不参与索引，并随 `raw/` 一同备份。
 
 **历史状态可显式索取（v0.11.6）**：`koios_search` / `koios_ask` 支持
 `include_states: ["superseded"]` 或 `history: true`；CLI 为 `--include-states superseded`。

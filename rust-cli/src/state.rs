@@ -256,12 +256,158 @@ pub fn stale_pages(conn: &Connection) -> Vec<String> {
     out
 }
 
+const STATE_LEDGER_VERSION: u32 = 1;
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct StateLedger {
+    version: u32,
+    #[serde(default)]
+    blocks: std::collections::BTreeMap<String, LedgerBlockState>,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct LedgerBlockState {
+    state: String,
+    reason: String,
+    content_hash: String,
+    updated: String,
+}
+
+fn empty_ledger() -> StateLedger {
+    StateLedger {
+        version: STATE_LEDGER_VERSION,
+        blocks: std::collections::BTreeMap::new(),
+    }
+}
+
+fn ledger_path(vault: &std::path::Path) -> std::path::PathBuf {
+    // Keep the ledger below raw/ so the existing backup/restore path carries it.
+    // walk_docs skips this metadata directory; its contents are not corpus.
+    vault.join("raw").join(".koios").join("state.md")
+}
+
+fn load_ledger(vault: &std::path::Path) -> Result<StateLedger, String> {
+    let path = ledger_path(vault);
+    if !path.exists() {
+        return Ok(empty_ledger());
+    }
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let start = text
+        .find("```json")
+        .map(|p| p + "```json".len())
+        .ok_or_else(|| format!("{} has no JSON state block", path.display()))?;
+    let end = text[start..]
+        .find("```")
+        .map(|p| start + p)
+        .ok_or_else(|| format!("{} has an unterminated JSON state block", path.display()))?;
+    let ledger: StateLedger = serde_json::from_str(text[start..end].trim())
+        .map_err(|e| format!("cannot parse {}: {e}", path.display()))?;
+    if ledger.version != STATE_LEDGER_VERSION {
+        return Err(format!(
+            "{} uses unsupported state version {}",
+            path.display(),
+            ledger.version
+        ));
+    }
+    for (id, block) in &ledger.blocks {
+        if !VALID_STATES.contains(&block.state.as_str()) {
+            return Err(format!("{} has invalid state for {id}", path.display()));
+        }
+    }
+    Ok(ledger)
+}
+
+fn save_ledger(vault: &std::path::Path, ledger: &StateLedger) -> Result<(), String> {
+    let path = ledger_path(vault);
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("{} has no parent directory", path.display()))?;
+    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    let json = serde_json::to_string_pretty(ledger).map_err(|e| e.to_string())?;
+    let text = format!(
+        "# KoiosBase block states\n\n\
+         Human lifecycle decisions are source facts (P1). The JSON block is\n\
+         machine-managed; `.index/` can always be rebuilt from this file.\n\n\
+         ```json\n{json}\n```\n"
+    );
+    std::fs::write(&path, text).map_err(|e| format!("cannot write {}: {e}", path.display()))
+}
+
+fn persist_retraction(
+    conn: &Connection,
+    vault: &std::path::Path,
+    block_id: &str,
+    reason: &str,
+) -> Result<(), String> {
+    let content_hash: String = conn
+        .query_row("SELECT hash FROM blocks WHERE id=?", [block_id], |r| {
+            r.get(0)
+        })
+        .map_err(|e| format!("cannot retract {block_id}: {e}"))?;
+    let mut ledger = load_ledger(vault)?;
+    ledger.blocks.insert(
+        block_id.to_string(),
+        LedgerBlockState {
+            state: "retracted".to_string(),
+            reason: reason.to_string(),
+            content_hash,
+            updated: now(),
+        },
+    );
+    save_ledger(vault, &ledger)
+}
+
+/// Restore human decisions after both ordinary re-indexing and a cold rebuild.
+/// Block-level decisions are more specific than document frontmatter `state:`.
+/// Replaying the reverse-citation cascade also rebuilds `page_state`, which is
+/// derived and therefore intentionally not persisted in the ledger.
+pub fn apply_markdown_states(
+    conn: &Connection,
+    vault: &std::path::Path,
+) -> Result<usize, String> {
+    let ledger = load_ledger(vault)?;
+    let mut applied = 0usize;
+    for (block_id, block) in ledger.blocks {
+        let content_hash: String = match conn.query_row(
+            "SELECT hash FROM blocks WHERE id=?",
+            [&block_id],
+            |r| r.get(0),
+        ) {
+            Ok(hash) => hash,
+            Err(_) => continue,
+        };
+        // Positional ids can be reused by a later edit. A verdict belongs to the
+        // assertion that was reviewed, not to different text at the same address.
+        if content_hash != block.content_hash {
+            continue;
+        }
+        set_block_state(conn, &block_id, &block.state, &block.reason)?;
+        for page in referencing_pages(conn, &block_id, Some(vault)) {
+            mark_stale(
+                conn,
+                &page,
+                &format!("cited {} {block_id}: {}", block.state, block.reason),
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        applied += 1;
+    }
+    Ok(applied)
+}
+
 pub fn cascade_retraction(
     conn: &Connection,
     block_id: &str,
     reason: &str,
     vault: Option<&std::path::Path>,
 ) -> Result<Vec<String>, String> {
+    // Persist first: if the DB update or cascade then fails, the next index can
+    // still recover the human decision. A failed ledger write aborts the command
+    // rather than reporting a retraction that a rebuild would silently forget.
+    if let Some(v) = vault {
+        persist_retraction(conn, v, block_id, reason)?;
+    }
     set_block_state(conn, block_id, "retracted", reason)?;
     let pages = referencing_pages(conn, block_id, vault);
     for p in &pages {

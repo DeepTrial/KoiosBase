@@ -708,7 +708,10 @@ pub fn walk_md(base: &Path) -> Vec<PathBuf> {
             for e in rd.flatten() {
                 let p = e.path();
                 if p.is_dir() {
-                    if p.file_name().and_then(|n| n.to_str()) != Some(".index") {
+                    if !matches!(
+                        p.file_name().and_then(|n| n.to_str()),
+                        Some(".index") | Some(".koios")
+                    ) {
                         stack.push(p);
                     }
                 } else if p.extension().and_then(|x| x.to_str()) == Some("md") {
@@ -729,7 +732,10 @@ pub fn walk_docs(base: &Path) -> Vec<PathBuf> {
             for e in rd.flatten() {
                 let p = e.path();
                 if p.is_dir() {
-                    if p.file_name().and_then(|n| n.to_str()) != Some(".index") {
+                    if !matches!(
+                        p.file_name().and_then(|n| n.to_str()),
+                        Some(".index") | Some(".koios")
+                    ) {
                         stack.push(p);
                     }
                 } else if ingest::is_supported(&p) {
@@ -1082,6 +1088,11 @@ pub fn cmd_index(path: &Path) -> rusqlite::Result<()> {
     // Derived from Markdown each run: removing the key returns the card to
     // active, so repeated `index` converges instead of accumulating.
     apply_declared_states(&conn)?;
+    // Human block-level decisions are also Markdown facts. Apply them after the
+    // document-level declaration so the more specific decision wins, and replay
+    // their citation cascade to rebuild page_state after a cold .index rebuild.
+    crate::state::apply_markdown_states(&conn, path)
+        .map_err(rusqlite::Error::InvalidParameterName)?;
     // Backfill navigational summaries: a section's first block becomes its
     // summary (§4.1). Done after ingest because the body arrives AFTER the
     // heading, so it is not available when the heading line is seen.
