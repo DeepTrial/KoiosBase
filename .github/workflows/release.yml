@@ -21,50 +21,103 @@ jobs:
     # MSVC cannot link on Linux. mupdf-sys already handles msvc (it branches on
     # target.env == "msvc" in its build script), so nothing else was blocking.
     runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - name: linux-x86_64
             os: ubuntu-latest
+            container: ubuntu:20.04
             target: x86_64-unknown-linux-gnu
+            variant: lexical
             asset: koios-linux-x86_64
             bin: koios
-            # glibc, not musl. MuPDF compiles a C++ translation unit
-            # (source/fitz/tessocr.cpp) through the generic %.cpp rule, so the
-            # build needs a C++ compiler for the target. musl-tools ships only
-            # the C toolchain — there is no musl C++ cross-compiler in the
-            # Ubuntu repos — so the musl job died with
-            # "x86_64-linux-musl-g++: not found". The runner already has g++.
+            # glibc floor, not build-host floor. Building on ubuntu-latest
+            # stamped the binary with GLIBC_2.39 symbols (measured via
+            # objdump on the v0.11.6 asset), so it would not start on
+            # Ubuntu 20.04. The floor comes from the build environment, so
+            # we build inside an ubuntu:20.04 container (glibc 2.31).
+            # musl was rejected earlier: MuPDF compiles a C++ translation
+            # unit through the generic %.cpp rule and musl-tools ships no
+            # C++ cross-compiler in the Ubuntu repos.
+          - name: linux-x86_64-embedding
+            os: ubuntu-latest
+            container: ubuntu:20.04
+            target: x86_64-unknown-linux-gnu
+            variant: embedding
+            asset: koios-linux-x86_64-embedding.tar.gz
+            bin: koios
+            # Same container, plus the `ort-system` build linked against the
+            # OFFICIAL ONNX Runtime manylinux_2_28 build (measured: highest
+            # symbol GLIBC_2.28, GLIBCXX_3.4.22 — both below 2.31). The
+            # `ort-download` prebuilt runtime is NOT used: it does not even
+            # link on glibc 2.35 (see §5.2.1).
           - name: windows-x86_64
             os: windows-latest
             target: x86_64-pc-windows-msvc
+            variant: lexical
             asset: koios-windows-x86_64.exe
             bin: koios.exe
             # Native runner: MSVC is preinstalled, so no install step needed.
 
     steps:
+      - name: Install build prerequisites (linux container)
+        # The container is minimal and runs as root: no sudo, no git, no
+        # Rust, no libclang (bindgen needs it for the MuPDF bindings).
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential pkg-config curl git ca-certificates \
+            llvm-dev libclang-dev clang \
+            python3 python3-pip python3-venv unzip binutils
+
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install cross toolchain (linux)
-        # Nothing to install on Windows: the native runner already has both the
-        # MSVC linker and bindgen's requirements.
-        if: matrix.pre != ''
-        run: ${{ matrix.pre }}
-
-      - name: Install bindgen prerequisites (linux)
-        # Kept from before: LLVM/libclang for the generated MuPDF bindings.
-        # Windows relies on the runner image.
-        if: matrix.os == 'ubuntu-latest'
-        run: sudo apt-get update && sudo apt-get install -y llvm-dev libclang-dev clang
+      - name: Install bindgen prerequisites (windows host only)
+        # Linux got libclang in the container step above; Windows relies on
+        # the runner image. Kept as a separate step so the Linux install is
+        # sudo-free (containers run as root and ship no sudo).
+        if: matrix.os == 'windows-latest'
+        run: echo "Windows runner image already provides MSVC and libclang"
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.target }}
+          key: ${{ matrix.target }}-${{ matrix.variant }}
+
+      - name: Fetch official ONNX Runtime (embedding)
+        # Source: the official manylinux_2_28 wheel on PyPI. GitHub release
+        # tarballs are the canonical upstream but the wheel is byte-identical
+        # for the .so, version-pinned, and verified reachable. pip is upgraded
+        # first because ubuntu:20.04 ships pip 20.0, which does not understand
+        # manylinux_2_2x platform tags.
+        if: matrix.variant == 'embedding'
+        run: |
+          set -e
+          python3 -m pip install --upgrade pip
+          python3 -m pip download onnxruntime==1.32.0 --no-deps \
+            --only-binary=:all: --platform manylinux_2_28_x86_64 \
+            --python-version 3.11 --abi cp311 -d /tmp/ort_wheel
+          unzip -o /tmp/ort_wheel/*.whl -d /tmp/ort_pkg
+          SO=$(find /tmp/ort_pkg -name 'libonnxruntime.so.*' | head -1)
+          ln -sf "$SO" /tmp/ort_pkg/onnxruntime/capi/libonnxruntime.so
+          {
+            echo 'prefix=/tmp/ort_pkg/onnxruntime/capi'
+            echo 'libdir=${prefix}'
+            echo 'includedir=${prefix}'
+            echo ''
+            echo 'Name: libonnxruntime'
+            echo 'Description: ONNX Runtime (official manylinux_2_28 build)'
+            echo 'Version: 1.32.0'
+            echo 'Libs: -L${libdir} -lonnxruntime'
+            echo 'Cflags: -I${includedir}'
+          } > /tmp/libonnxruntime.pc
+          echo "ORT_SO=$SO" >> "$GITHUB_ENV"
 
       - name: Build
         working-directory: rust-cli
@@ -76,13 +129,50 @@ jobs:
           # file through the `cc` crate, and `cc` defaults to the STATIC CRT
           # (MT_StaticRelease) on msvc. Result: LNK2038 RuntimeLibrary
           # mismatch x1036, then LNK1319, no .exe.
-          #
           # RUSTFLAGS alone does not fix this: it steers rustc, not how `cc`
           # invokes the C compiler. /MD has to reach `cc` directly, and CFLAGS
           # is the channel it reads.
           CFLAGS: ${{ matrix.os == 'windows-latest' && '/MD /O2' || '' }}
           CXXFLAGS: ${{ matrix.os == 'windows-latest' && '/MD /O2' || '' }}
-        run: cargo build --release --target ${{ matrix.target }}
+          # embedding: link the system libonnxruntime found by pkg-config,
+          # and let the packaged binary find the bundled copy under lib/
+          # next to the executable ($ORIGIN is evaluated by the loader).
+          PKG_CONFIG_PATH: ${{ matrix.variant == 'embedding' && '/tmp' || '' }}
+          RUSTFLAGS: ${{ matrix.variant == 'embedding' && '-C link-args=-Wl,-rpath,$ORIGIN/lib' || '' }}
+        run: |
+          set -e
+          if [ "${{ matrix.variant }}" = "embedding" ]; then
+            cargo build --release --target ${{ matrix.target }} --features ort-system
+          else
+            cargo build --release --target ${{ matrix.target }}
+          fi
+
+      - name: glibc floor gate (linux)
+        # Acceptance, not assumption: fail the build if the produced binary
+        # (or, for embedding, the bundled runtime) references a glibc symbol
+        # newer than 2.31. This is the check the v0.11.6 asset would have
+        # failed -- it required GLIBC_2.39.
+        if: matrix.os == 'ubuntu-latest'
+        working-directory: rust-cli
+        run: |
+          set -e
+          BIN=target/${{ matrix.target }}/release/${{ matrix.bin }}
+          MAX=$(objdump -T "$BIN" | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sort -uV | tail -1)
+          echo "koios binary max glibc symbol: $MAX"
+          NEWEST=$(printf '%s\nGLIBC_2.31\n' "$MAX" | sort -V | tail -1)
+          if [ "$NEWEST" != "GLIBC_2.31" ]; then
+            echo "glibc floor gate FAILED: binary needs $MAX > GLIBC_2.31"
+            exit 1
+          fi
+          if [ "${{ matrix.variant }}" = "embedding" ]; then
+            MAXSO=$(objdump -T "$ORT_SO" | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sort -uV | tail -1)
+            echo "bundled libonnxruntime max glibc symbol: $MAXSO"
+            NEWESTSO=$(printf '%s\nGLIBC_2.31\n' "$MAXSO" | sort -V | tail -1)
+            if [ "$NEWESTSO" != "GLIBC_2.31" ]; then
+              echo "glibc floor gate FAILED: runtime needs $MAXSO > GLIBC_2.31"
+              exit 1
+            fi
+          fi
 
       - name: Smoke test (POSIX shell only)
         if: matrix.os == 'ubuntu-latest'
@@ -90,6 +180,16 @@ jobs:
         run: |
           set -e
           BIN=target/${{ matrix.target }}/release/${{ matrix.bin }}
+          if [ "${{ matrix.variant }}" = "embedding" ]; then
+            # The binary must resolve its bundled runtime through the rpath,
+            # not through a system-wide install.
+            mkdir -p /tmp/embed_smoke/lib
+            cp "$BIN" /tmp/embed_smoke/koios
+            cp "$ORT_SO" /tmp/embed_smoke/lib/libonnxruntime.so.1
+            cp /tmp/ort_pkg/onnxruntime/capi/libonnxruntime_providers_shared.so /tmp/embed_smoke/lib/
+            ldd /tmp/embed_smoke/koios | grep -q "libonnxruntime.so.1 => /tmp/embed_smoke/lib/"
+            BIN=/tmp/embed_smoke/koios
+          fi
           "$BIN" --version
           rm -rf /tmp/smoke && "$BIN" init /tmp/smoke
           printf -- '---\ntitle: 冒烟\n---\n\n# 章节\n\nACME 公司 2024 年营收为 32 亿元。\n' > /tmp/smoke/raw/s.md
@@ -119,12 +219,24 @@ jobs:
           & $bin index $smoke --allow-no-embedding
           & $bin search 营收 -p $smoke --allow-no-embedding
 
-      - name: Rename artifact
+      - name: Package artifact
         shell: bash
+        working-directory: rust-cli
         run: |
-          mkdir -p dist
-          cp rust-cli/target/${{ matrix.target }}/release/${{ matrix.bin }} dist/${{ matrix.asset }}
-          chmod +x dist/${{ matrix.asset }} 2>/dev/null || true
+          set -e
+          mkdir -p ../dist
+          if [ "${{ matrix.variant }}" = "embedding" ]; then
+            STAGE=/tmp/koios-embedding
+            rm -rf "$STAGE" && mkdir -p "$STAGE/lib"
+            cp target/${{ matrix.target }}/release/${{ matrix.bin }} "$STAGE/koios"
+            cp "$ORT_SO" "$STAGE/lib/libonnxruntime.so.1"
+            cp /tmp/ort_pkg/onnxruntime/capi/libonnxruntime_providers_shared.so "$STAGE/lib/"
+            chmod +x "$STAGE/koios"
+            tar -C /tmp -czf ../dist/${{ matrix.asset }} koios-embedding
+          else
+            cp target/${{ matrix.target }}/release/${{ matrix.bin }} ../dist/${{ matrix.asset }}
+            chmod +x ../dist/${{ matrix.asset }} 2>/dev/null || true
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
