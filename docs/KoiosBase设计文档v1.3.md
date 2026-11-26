@@ -974,6 +974,14 @@ glibc 2.35 上直接构建失败或产出起不来的二进制。无 ort 的二�
 
 构建：`cargo build --release --features ort-download`（或 `ort-system`）。
 
+**glibc 基线（v0.11.7）**：release 二进制的 glibc floor 由**构建环境**决定，与代码无关——
+v0.11.6 在 `ubuntu-latest`（glibc 2.39）构建，实测二进制最高需要 `GLIBC_2.39`，Ubuntu
+20.04（glibc 2.31）无法启动。现在 Linux 产物全部在 `ubuntu:20.04` 容器内构建，floor 即
+2.31；embedding 资产（`koios-linux-x86_64-embedding.tar.gz`）用 `ort-system` 链接
+**官方 manylinux_2_28 运行时**（实测最高 `GLIBC_2.28` / `GLIBCXX_3.4.22`，低于 2.31），
+以 rpath `$ORIGIN/lib` 捆绑随包分发。CI 对二进制与捆绑运行时跑 objdump 符号门禁，
+出现任何高于 `GLIBC_2.31` 的引用即构建失败。
+
 **常驻 embedding 后的资源账（2026-10-22 实测修订）**：§5.2.1 已实装，
 Qwen3-Embedding-0.6B int8 常驻后，运行足迹重算如下：
 
