@@ -974,6 +974,17 @@ glibc 2.35 上直接构建失败或产出起不来的二进制。无 ort 的二�
 
 构建：`cargo build --release --features ort-download`（或 `ort-system`）。
 
+**更正（v0.11.7）**：本节自 v0.10 起声称「`ort-download` / `ort-system` 均非默认项，
+`cargo build` 得到不含 ONNX Runtime 的词法二进制」。该承诺从未兑现：`ort` 在
+Cargo.toml 中是非可选依赖，**所有构建**（含 v0.11.6 及之前全部 release 资产）都经
+ort-sys 默认链接策略下载 pyke 预编译 `libonnxruntime.a` 并静态链入。实证：v0.11.6 资产
+`NEEDED` 无 `libonnxruntime.so`（运行时已被静态烤入），objdump 含 `__isoc23_strtol`
+（GLIBC_2.38）与 `__libc_single_threaded`（GLIBC_2.32）。因此「无 ort 版」实际并不存在，
+release 二进制的 glibc floor 也主要来自这些静态对象而非 Rust 代码本身。v0.11.7 将
+`ort` / `tokenizers` 改为可选依赖（由两个链接 feature 经 `dep:` 引入），默认构建首次
+真正不含 ort（16.2MB、零 onnxruntime 符号、34 个测试二进制全绿），文档所述行为自此
+与实现一致。
+
 **glibc 基线（v0.11.7）**：release 二进制的 glibc floor 由**构建环境**决定，与代码无关——
 v0.11.6 在 `ubuntu-latest`（glibc 2.39）构建，实测二进制最高需要 `GLIBC_2.39`，Ubuntu
 20.04（glibc 2.31）无法启动。现在 Linux 产物全部在 `ubuntu:20.04` 容器内构建，floor 即
