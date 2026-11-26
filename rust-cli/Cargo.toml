@@ -40,8 +40,8 @@ sha2 = "0.10.9"
 ureq = { version = "3", default-features = false, features = ["json", "rustls"] }
 toml = "1.1.7"
 serde = { version = "1.0.229", features = ["derive"] }
-ort = "2.0.0-rc.15"
-tokenizers = "0.21"
+ort = { version = "2.0.0-rc.15", optional = true }
+tokenizers = { version = "0.21", optional = true }
 sqlite-vec = "0.1.9"
 # Only for restoring SIGPIPE's platform default (see main::install_sigpipe_default)
 # and for undoing it in spawned model children (see llm::run_command).
@@ -60,8 +60,8 @@ default = []
 # Bundle the ONNX Runtime binaries. Convenient, but they are built against a
 # newer glibc than some hosts ship: on glibc 2.35 the prebuilt runtime does not
 # link. Use `ort-system` there.
-ort-download = ["ort/download-binaries"]
+ort-download = ["dep:ort", "dep:tokenizers", "ort/download-binaries"]
 # Link against a libonnxruntime the system already provides (pkg-config), so
 # the binary carries no glibc floor of its own. The operator supplies the
 # runtime; `koios status` reports whether it resolved.
-ort-system = ["ort/pkg-config"]
+ort-system = ["dep:ort", "dep:tokenizers", "ort/pkg-config"]

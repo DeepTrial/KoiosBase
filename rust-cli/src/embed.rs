@@ -24,12 +24,18 @@
 //! stop being comparable across versions.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+#[cfg(any(feature = "ort-download", feature = "ort-system"))]
+use std::sync::Mutex;
+use std::sync::OnceLock;
 
+#[cfg(any(feature = "ort-download", feature = "ort-system"))]
 use ort::environment::{Environment, GlobalThreadPoolOptions};
+#[cfg(any(feature = "ort-download", feature = "ort-system"))]
 use ort::session::{builder::GraphOptimizationLevel, Session};
+#[cfg(any(feature = "ort-download", feature = "ort-system"))]
 use ort::value::Value;
 use rusqlite::Connection;
+#[cfg(any(feature = "ort-download", feature = "ort-system"))]
 use tokenizers::Tokenizer;
 
 /// Where the ONNX weights and tokenizer live inside a vault.
@@ -60,11 +66,14 @@ pub const DIM: usize = 1024;
 ///
 /// Applied to queries only; documents stay bare, matching
 /// sentence-transformers' own config in the upstream repo.
+#[cfg(any(feature = "ort-download", feature = "ort-system"))]
 const QUERY_INSTRUCTION_EN: &str =
     "Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery:";
+#[cfg(any(feature = "ort-download", feature = "ort-system"))]
 const QUERY_INSTRUCTION_ZH: &str = "指令：给定一个问题，检索能够回答该问题的相关段落\n查询：";
 
 /// Pick the instruction matching the query's dominant script.
+#[cfg(any(feature = "ort-download", feature = "ort-system"))]
 fn query_instruction(query: &str) -> &'static str {
     let cjk = query.chars().filter(|c| is_cjk_query(*c)).count();
     let latin = query.chars().filter(|c| c.is_ascii_alphabetic()).count();
@@ -76,6 +85,7 @@ fn query_instruction(query: &str) -> &'static str {
 }
 
 /// CJK ranges, kept local so `embed` does not depend on `retrieval`.
+#[cfg(any(feature = "ort-download", feature = "ort-system"))]
 fn is_cjk_query(c: char) -> bool {
     ('\u{4e00}'..='\u{9fff}').contains(&c) || ('\u{3400}'..='\u{4dbf}').contains(&c)
 }
@@ -92,12 +102,15 @@ fn is_cjk_query(c: char) -> bool {
 /// input, but the authoritative cut is by tokens -- a character count says
 /// nothing about how many tokens a script will produce, and §5.2.1 promises we
 /// never cut mid-block, which a blind character slice can do.
+#[cfg(any(feature = "ort-download", feature = "ort-system"))]
 const MAX_CHARS: usize = 8000;
 
 /// Token window per row. The authoritative truncation limit — see `encode`.
+#[cfg(any(feature = "ort-download", feature = "ort-system"))]
 const MAX_SEQ: usize = 512;
 
 /// Everything about the loaded model that must not change without a re-index.
+#[cfg(any(feature = "ort-download", feature = "ort-system"))]
 struct Embedder {
     env: Environment,
     session: Mutex<Session>,
@@ -106,6 +119,7 @@ struct Embedder {
     eos: u32,
 }
 
+#[cfg(any(feature = "ort-download", feature = "ort-system"))]
 static EMBEDDER: OnceLock<Result<std::sync::Arc<Embedder>, String>> = OnceLock::new();
 static MISSING_REPORTED: OnceLock<()> = OnceLock::new();
 
@@ -179,12 +193,14 @@ pub fn is_ready(vault: &Path) -> bool {
 /// session option, a corrupt file, a missing symbol) surfaced to the user as
 /// "the embedding model is not installed", which sent them hunting for a file
 /// that was there all along. The error text is now what reaches stderr.
+#[cfg(any(feature = "ort-download", feature = "ort-system"))]
 fn embedder(vault: &Path) -> Result<std::sync::Arc<Embedder>, String> {
     EMBEDDER
         .get_or_init(|| load(vault).map(std::sync::Arc::new))
         .clone()
 }
 
+#[cfg(any(feature = "ort-download", feature = "ort-system"))]
 fn load(vault: &Path) -> Result<Embedder, String> {
     let mpath = model_path(vault);
     let tpath = tokenizer_path(vault);
@@ -234,6 +250,7 @@ fn load(vault: &Path) -> Result<Embedder, String> {
 /// Encode one string. `is_query` decides whether the instruction prefix applies.
 ///
 /// Returns a unit vector, or `Err` when the model is unavailable.
+#[cfg(any(feature = "ort-download", feature = "ort-system"))]
 pub fn encode(vault: &Path, text: &str, is_query: bool) -> Result<Vec<f32>, String> {
     let e = embedder(vault).map_err(|err| {
         format!(
@@ -301,6 +318,17 @@ pub fn encode(vault: &Path, text: &str, is_query: bool) -> Result<Vec<f32>, Stri
     Ok(out)
 }
 
+/// Encode stub for the no-ort build. Unreachable in practice --
+/// `is_ready()` is always false here, so both callers (`search_vectors`,
+/// `build_vectors`) return before this -- but the symbol must exist for them
+/// to compile, and if that ever changes the error says why.
+#[cfg(not(any(feature = "ort-download", feature = "ort-system")))]
+pub fn encode(_vault: &Path, _text: &str, _is_query: bool) -> Result<Vec<f32>, String> {
+    Err("this binary was built without ONNX Runtime support; \
+         rebuild with --features ort-system or ort-download"
+        .to_string())
+}
+
 /// Fail unless the embedding model is usable, or the caller opted out.
 ///
 /// This is §5.2.1's "resident dependency, not an optional extra" made real.
@@ -337,7 +365,17 @@ pub fn require(vault: &Path) -> Result<(), String> {
     // Files exist; prove they actually load. Reporting "not installed" for a
     // file that IS installed was the old failure mode, hence the encode path
     // carrying the real reason.
-    embedder(vault).map(|_| ())
+    #[cfg(any(feature = "ort-download", feature = "ort-system"))]
+    {
+        embedder(vault).map(|_| ())
+    }
+    // Unreachable: is_ready() is false in a no-ort build, so the early return
+    // above already fired. The arm exists so the function still has a tail
+    // expression when `embedder` is compiled out.
+    #[cfg(not(any(feature = "ort-download", feature = "ort-system")))]
+    {
+        Err("this binary was built without ONNX Runtime support".to_string())
+    }
 }
 
 /// The sqlite-vec table holding one row per block, keyed by `blocks.id`.
