@@ -79,6 +79,10 @@ pub fn connect(vault: &Path) -> rusqlite::Result<Connection> {
     let dir = vault.join(".index");
     std::fs::create_dir_all(&dir).ok();
     let conn = Connection::open(dir.join("tree.db"))?;
+    // WAL: a long-running MCP reader must never block on (or fail behind) an
+    // in-flight index write; busy_timeout lets short writers wait each other
+    // out instead of erroring immediately.
+    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")?;
     conn.execute_batch(SCHEMA)?;
     migrate(&conn)?;
     Ok(conn)
@@ -1037,7 +1041,51 @@ impl Drop for IndexLock {
     }
 }
 
+/// Incremental-skip token for one file: mtime_ns:size.
+///
+/// Content-hash comparison would require reading and hashing every file on
+/// every run -- which is the work we are trying to skip. mtime+size is the
+/// standard build-system proxy (make/ninja); a same-size rewrite within one
+/// mtime tick is theoretically possible but, for an operator-managed Markdown
+/// vault, far below the cost of re-parsing 25k blocks on every service start.
+fn skip_token(entry: &std::path::Path) -> String {
+    match std::fs::metadata(entry) {
+        Ok(m) => {
+            let mt = m
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            format!("{}:{}", mt, m.len())
+        }
+        Err(_) => String::new(),
+    }
+}
+
+/// Skip tokens persisted from the last run, keyed by doc rel path.
+fn read_skip_tokens(conn: &Connection) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    if let Ok(mut q) = conn.prepare("SELECT key, value FROM meta WHERE key LIKE 'skip:%'") {
+        if let Ok(m) = q.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))) {
+            for r in m.flatten() {
+                out.insert(r.0.trim_start_matches("skip:").to_string(), r.1);
+            }
+        }
+    }
+    out
+}
+
 pub fn cmd_index(path: &Path) -> rusqlite::Result<()> {
+    cmd_index_with(path, false)
+}
+
+/// `full` forces a rebuild of stored vectors and bypasses the incremental
+/// skip. Crucially the destructive half runs AFTER the index lock is held --
+/// the old order dropped vectors first, so a concurrent loser destroyed the
+/// existing index and THEN failed to acquire the lock (reported from the
+/// field on 0.11.7).
+pub fn cmd_index_with(path: &Path, full: bool) -> rusqlite::Result<()> {
     // §15 — one writer at a time.
     //
     // `koios index` rewrites the whole derived index inside a transaction, and
@@ -1055,6 +1103,13 @@ pub fn cmd_index(path: &Path) -> rusqlite::Result<()> {
             )));
         }
     };
+    if full && !crate::embed::allow_lexical() {
+        // Under the lock, by construction -- see cmd_index_with's doc comment.
+        crate::embed::reset_vectors(path)?;
+        // A full rebuild must also forget the incremental-skip tokens.
+        let c0 = connect(path)?;
+        c0.execute("DELETE FROM meta WHERE key LIKE 'skip:%'", [])?;
+    }
     let conn = connect(path)?;
     // Wrap the whole ingest in ONE transaction. Without it every INSERT is its
     // own implicit transaction and fsyncs, which dominated the runtime.
@@ -1062,9 +1117,11 @@ pub fn cmd_index(path: &Path) -> rusqlite::Result<()> {
     // Snapshot BEFORE ingest: afterwards the index already holds the new
     // content, so there is nothing left to diff it against.
     let before_fp = raw_doc_fingerprints(&conn);
-    // links are DERIVED from Markdown (§5.2), so a rebuild must start from an
-    // empty edge set — otherwise deleted wikilinks keep polluting the graph.
-    conn.execute("DELETE FROM links", [])?;
+    // No global `DELETE FROM links` here: incremental reindex must keep the
+    // edges of skipped (unchanged) documents. Coverage instead: each rewritten
+    // doc clears its own edges in write_parsed_doc, deleted docs lose theirs in
+    // purge_document, and structural edges self-clean by kind in
+    // add_structural_edges.
     let mut total = 0usize;
     let mut seen_links: std::collections::HashSet<(String, String, String)> =
         std::collections::HashSet::new();
@@ -1077,6 +1134,11 @@ pub fn cmd_index(path: &Path) -> rusqlite::Result<()> {
     // otherwise re-parse koios.toml for every scanned page.
     let cfg = crate::llm::load(path).unwrap_or_default();
     let mut indexed_raw = false;
+    // Every file seen this run, across both layers; the skip-token sweep after
+    // the loop consults the union (a per-layer sweep would delete the OTHER
+    // layer's tokens -- measured: raw pass deleted wiki tokens and vice
+    // versa, so nothing was ever skipped on the next run).
+    let mut seen_rels: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (layer, dir_name) in [("raw", "raw"), ("wiki", "wiki")] {
         if indexed_raw {
             let (docs, sections_by_doc) = collect_raw_docs(&conn, path)?;
@@ -1109,6 +1171,52 @@ pub fn cmd_index(path: &Path) -> rusqlite::Result<()> {
                 md_files.push((rel, entry));
             }
         }
+        // Incremental skip (raw layer only). A file whose mtime+size matches
+        // the token stored by the last successful run is left untouched: its
+        // blocks, FTS rows, state and edges are already in the DB. Derived
+        // pages (wiki layer) are NOT skipped -- they are rebuilt from the DB
+        // each run, so a changed raw card still refreshes its summary.
+        // --full bypasses this entirely (skip tokens were cleared above).
+        let mut skipped_blocks = 0usize;
+        let mut skipped_rels: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let prev_tokens = if !full {
+            read_skip_tokens(&conn)
+        } else {
+            std::collections::HashMap::new()
+        };
+        let tokens: std::collections::HashMap<String, String> = md_files
+            .iter()
+            .map(|(rel, p)| (rel.clone(), skip_token(p)))
+            .collect();
+        if !prev_tokens.is_empty() {
+            let mut kept: Vec<(String, std::path::PathBuf)> = Vec::new();
+            let mut q = conn.prepare("SELECT count(*) FROM blocks WHERE doc_path=?")?;
+            for (rel, p) in md_files.drain(..) {
+                let tok = tokens.get(&rel).cloned().unwrap_or_default();
+                if prev_tokens.get(&rel).map(|t| t.as_str()) == Some(tok.as_str())
+                    && !tok.is_empty()
+                {
+                    skipped_blocks += q.query_row([&rel], |r| r.get::<_, i64>(0))? as usize;
+                    skipped_rels.insert(rel);
+                    continue;
+                }
+                kept.push((rel, p));
+            }
+            md_files = kept;
+        }
+        // seen_rels must list EVERY live file, not only the ones re-parsed
+        // this run: the token sweep deletes keys absent from it, so draining
+        // skipped files out of the set made every second run delete all
+        // tokens and re-parse everything -- measured fast/slow alternation.
+        for (rel, _) in &md_files {
+            seen_rels.insert(rel.clone());
+        }
+        for rel in &skipped_rels {
+            seen_rels.insert(rel.clone());
+        }
+        for (rel, _) in &pdf_files {
+            seen_rels.insert(rel.clone());
+        }
         let parsed: Vec<ParsedDoc> = {
             use rayon::prelude::*;
             md_files
@@ -1128,7 +1236,16 @@ pub fn cmd_index(path: &Path) -> rusqlite::Result<()> {
             // come straight from the parsed blocks instead of re-SELECTing
             // them one query per file as before.
             ingest::add_wikilink_edges(&conn, &doc.evs, &mut seen_links)?;
+            {
+                if let Some(tok) = tokens.get(&doc.rel) {
+                    conn.execute(
+                        "INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)",
+                        params![format!("skip:{}", doc.rel), tok],
+                    )?;
+                }
+            }
         }
+        total += skipped_blocks;
         for (rel, entry) in pdf_files {
             total += index_pdf(&conn, &rel, &entry, Some(&cfg))?;
         }
@@ -1144,6 +1261,22 @@ pub fn cmd_index(path: &Path) -> rusqlite::Result<()> {
         ingest::resolve_pending_links(&conn)?;
         if layer == "raw" {
             indexed_raw = true;
+        }
+    }
+    // Forget tokens for files that no longer exist, so a resurrected file
+    // with a coincidentally equal token cannot be skipped by mistake. Once,
+    // after both layers, against the union of seen rels.
+    {
+        let mut st = conn.prepare("SELECT key FROM meta WHERE key LIKE 'skip:%'")?;
+        let keys: Vec<String> = st
+            .query_map([], |r| r.get::<_, String>(0))?
+            .flatten()
+            .collect();
+        for k in keys {
+            let rel = k.trim_start_matches("skip:");
+            if !seen_rels.contains(rel) {
+                conn.execute("DELETE FROM meta WHERE key=?", [&k])?;
+            }
         }
     }
     // #2 — declared document state, applied after everything is indexed so it

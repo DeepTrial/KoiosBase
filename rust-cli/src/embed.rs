@@ -518,6 +518,8 @@ CREATE TABLE IF NOT EXISTS vec_src (block_id TEXT PRIMARY KEY, hash TEXT);
 
 /// Create `vec.db` and its tables. Safe to call repeatedly.
 pub fn ensure_vec_db(vault: &Path) -> rusqlite::Result<Connection> {
+    // WAL so a long-running MCP reader never blocks on an in-flight index
+    // write, matching tree.db's connect().
     static INIT: OnceLock<()> = OnceLock::new();
     INIT.get_or_init(|| unsafe {
         // sqlite-vec ships only the C entry point, so register it with SQLite's
@@ -540,6 +542,7 @@ pub fn ensure_vec_db(vault: &Path) -> rusqlite::Result<Connection> {
     let dir = vault.join(".index");
     std::fs::create_dir_all(&dir).ok();
     let conn = Connection::open(dir.join("vec.db"))?;
+    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")?;
     conn.execute_batch(VEC_SCHEMA)?;
     Ok(conn)
 }

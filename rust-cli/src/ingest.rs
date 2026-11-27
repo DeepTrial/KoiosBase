@@ -102,7 +102,25 @@ pub fn wikilinks(raw: &str) -> Vec<String> {
 /// blocks sharing a document. Both are derivable from Markdown structure
 /// alone, so they hold regardless of whether anyone wrote a link.
 pub fn add_structural_edges(conn: &Connection) -> rusqlite::Result<usize> {
+    // Rebuild our own edge kinds only. The global `DELETE FROM links` that used
+    // to precede this in cmd_index is gone (incremental reindex must keep edges
+    // of skipped, unchanged documents), so this function owns its idempotency.
+    conn.execute(
+        "DELETE FROM links WHERE kind IN ('same-section','same-doc')",
+        [],
+    )?;
     let mut n = 0usize;
+    // layer is the only input weight_for_block reads -- one scan instead of
+    // one query per (block, peer) pair, which was ~258k queries on a
+    // 36k-block corpus.
+    let mut layer_of: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    {
+        let mut q = conn.prepare("SELECT id, COALESCE(layer,'raw') FROM blocks")?;
+        let m = q.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        for r in m.flatten() {
+            layer_of.insert(r.0, r.1);
+        }
+    }
     // Same section: the strongest structural signal short of an explicit link.
     let mut stmt = conn.prepare(
         "SELECT section_id, group_concat(id) FROM blocks \
@@ -118,7 +136,7 @@ pub fn add_structural_edges(conn: &Connection) -> rusqlite::Result<usize> {
         .collect();
     for g in groups {
         for a in g.iter() {
-            let w = weight_for_block(conn, a, 0.5);
+            let w = weight_for_layer(layer_of.get(a).map(String::as_str), 0.5);
             for b in g.iter() {
                 if a == b {
                     continue;
@@ -146,7 +164,7 @@ pub fn add_structural_edges(conn: &Connection) -> rusqlite::Result<usize> {
         .collect();
     for g in docs {
         for a in g.iter() {
-            let w = weight_for_block(conn, a, 0.2);
+            let w = weight_for_layer(layer_of.get(a).map(String::as_str), 0.2);
             for b in g.iter() {
                 if a == b {
                     continue;
@@ -177,16 +195,16 @@ pub fn add_structural_edges(conn: &Connection) -> rusqlite::Result<usize> {
 /// section exists to cut returns through the structural edges. So the edge
 /// inherits its source block's confidence: raw documents carry it, draft
 /// derived pages do not.
-fn weight_for_block(conn: &Connection, block_id: &str, base: f64) -> f64 {
-    let conf: String = conn
-        .query_row(
-            "SELECT CASE WHEN COALESCE(layer,'raw')='raw' THEN 'high' ELSE 'draft' END \
-             FROM blocks WHERE id=?",
-            [block_id],
-            |r| r.get(0),
-        )
-        .unwrap_or_else(|_| "draft".to_string());
-    base * crate::compile::edge_weight(&conf)
+/// Weight from the pre-fetched layer map. `weight_for_block` used to run one
+/// SELECT per (block, peer) pair -- quadratic in blocks per document, and the
+/// dominant cost of edge building on large vaults.
+fn weight_for_layer(layer: Option<&str>, base: f64) -> f64 {
+    let conf = if layer == Some("raw") {
+        "high"
+    } else {
+        "draft"
+    };
+    base * crate::compile::edge_weight(conf)
 }
 
 pub fn add_wikilink_edges(
