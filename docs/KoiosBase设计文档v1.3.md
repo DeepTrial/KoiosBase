@@ -974,6 +974,30 @@ glibc 2.35 上直接构建失败或产出起不来的二进制。无 ort 的二�
 
 构建：`cargo build --release --features ort-download`（或 `ort-system`）。
 
+**索引吞吐（v0.11.8）**：索引慢的根源按实测排序——
+(1) `blocks(doc_path)` / `sections(doc_path)` / `links(src,dst)` 无索引：每个文档的
+    派生清理都是全表扫描，N 个文档 O(N²) 行访问。实测 wiki 层写库比 raw 层慢 4 倍，
+    唯一差异就是表更大。已补索引。
+(2) `write_parsed_doc` 里每块一次 `DELETE FROM blocks_fts WHERE id=?`：FTS5 的 id 列
+    无索引，每次空删全扫 FTS（实测每块 ~3ms 纯浪费）；文档级删除早已覆盖，属冗余，已删。
+**分批编码为何按长度分桶而不 padding（实测）**：该 ONNX export 的 attention 不排除
+mask=0 的 pad 位——加 1 个 pad token，hidden state 漂移 ~5% cosine；同文本重复行
+零 padding 的 batch 与逐条编码 cos=1.000 逐位一致。故 `encode_batch` 按 token 长度
+分桶，每桶矩形 [k,len]、全 1 mask，结果与逐条逐位一致（tests/batch_parity.rs 断言
+sum|diff|==0），同时把 N 次 run 降到几十次。多会话并行（每实例 ~650MB 模型）曾考虑，
+worker 数需要在真实多核机上实测后再定，暂不引入。
+
+(3) embedding 逐块串行 encode：N 个改动块 = N 次 session.run 串行 + 单次会话锁，
+    380 核机器上整机闲置。现为分批编码（一批一次 run，按行自身最后真实 token 池化，
+    与逐块结果逐位一致）+ ORT 线程池自适应（原写死 min(4)，现 min(核数,16)）。
+(4) 解析/派生页生成串行 → rayon 并行解析、串行写库（SQLite 单写者不变；
+    par_iter 保序，落库顺序与原串行一致），派生页并行生成。
+批大小、线程数、rayon 池全部按 `available_parallelism()` 自适应，无配置项。
+实测（2 核，3000 文档/36000 块）：12m55s → 1m05s；索引产物逐行一致
+（blocks/sections/links/documents/FTS 比对 PASS）。embedding 同语料 2400 块：
+串行 13m01s → 分桶批处理 8m46s（同线程数，纯 run 开销摊销收益）；ORT 线程
+4→16 的自适应上限在多核机上另有 ~4x/次 run 的收益，本机无法验证。
+
 **更正（v0.11.7）**：本节自 v0.10 起声称「`ort-download` / `ort-system` 均非默认项，
 `cargo build` 得到不含 ONNX Runtime 的词法二进制」。该承诺从未兑现：`ort` 在
 Cargo.toml 中是非可选依赖，**所有构建**（含 v0.11.6 及之前全部 release 资产）都经
