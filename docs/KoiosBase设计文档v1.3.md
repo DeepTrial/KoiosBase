@@ -974,6 +974,16 @@ glibc 2.35 上直接构建失败或产出起不来的二进制。无 ort 的二�
 
 构建：`cargo build --release --features ort-download`（或 `ort-system`）。
 
+**复审修复（v0.11.10）**：未变更重索引 3.2s → **0.16s**（36000 块）。
+- 跳过的文档不再逐文档 `count(*)` 对账（3000 次查询 ≈ 1.7s），改结束时一次 count(*)。
+- 两层都零写入时跳过结构边全量重建（36k 块约 51.6 万边 ≈ 1.65s）与悬挂链接修复。
+- raw 零变更且无派生页缺失时跳过整个 compile（collect_raw_docs 全量读取 ≈ 1.5s）。
+- wikilink 解析收紧：去掉 `section_id LIKE %t%` 子串兜底（实测 `[[卡]]` 扇出 4 条边
+  含自环，PPR 被噪声稀释），改精确标题匹配到文档级扇出；自环边直接丢弃。
+- backup 改 `VACUUM INTO`：WAL 时代逐文件复制在活跃 MCP/索引下是撕裂快照。
+- purge 改按 500 块一批的 IN 删除（原 4N 条语句）。
+- PDF 纳入 mtime+size 增量跳过；links 增 kind 索引。
+
 **增量重索引与并发（v0.11.9，来自 25k 块生产 vault 的实测报告）**：
 - 未变更重索引：mtime+size 跳过 token（meta 表 `skip:<rel>`），实测 36000 块
   43.7s → 3.2s 稳定（0.11.7 为 ~13 分钟）。派生页内容相同则不重写（保住 mtime），
