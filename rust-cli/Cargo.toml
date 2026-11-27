@@ -1,6 +1,6 @@
 [package]
 name = "koios"
-version = "0.11.7"
+version = "0.11.8"
 edition = "2021"
 # LICENSE NOTE (deliberate, reviewed 2026-10-02):
 # KoiosBase itself is MIT (see /LICENSE), but the PDF tier links MuPDF via the
@@ -43,6 +43,9 @@ serde = { version = "1.0.229", features = ["derive"] }
 ort = { version = "2.0.0-rc.15", optional = true }
 tokenizers = { version = "0.21", optional = true }
 sqlite-vec = "0.1.9"
+# Parallel parse phase of `index`. rayon's global pool sizes itself to the
+# machine (available_parallelism), which is the whole point: no config knob.
+rayon = "1"
 # Only for restoring SIGPIPE's platform default (see main::install_sigpipe_default)
 # and for undoing it in spawned model children (see llm::run_command).
 # Unix-only so the Windows release target does not link it.

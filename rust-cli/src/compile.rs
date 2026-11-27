@@ -487,58 +487,67 @@ pub fn write_source_pages(
     stamp: &str,
     sections_by_doc: &HashMap<String, Vec<(String, String)>>, // title, section_id
 ) -> std::io::Result<usize> {
+    use rayon::prelude::*;
     let out_dir = vault.join("wiki").join("sources");
     std::fs::create_dir_all(&out_dir)?;
-    let mut n = 0;
-    for (rel, title, blocks) in docs {
-        if blocks.is_empty() {
-            continue;
-        }
-        let name = Path::new(rel)
-            .file_stem()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| rel.clone());
-        let summary = build_summary(blocks, 280);
-        let secs = sections_by_doc.get(rel).cloned().unwrap_or_default();
-        let questions: Vec<String> = secs
-            .iter()
-            .filter(|(t, _)| !t.starts_with("__") && !t.starts_with("p."))
-            .take(5)
-            .map(|(t, sid)| format!("- 关于「{t}」，本文档有哪些说明？ ({sid})"))
-            .collect();
-        let questions = if questions.is_empty() {
-            blocks
+    // One page per document, built independently -- the old serial loop was
+    // pure string building plus one file write per doc, so it parallelises
+    // across cores cleanly (rayon sizes its pool to the machine; no config
+    // knob). A failed write still aborts the pass, as before.
+    let results: Vec<std::io::Result<()>> = docs
+        .par_iter()
+        .filter(|(_, _, blocks)| !blocks.is_empty())
+        .map(|(rel, title, blocks)| {
+            let name = Path::new(rel)
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| rel.clone());
+            let summary = build_summary(blocks, 280);
+            let secs = sections_by_doc.get(rel).cloned().unwrap_or_default();
+            let questions: Vec<String> = secs
                 .iter()
+                .filter(|(t, _)| !t.starts_with("__") && !t.starts_with("p."))
                 .take(5)
-                .map(|b| {
-                    let last = b.breadcrumb.split(" > ").last().unwrap_or("").to_string();
-                    // Python appends the block id — a question with no address
-                    // cannot be traced back to the evidence it came from, which
-                    // is the whole point of §4.3 navigation pages.
-                    format!("- 关于「{last}」，有哪些内容？ ({})", b.id)
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
-        } else {
-            questions.join("\n")
-        };
-        let sections = if secs.is_empty() {
-            "- (无显式标题)".to_string()
-        } else {
-            secs.iter()
-                .filter(|(t, _)| !t.starts_with("__"))
-                .map(|(t, sid)| format!("- {t} (`{sid}`)"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        };
-        let page = SOURCE_TEMPLATE
-            .replace("{title}", title)
-            .replace("{rel}", rel)
-            .replace("{stamp}", stamp)
-            .replace("{summary}", &summary)
-            .replace("{questions}", &questions)
-            .replace("{sections}", &sections);
-        std::fs::write(out_dir.join(format!("{name}.md")), page)?;
+                .map(|(t, sid)| format!("- 关于「{t}」，本文档有哪些说明？ ({sid})"))
+                .collect();
+            let questions = if questions.is_empty() {
+                blocks
+                    .iter()
+                    .take(5)
+                    .map(|b| {
+                        let last = b.breadcrumb.split(" > ").last().unwrap_or("").to_string();
+                        // Python appends the block id — a question with no address
+                        // cannot be traced back to the evidence it came from, which
+                        // is the whole point of §4.3 navigation pages.
+                        format!("- 关于「{last}」，有哪些内容？ ({})", b.id)
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            } else {
+                questions.join("\n")
+            };
+            let sections = if secs.is_empty() {
+                "- (无显式标题)".to_string()
+            } else {
+                secs.iter()
+                    .filter(|(t, _)| !t.starts_with("__"))
+                    .map(|(t, sid)| format!("- {t} (`{sid}`)"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
+            let page = SOURCE_TEMPLATE
+                .replace("{title}", title)
+                .replace("{rel}", rel)
+                .replace("{stamp}", stamp)
+                .replace("{summary}", &summary)
+                .replace("{questions}", &questions)
+                .replace("{sections}", &sections);
+            std::fs::write(out_dir.join(format!("{name}.md")), page)
+        })
+        .collect();
+    let mut n = 0;
+    for r in results {
+        r?;
         n += 1;
     }
     Ok(n)

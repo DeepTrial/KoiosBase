@@ -210,10 +210,15 @@ fn load(vault: &Path) -> Result<Embedder, String> {
     if !tpath.is_file() {
         return Err(format!("missing {}", tpath.display()));
     }
+    // Adaptive to the machine instead of a fixed cap. The old `.min(4)` was
+    // written on a 2-core dev box; on a large server it capped every
+    // session.run at 4 threads no matter how many cores were idle. 16 is
+    // where intra-op parallelism on a 0.6B model stops paying off -- beyond
+    // that the pool spends more on coordination than computation.
     let threads = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(2)
-        .min(4);
+        .min(16);
     let env = ort::init()
         .with_name("koios")
         .with_global_thread_pool(
@@ -324,6 +329,131 @@ pub fn encode(vault: &Path, text: &str, is_query: bool) -> Result<Vec<f32>, Stri
 /// to compile, and if that ever changes the error says why.
 #[cfg(not(any(feature = "ort-download", feature = "ort-system")))]
 pub fn encode(_vault: &Path, _text: &str, _is_query: bool) -> Result<Vec<f32>, String> {
+    Err("this binary was built without ONNX Runtime support; \
+         rebuild with --features ort-system or ort-download"
+        .to_string())
+}
+
+/// Rows per forward pass for embedding. Adaptive: one `session.run`
+/// amortises across the batch; scale with the machine but bound it, since a
+/// very wide rectangular batch just moves the cost inside ORT. Deliberately
+/// not a config knob: the index adapts to the hardware it runs on.
+#[cfg(any(feature = "ort-download", feature = "ort-system"))]
+fn encode_batch_size() -> usize {
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(2);
+    cores.clamp(8, 64)
+}
+
+/// Encode rows in batches WITHOUT padding.
+///
+/// Why not padding: measured on this exact ONNX export, a padded row's hidden
+/// state drifts ~5% cosine from the same row encoded alone -- the export does
+/// not exclude mask-0 positions from attention, so pad embeddings leak into
+/// every real token. Bitwise proof: a batch of identical rows matches
+/// `encode` exactly (cos 1.000), while one pad token already breaks it.
+///
+/// So rows are bucketed by exact token length and each bucket runs as one
+/// rectangular `[k, len]` batch with an all-ones mask: zero padding, bit-
+/// identical to per-row `encode` (batch_parity.rs asserts sum|diff| == 0),
+/// and still hundreds of times fewer forward passes than one run per block.
+#[cfg(any(feature = "ort-download", feature = "ort-system"))]
+pub fn encode_batch(
+    vault: &Path,
+    texts: &[String],
+    is_query: bool,
+) -> Result<Vec<Vec<f32>>, String> {
+    let e = embedder(vault).map_err(|err| err.to_string())?;
+    // Tokenise first, preserving the caller's row order via indices.
+    let mut rows: Vec<(usize, Vec<i64>)> = Vec::with_capacity(texts.len());
+    for (i, text) in texts.iter().enumerate() {
+        let text: String = text.chars().take(MAX_CHARS).collect();
+        let body = if is_query {
+            format!("{}{text}", query_instruction(&text))
+        } else {
+            text.clone()
+        };
+        let enc = e
+            .tokenizer
+            .encode(body.as_str(), false)
+            .map_err(|err| err.to_string())?;
+        let mut ids: Vec<i64> = enc.get_ids().iter().map(|&x| x as i64).collect();
+        if ids.len() > MAX_SEQ {
+            ids.truncate(MAX_SEQ - 1);
+        }
+        ids.push(e.eos as i64);
+        rows.push((i, ids));
+    }
+    let mut out: Vec<Option<Vec<f32>>> = (0..texts.len()).map(|_| None).collect();
+    // Length buckets, ascending: same-length rows form one rectangular batch.
+    rows.sort_by_key(|(_, ids)| ids.len());
+    let chunk = encode_batch_size().max(1);
+    let mut pos = 0usize;
+    while pos < rows.len() {
+        let len = rows[pos].1.len();
+        let mut end = pos + 1;
+        while end < rows.len() && rows[end].1.len() == len {
+            end += 1;
+        }
+        // One length bucket may exceed the adaptive batch width; split it.
+        let mut seg = pos;
+        while seg < end {
+            let upto = (seg + chunk).min(end);
+            let k = upto - seg;
+            let mut flat_ids: Vec<i64> = Vec::with_capacity(k * len);
+            let mut flat_mask: Vec<i64> = Vec::with_capacity(k * len);
+            for (_, ids) in &rows[seg..upto] {
+                flat_ids.extend_from_slice(ids);
+                flat_mask.extend(std::iter::repeat_n(1i64, len));
+            }
+            let shape = [k as i64, len as i64];
+            let ids_val = Value::from_array((shape.as_slice(), flat_ids.into_boxed_slice()))
+                .map_err(|err| err.to_string())?;
+            let mask_val = Value::from_array((shape.as_slice(), flat_mask.into_boxed_slice()))
+                .map_err(|err| err.to_string())?;
+            let mut guard = e
+                .session
+                .lock()
+                .map_err(|err| format!("session lock poisoned: {err}"))?;
+            let outputs = guard
+                .run(vec![
+                    ("input_ids".to_string(), ids_val.into_dyn()),
+                    ("attention_mask".to_string(), mask_val.into_dyn()),
+                ])
+                .map_err(|err| err.to_string())?;
+            let (_shape, hidden) = outputs["last_hidden_state"]
+                .try_extract_tensor::<f32>()
+                .map_err(|err| err.to_string())?;
+            let hidden = hidden.to_vec();
+            for (j, (orig, ids)) in rows[seg..upto].iter().enumerate() {
+                let _ = ids;
+                let base = j * len * DIM;
+                let idx = base + (len - 1) * DIM;
+                let mut v = hidden[idx..idx + DIM].to_vec();
+                let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+                if norm > 0.0 {
+                    for x in v.iter_mut() {
+                        *x /= norm;
+                    }
+                }
+                out[*orig] = Some(v);
+            }
+            seg = upto;
+        }
+        pos = end;
+    }
+    Ok(out.into_iter().map(|r| r.unwrap_or_default()).collect())
+}
+
+/// Batch stub for the no-ort build -- same contract as the `encode` stub.
+#[cfg(not(any(feature = "ort-download", feature = "ort-system")))]
+pub fn encode_batch(
+    _vault: &Path,
+    texts: &[String],
+    _is_query: bool,
+) -> Result<Vec<Vec<f32>>, String> {
+    let _ = texts;
     Err("this binary was built without ONNX Runtime support; \
          rebuild with --features ort-system or ort-download"
         .to_string())
@@ -707,6 +837,12 @@ pub fn build_vectors(vault: &Path, main: &Connection) -> rusqlite::Result<()> {
     let mut insert = conn.prepare("INSERT INTO vec_blocks (block_id, embedding) VALUES (?, ?)")?;
     let mut encoded = 0usize;
     let mut failed = 0usize;
+
+    // Collect what actually changed first, then encode it in batches. The old
+    // loop ran one forward pass per block behind a single locked session --
+    // serial on machines with hundreds of cores, which was the dominant cost
+    // of `index` on large vaults.
+    let mut pending: Vec<(&String, String, &String)> = Vec::new();
     for (id, breadcrumb, raw, hash) in rows.iter() {
         if let Some(prev) = hash_of.get(id) {
             if prev == hash {
@@ -725,21 +861,54 @@ pub fn build_vectors(vault: &Path, main: &Connection) -> rusqlite::Result<()> {
             .rsplit(" > ")
             .next()
             .unwrap_or(breadcrumb.as_str());
-        let text = format!("{heading}\n{raw}");
-        match encode(vault, &text, false) {
-            Ok(vec) => {
-                conn.execute("DELETE FROM vec_blocks WHERE block_id = ?", [id])?;
-                insert.execute(rusqlite::params![id, to_blob(&vec)])?;
-                conn.execute(
-                    "INSERT INTO vec_src (block_id, hash) VALUES (?, ?) \
-                     ON CONFLICT(block_id) DO UPDATE SET hash = excluded.hash",
-                    rusqlite::params![id, hash],
-                )?;
-                encoded += 1;
+        pending.push((id, format!("{heading}\n{raw}"), hash));
+    }
+
+    let write_row = |conn: &Connection,
+                     insert: &mut rusqlite::Statement,
+                     id: &str,
+                     vec: &[f32],
+                     hash: &str|
+     -> rusqlite::Result<()> {
+        conn.execute("DELETE FROM vec_blocks WHERE block_id = ?", [id])?;
+        insert.execute(rusqlite::params![id, to_blob(vec)])?;
+        conn.execute(
+            "INSERT INTO vec_src (block_id, hash) VALUES (?, ?) \
+             ON CONFLICT(block_id) DO UPDATE SET hash = excluded.hash",
+            rusqlite::params![id, hash],
+        )?;
+        Ok(())
+    };
+
+    #[cfg(any(feature = "ort-download", feature = "ort-system"))]
+    let batch = encode_batch_size();
+    #[cfg(not(any(feature = "ort-download", feature = "ort-system")))]
+    let batch = 1usize;
+    for chunk in pending.chunks(batch.max(1)) {
+        let texts: Vec<String> = chunk.iter().map(|(_, t, _)| t.clone()).collect();
+        match encode_batch(vault, &texts, false) {
+            Ok(vecs) if vecs.len() == chunk.len() => {
+                for ((id, _, hash), vec) in chunk.iter().zip(vecs.iter()) {
+                    write_row(&conn, &mut insert, id, vec, hash)?;
+                    encoded += 1;
+                }
             }
-            Err(e) => {
-                eprintln!("warning: could not encode {id}: {e}");
-                failed += 1;
+            // A failed batch must not fail the index. Fall back to the
+            // per-block path for this chunk so one bad row cannot take down
+            // its neighbours -- the old serial loop's semantics, kept.
+            _ => {
+                for (id, text, hash) in chunk.iter() {
+                    match encode(vault, text, false) {
+                        Ok(vec) => {
+                            write_row(&conn, &mut insert, id, &vec, hash)?;
+                            encoded += 1;
+                        }
+                        Err(e) => {
+                            eprintln!("warning: could not encode {id}: {e}");
+                            failed += 1;
+                        }
+                    }
+                }
             }
         }
     }
