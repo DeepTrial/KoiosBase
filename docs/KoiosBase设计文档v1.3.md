@@ -974,6 +974,21 @@ glibc 2.35 上直接构建失败或产出起不来的二进制。无 ort 的二�
 
 构建：`cargo build --release --features ort-download`（或 `ort-system`）。
 
+**增量重索引与并发（v0.11.9，来自 25k 块生产 vault 的实测报告）**：
+- 未变更重索引：mtime+size 跳过 token（meta 表 `skip:<rel>`），实测 36000 块
+  43.7s → 3.2s 稳定（0.11.7 为 ~13 分钟）。派生页内容相同则不重写（保住 mtime），
+  wiki 层同样跳过。--full 清空 token 强制全量。注意 sweep 必须在两层结束后对
+  全量文件集合执行一次——按层各自清理曾互相删除对方 token（实测快慢交替）。
+- `--full` 顺序修复：0.11.7 在拿锁**之前**就丢弃向量，并发争锁的败方会先破坏
+  现有索引再失败。现在 drop 在锁内。
+- WAL：`tree.db`/`vec.db` 均开启 WAL + busy_timeout=5000，MCP 读进程不再阻塞于
+  索引写事务。
+- 锁：`.index/index.lock` 记录 pid，持有者死亡（SIGKILL 残留）由下一次启动检测到
+  后回收；持有者**仍存活**（如 supervisor 只杀父进程）时拒绝让位是正确行为——
+  supervisor 应按进程组终止。
+- 边构建去重：结构性边（same-section/same-doc）自建自清，weight 从每对一次查询
+  改为一次全表预取（51.6 万边曾对应 ~25.8 万次查询）。
+
 **索引吞吐（v0.11.8）**：索引慢的根源按实测排序——
 (1) `blocks(doc_path)` / `sections(doc_path)` / `links(src,dst)` 无索引：每个文档的
     派生清理都是全表扫描，N 个文档 O(N²) 行访问。实测 wiki 层写库比 raw 层慢 4 倍，
