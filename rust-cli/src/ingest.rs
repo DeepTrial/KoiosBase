@@ -238,6 +238,11 @@ pub fn add_wikilink_edges(
                 continue;
             }
             for dst in targets {
+                // A card linking to itself adds nothing to the graph (the
+                // substring fallback made these common); skip self-edges.
+                if dst.split('#').next() == b.id.split('#').next() {
+                    continue;
+                }
                 let key = (b.id.clone(), dst.clone(), "wikilink".to_string());
                 if seen.contains(&key) {
                     continue;
@@ -304,20 +309,32 @@ fn resolve_link(conn: &Connection, target: &str) -> Vec<String> {
         }
     }
     if out.is_empty() {
-        // Fall back to a section whose heading matches the target, or a
-        // document whose first heading does (which is how a card is usually
-        // named in Chinese: `[[目标卡]]` refers to `# 目标卡`).
-        let mut stmt = match conn.prepare(
-            "SELECT b.id FROM blocks b JOIN sections s ON b.section_id = s.id \
-             WHERE s.title = ? OR s.id LIKE ? ORDER BY b.ordinal",
-        ) {
-            Ok(s) => s,
-            Err(_) => return Vec::new(),
-        };
-        let pat = format!("%{t}%");
-        let rows = stmt.query_map(params![t, pat], |r| r.get::<_, String>(0));
-        if let Ok(rows) = rows {
-            out = rows.flatten().collect();
+        // Fall back to a section heading that matches the target EXACTLY
+        // (which is how a card is usually named in Chinese: `[[目标卡]]`
+        // refers to `# 目标卡`). A substring fallback (`s.id LIKE %t%`) was
+        // measured to fan `[[卡]]` out to every card whose title merely
+        // contains the character -- four edges including a self-loop -- which
+        // dilutes PPR with noise links. Resolved via the DOCUMENT: a card's
+        // title heading contains no blocks of its own, so the link must fan
+        // out to that document's blocks.
+        let mut doc_paths: Vec<String> = Vec::new();
+        if let Ok(mut stmt) = conn.prepare("SELECT DISTINCT doc_path FROM sections WHERE title = ?")
+        {
+            if let Ok(rows) = stmt.query_map(params![t], |r| r.get::<_, String>(0)) {
+                doc_paths = rows.flatten().collect();
+            }
+        }
+        for dp in doc_paths {
+            if let Ok(mut stmt) =
+                conn.prepare("SELECT id FROM blocks WHERE doc_path=? ORDER BY ordinal")
+            {
+                if let Ok(rows) = stmt.query_map([&dp], |r| r.get::<_, String>(0)) {
+                    out.extend(rows.flatten());
+                }
+            }
+            if !out.is_empty() {
+                break;
+            }
         }
     }
     out

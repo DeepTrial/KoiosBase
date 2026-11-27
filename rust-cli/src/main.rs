@@ -256,7 +256,22 @@ fn cmd_backup(path: &Path, out: &Path) -> Result<(), Box<dyn std::error::Error>>
     }
     let idx = path.join(".index");
     if idx.exists() {
-        files += copy_dir(&idx, &root.join(".index"))?;
+        // VACUUM INTO, not file copy: with WAL (v0.11.9+) a plain copy during
+        // an active MCP/index process is a torn snapshot, and even idle it
+        // must drag -wal/-shm along. VACUUM INTO is SQLite's own
+        // online-consistent snapshot, one file per database.
+        let dst_idx = root.join(".index");
+        std::fs::create_dir_all(&dst_idx)?;
+        for name in ["tree.db", "vec.db"] {
+            let src_db = idx.join(name);
+            if !src_db.exists() {
+                continue;
+            }
+            let dst_db = dst_idx.join(name);
+            let conn = rusqlite::Connection::open(&src_db)?;
+            conn.execute_batch(&format!("VACUUM INTO '{}'", dst_db.display()))?;
+            files += 1;
+        }
     }
     let cfg = path.join("koios.toml");
     if cfg.is_file() {
